@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          enable-cache: true
+
+      - name: Validate tag and project version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          project_version="$(uv version --short)"
+          test "$version" = "$project_version"
+
+      - name: Build exact release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          uv build --wheel --out-dir dist
+          uv export --frozen --no-dev --no-emit-project --no-header \
+            --format requirements.txt \
+            --output-file "dist/ricky-${version}-constraints.txt"
+          uv run python scripts/build_release_descriptor.py \
+            --version "$version" \
+            --wheel "dist/ricky-${version}-py3-none-any.whl" \
+            --constraints "dist/ricky-${version}-constraints.txt" \
+            --output "dist/ricky-${version}-release.json" \
+            --source-generation 1 \
+            --target-generation 1 \
+            --python-requirement ">=3.12" \
+            --minimum-uv-version "0.6.0"
+
+      - name: Publish tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/ricky-${version}-py3-none-any.whl" \
+            "dist/ricky-${version}-constraints.txt" \
+            "dist/ricky-${version}-release.json" \
+            --verify-tag \
+            --generate-notes \
+            --title "Ricky ${version}"

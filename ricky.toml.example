@@ -1,0 +1,551 @@
+# Ricky configuration reference.
+# Run `ricky init` to generate the minimal live configuration. Do not copy this
+# complete reference over that scaffold unless you intend to enable and review
+# every section it contains.
+#
+# Secrets do NOT belong here. Put each credential in the owning profile's
+# <user_data_dir>/profiles/<name>/.secrets.toml.
+# Every value below is optional; omit to use the built-in default.
+
+# User-global assistant data is distinct from the repo-local .ricky/. The XDG
+# bootstrap pointer is the sole persisted authority for user_data_dir, so this
+# file cannot set or redirect it.
+project_data_dir = ".ricky"
+
+# Root scalar defaults must appear before the first TOML table. Profile files
+# can override these agent-environment defaults for their owning profile.
+user_timezone = "America/Chicago"
+default_provider = "openrouter"
+max_turn_iterations = 50
+context_char_limit = 1000000
+request_timeout_seconds = 120.0
+shell_timeout_seconds = 120.0
+
+# `ricky init` generates `default = "shared"` and `enabled = ["shared"]`.
+# This complete reference deliberately demonstrates a later multi-profile
+# configuration. Every runtime includes shared. Add per-profile configuration
+# under <user_data_dir>/profiles/<name>/ricky.toml.
+[profiles]
+default = "personal"
+enabled = ["shared", "personal", "work"]
+
+[profiles.definitions.shared]
+description = "Information and capabilities intentionally available everywhere."
+routing_hints = ["General preferences and cross-profile resources"]
+
+[profiles.definitions.personal]
+description = "Personal life, household, and individual accounts."
+routing_hints = ["Family, home, health, hobbies, and personal administration"]
+default_provider = "openrouter"
+allowed_providers = ["openrouter", "anthropic", "claude_code"]
+
+[profiles.definitions.personal.default_models]
+openrouter = "openai/gpt-5.6-luna"
+
+[profiles.definitions.work]
+description = "Employer and professional context."
+routing_hints = ["Company, clients, colleagues, and professional projects"]
+default_provider = "claude_code"
+allowed_providers = ["claude_code"]
+
+[profiles.definitions.work.default_models]
+claude_code = "sonnet"
+
+# Deterministic canonical-request estimation and capacity policy. Add exact
+# [[context.models]] records locally when a provider catalog is unavailable.
+[context]
+chars_per_token = 4.0
+response_reserve_tokens = 8192
+safety_margin_tokens = 1024
+
+# Session media remains reference-only in conversation state. The latest two
+# images that fit all request ceilings are projected into provider requests.
+[context.media]
+session_byte_limit = 25000000
+request_image_limit = 2
+request_image_byte_limit = 10000000
+request_image_pixel_limit = 8000000
+default_image_token_estimate = 8192
+
+# An exact model record may override the default estimate used for each image:
+# [[context.models]]
+# provider = "openrouter"
+# model = "provider/image-capable-model"
+# context_window_tokens = 200000
+# image_token_estimate = 4096
+
+# Lossless storage for large text returned by tools. Stored artifact bodies are
+# excluded from model-input accounting; only the deterministic excerpt and
+# reference are sent back to the model.
+[context.tool_results]
+enabled = true
+offload_threshold_chars = 12000
+inline_excerpt_chars = 8000
+head_fraction = 0.7
+artifact_max_chars = 2000000
+session_artifact_max_chars = 20000000
+read_chunk_chars = 12000
+
+# User-triggered semantic compaction. The selected old prefix is summarized by
+# one tool-free request while a recent complete-turn tail remains verbatim.
+[context.compaction]
+enabled = true
+keep_recent_tokens = 16000
+max_summary_tokens = 4096
+max_focus_chars = 2000
+max_summary_chars = 24000
+
+# Provider-specific non-secret defaults.
+[providers.openrouter]
+default_model = "openai/gpt-5.6-luna"
+
+[providers.anthropic]
+default_model = "claude-sonnet-5"
+default_max_tokens = 8192
+
+[providers.claude_code]
+default_model = "sonnet"
+cli_path = "claude"
+resume_sessions = true
+
+# Profile-scoped, Ricky-owned browser control. Chromium is never downloaded at
+# startup; install the locked build explicitly with `ricky browser install`.
+[browser]
+enabled = false
+browser_kind = "chromium"
+# Interactive sessions are headed by default so browser activity stays visible.
+headless = false
+# Binary state is relative to user_data_dir. Session state paths are relative to
+# the owning profile directory. Ephemeral state is removed when its runtime closes.
+binary_dir = "browser/browsers"
+ephemeral_dir = "browser/ephemeral"
+persistent_dir = "browser/persistent"
+lease_dir = "browser/leases"
+download_dir = "downloads/browser"
+navigation_timeout_seconds = 30.0
+operation_timeout_seconds = 10.0
+attachment_timeout_seconds = 10.0
+max_sessions = 1
+max_pages = 8
+snapshot_depth = 20
+snapshot_char_limit = 20000
+upload_count_limit = 10
+upload_file_byte_limit = 20000000
+upload_total_byte_limit = 50000000
+download_file_byte_limit = 50000000
+visual_candidate_limit = 100
+screenshot_width_limit = 2000
+screenshot_height_limit = 2000
+screenshot_pixel_limit = 4000000
+screenshot_file_byte_limit = 5000000
+max_redirects = 10
+# Private and special network destinations are blocked unless their exact
+# origin appears here. Entries cannot contain a path, query, fragment, or credentials.
+allowed_private_origins = []
+
+# Background browser ownership is a separate, disabled-by-default trust
+# boundary. These owner switches and budgets are hard ceilings; an ad hoc
+# execution still needs an exact contract, guardrail, authority grant, and (for
+# a commit) a live transaction approval. Background uploads accept only exact
+# digest-pinned durable-task artifacts. Named jobs can use only read access.
+[browser.background]
+enabled = false
+read_enabled = false
+interaction_enabled = false
+protected_values_enabled = false
+commit_enabled = false
+allow_ephemeral = false
+allow_public_https_research = false
+
+[browser.background.budget]
+session_starts = 1
+navigations = 40
+scrolls = 100
+created_pages = 8
+controlled_pages = 8
+semantic_observations = 50
+visual_observations = 10
+interactions = 50
+protected_materializations = 10
+uploads = 10
+upload_bytes = 50000000
+downloads = 10
+download_bytes = 100000000
+transaction_commits = 3
+parked_browsers = 1
+approval_ttl_seconds = 900
+
+# Profile-local encrypted agent-usable values. This is separate from API keys
+# and other infrastructure credentials in profile .secrets.toml files.
+[protected_values]
+enabled = false
+dir = "protected-values"
+sqlite_busy_timeout_ms = 5000
+catalog_limit = 100
+audit_limit = 500
+prompt_timeout_seconds = 120.0
+# These parameters are persisted with each new or rotated passphrase slot.
+argon2_iterations = 3
+argon2_lanes = 4
+argon2_memory_kib = 65536
+
+# Browser resources are non-secret and belong in the owning profile's ricky.toml,
+# not in this installation file or .secrets.toml. Example:
+#
+#   # <user_data_dir>/profiles/personal/ricky.toml
+#   [browser]
+#   # Screenshots are denied by default. This is a standing provider-level
+#   # disclosure allowance, not a per-capture prompt or a model capability check.
+#   screenshot_allowed_providers = ["openrouter"]
+#
+#   [browser.resources.ricky-personal]
+#   kind = "persistent"
+#   description = "Ricky-owned personal browser profile"
+#   headless = false
+#
+#   [browser.resources.local-debug]
+#   kind = "cdp"
+#   description = "Dedicated local Chromium debugging instance"
+#   endpoint = "http://127.0.0.1:9222"
+
+# Guided workflows (project bundles under .ricky/workflows/; user bundles under
+# <user_data_dir>/profiles/<name>/workflows/).
+[workflow]
+enabled = true
+# Load-time ceiling on one instruction, instruction file, or template.
+instruction_char_limit = 8000
+# Bounded DAG execution and persistence limits.
+max_parallel_steps = 4
+max_parallel_items = 4
+max_binding_chars = 120000
+max_result_chars = 120000
+max_schema_depth = 12
+max_foreach_items = 100
+model_attempts = 2
+agent_iterations = 20
+run_dir = "workflow-runs"
+
+# Persistent profile-owned memory limits.
+[memory]
+enabled = true
+index_char_limit = 8000
+recall_char_limit = 12000
+recall_note_limit = 10
+note_body_char_limit = 8000
+
+# Cross-session responsibility and coordination records.
+[durable_tasks]
+dir = "tasks"
+lease_seconds = 900
+search_limit = 50
+activity_limit = 50
+artifact_read_char_limit = 50000
+artifact_write_char_limit = 200000
+artifact_file_byte_limit = 20000000
+artifact_list_byte_limit = 50000000
+artifact_list_limit = 500
+sqlite_busy_timeout_ms = 5000
+
+# Persistent conversations. The database and per-session artifacts live below
+# user_data_dir; each resumed message owns one bounded fenced turn.
+[sessions]
+store_path = "sessions/sessions.sqlite3"
+sqlite_busy_timeout_ms = 5000
+lease_seconds = 300
+turn_wall_seconds = 300.0
+turn_retention = 1000
+
+# Platform-neutral durable notifications. Static routes map a logical name to
+# one configured transport account and destination. Transport credentials stay
+# in <user_data_dir>/profiles/<name>/.secrets.toml. Add
+# [messaging.transports.<name>] and
+# [messaging.routes.<logical-name>] tables when a transport adapter is enabled.
+#
+[messaging]
+store_path = "notifications/notifications.sqlite3"
+sqlite_busy_timeout_ms = 5000
+lease_seconds = 60
+delivery_attempt_limit = 3
+title_char_limit = 200
+body_char_limit = 8000
+attachment_dir = "notifications/attachments"
+attachment_count_limit = 10
+attachment_file_byte_limit = 20000000
+attachment_total_byte_limit = 50000000
+agent_routes = []
+
+# Define Telegram's non-secret account boundary in the owning profile's
+# ricky.toml. Put only bot_token in the matching profile .secrets.toml:
+#
+#   # <user_data_dir>/profiles/personal/ricky.toml
+#   [messaging.telegram_accounts.bot]
+#   api_base_url = "https://api.telegram.org"
+#   long_poll_timeout_seconds = 30
+#   allowed_sender_ids = ["8926054105"]
+#   allowed_destination_ids = ["8926054105"]
+#   max_inbound_text_length = 8000
+#   enabled = true
+#
+# The installation-wide transport below references the account by owner and local name.
+[messaging.transports.telegram-personal]
+type = "telegram"
+account = "personal/bot"
+
+[messaging.routes.owner]
+transport = "telegram-personal"
+destination = "8926054105"
+owner_profile = "personal"
+accepted_profiles = ["shared", "personal"]
+
+# Persistent foreground gateway. A route reuses the matching logical messaging
+# route name and pins model, profile scope, and project policy. Agent-class capability policy
+# controls which installed capabilities are eligible for foreground use and ad
+# hoc background contracts.
+[gateway]
+enabled = true
+store_path = "gateway/gateway.sqlite3"
+sqlite_busy_timeout_ms = 5000
+concurrency = 4
+inbox_poll_seconds = 0.25
+maintenance_seconds = 30.0
+recent_activity_limit = 10
+activity_char_limit = 12000
+operator_route = "owner"
+# Host-local single-instance lock. One running gateway owns one
+# user_data_dir. This is not distributed leader election.
+lock_path = "gateway/gateway.lock"
+# Run the deterministic startup recovery sweep before any loop starts.
+startup_recovery = true
+recent_error_limit = 20
+
+# Bounded pruning of finished, unreferenced evidence. Disabled by default;
+# material deletion always requires an explicit `--apply` command. Retention
+# never considers an open, queued, leased, uncertain, or in-doubt record.
+[gateway.retention]
+enabled = false
+min_age_seconds = 604800.0
+inbound_messages = 5000
+turn_results = 5000
+archived_conversations = 500
+execution_requests = 1000
+notifications = 5000
+health_errors = 200
+log_byte_limit = 10000000
+log_file_limit = 5
+
+# Managed `systemd --user` unit generation. Ricky writes one marked unit and
+# never places a secret on the command line.
+[gateway.service]
+unit_name = "ricky-gateway.service"
+# unit_dir = "~/.config/systemd/user" # optional; defaults to the XDG user unit directory
+description = "Ricky foreground gateway"
+restart_seconds = 5.0
+start_timeout_seconds = 60.0
+stop_timeout_seconds = 60.0
+log_dir = "logs"
+
+# Standing capability eligibility only. Empty lists mean every installed
+# capability is eligible for deterministic selection; they do not inject every
+# resource into a session. Confirmation and guardrail lists require live,
+# authenticated evidence and never contain task-specific guardrail values.
+[agents.gateway_foreground]
+exclude_capabilities = []
+confirmation_required_capabilities = []
+guardrail_required_capabilities = []
+
+[agents.ad_hoc_background]
+exclude_capabilities = []
+confirmation_required_capabilities = ["builtin.email.mutate", "builtin.browser.commit"]
+guardrail_required_capabilities = [
+  "builtin.browser.read",
+  "builtin.browser.interact",
+  "builtin.protected_value.use",
+  "builtin.browser.commit",
+]
+
+[agents.ad_hoc_background.execution]
+wall_clock_seconds = 700.0
+iterations = 50
+max_completion_tokens_per_request = 4096
+effect_calls = 5
+
+[gateway.routes.owner]
+provider = "openrouter"
+model = "openai/gpt-5.6-terra"
+primary_profile = "personal"
+access_profiles = []
+project_root = "."
+exclude_capabilities = []
+confirmation_required_capabilities = []
+guardrail_required_capabilities = []
+
+# Bounded, manually launched ephemeral agent jobs.
+[jobs]
+spec_dir = "jobs"
+run_dir = "agent-runs"
+transcript_retention = 100
+sqlite_busy_timeout_ms = 5000
+candidate_limit = 100
+history_summary_limit = 10
+batch_retention = 100
+source_item_text_limit = 12000
+
+# Durable fire-and-report execution requests. Ad hoc requests pin complete
+# immutable version-2 or browser-bearing version-3 contracts.
+[executions]
+store_path = "executions/executions.sqlite3"
+contract_snapshot_dir = "executions/contracts"
+draft_ttl_seconds = 3600.0
+confirmation_ttl_seconds = 900.0
+source_snapshot_chars = 2000
+claim_seconds = 120.0
+heartbeat_seconds = 30.0
+concurrency = 2
+poll_seconds = 2.0
+result_text_limit = 4000
+retention = 1000
+sqlite_busy_timeout_ms = 5000
+
+# Task-scoped delegated authority. An authenticated foreground
+# instruction can authorize a background agent to complete one bounded external
+# action. The model only proposes; deterministic code issues, narrows, rejects,
+# expires, and revokes the grant. This table is the owner ceiling: nothing below
+# it can be widened by a prompt, a tool, or an execution contract.
+#
+# Disabled by default. To enable, set enabled = true, list the exact
+# authenticated principals that may delegate ("<transport>:<account>:<sender>"),
+# and enable each delegable capability explicitly. Authority ceilings intersect
+# across every accessible profile; the strictest value wins. store_path and
+# sqlite_busy_timeout_ms remain installation-owned and cannot be redirected by
+# a profile.
+[authority]
+enabled = false
+store_path = "authority/authority.sqlite3"
+sqlite_busy_timeout_ms = 5000
+# Exact authenticated senders permitted to delegate. Nothing else can source a grant.
+allowed_principals = []
+default_ttl_seconds = 3600.0
+max_ttl_seconds = 86400.0
+# Hard ceiling on external effect calls any single grant may authorize.
+max_effect_calls = 50
+source_snapshot_chars = 2000
+
+# One ceiling per real delegable capability. A capability with no table here is
+# never delegable regardless of what a contract selects.
+
+[authority.capabilities.browser_interact]
+enabled = false
+max_effect_calls = 50
+max_ttl_seconds = 3600.0
+allowed_profiles = ["personal"]
+
+[authority.capabilities.protected_value_use]
+enabled = false
+max_effect_calls = 10
+max_ttl_seconds = 3600.0
+allowed_profiles = ["personal"]
+
+[authority.capabilities.browser_commit]
+enabled = false
+max_effect_calls = 3
+max_ttl_seconds = 3600.0
+# Minor currency units; 25000 means USD 250.00.
+max_financial_limit_minor = 25000
+currency = "USD"
+allowed_profiles = ["personal"]
+
+# Managed cron adapter operational limits. Schedule definitions themselves are
+# user data in <user_data_dir>/schedules.toml, not dynamic application config.
+[schedules]
+launcher_log_byte_limit = 1000000
+
+# Public Web search. Put brave_search_api_key in the owning profile's
+# <user_data_dir>/profiles/<name>/.secrets.toml.
+[web_search]
+provider = "brave"
+country = "US"
+search_language = "en"
+request_timeout_seconds = 30.0
+read_retry_limit = 1
+max_retry_delay_seconds = 2.0
+# Reserved for a future Web download tool. Web search itself writes no files.
+download_dir = "downloads/web"
+
+[web_search.efforts.quick]
+candidate_count = 5
+source_limit = 3
+context_token_limit = 2048
+snippet_limit = 8
+tokens_per_source = 1024
+snippets_per_source = 3
+result_char_limit = 6000
+relevance_mode = "strict"
+
+[web_search.efforts.standard]
+candidate_count = 15
+source_limit = 6
+context_token_limit = 4096
+snippet_limit = 18
+tokens_per_source = 1536
+snippets_per_source = 5
+result_char_limit = 9500
+relevance_mode = "balanced"
+
+[web_search.efforts.deep]
+candidate_count = 30
+source_limit = 10
+context_token_limit = 8192
+snippet_limit = 36
+tokens_per_source = 2048
+snippets_per_source = 6
+result_char_limit = 11500
+relevance_mode = "balanced"
+
+[web_search.providers.brave]
+api_base_url = "https://api.search.brave.com"
+
+# Slack integration. Put slack_user_token in the owning profile's
+# <user_data_dir>/profiles/<name>/.secrets.toml.
+[slack]
+download_dir = "downloads/slack"
+default_history_limit = 30
+# Unread probe bounds. Slack only reports unread counts directly for DMs;
+# channels and group DMs are counted from history, so the count saturates at
+# unread_probe_limit and the fan-out stops after unread_max_conversations.
+unread_probe_limit = 50
+unread_max_conversations = 200
+attachment_count_limit = 10
+attachment_file_byte_limit = 20000000
+attachment_total_byte_limit = 50000000
+
+# Shared Google OAuth mechanics. Define each named account in the owning
+# profile's ricky.toml, and put its matching OAuth client in that profile's
+# .secrets.toml. Runtime account ids are qualified as <profile>/<account>:
+#
+#   # <user_data_dir>/profiles/personal/ricky.toml
+#   [google.accounts.home]
+#   email = "you@example.com"
+[google]
+auth_base_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+userinfo_url = "https://openidconnect.googleapis.com/v1/userinfo"
+# Refresh tokens are written below the owning profile root (mode 0600).
+token_store_path = "google/tokens.json"
+auth_callback_timeout_seconds = 120.0
+
+# Gmail integration.
+[gmail]
+download_dir = "downloads/gmail"
+default_list_limit = 25
+body_char_limit = 20000
+attachment_count_limit = 10
+attachment_file_byte_limit = 20000000
+attachment_total_byte_limit = 20000000
+api_base_url = "https://gmail.googleapis.com"
+
+# Google Calendar integration.
+[gcal]
+api_base_url = "https://www.googleapis.com/calendar/v3"
+default_list_limit = 25
+default_window_days = 7
+description_char_limit = 20000

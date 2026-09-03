@@ -1,0 +1,82 @@
+[fixtures.search]
+output = { account = "work/work", messages = [
+  { id = "m-response", thread_id = "t-response", from_addr = "person@example.com", subject = "Please reply" },
+  { id = "m-attention", thread_id = "t-attention", from_addr = "ops@example.com", subject = "Contract needs decision" },
+  { id = "m-inform", thread_id = "t-inform", from_addr = "news@example.com", subject = "Status update" },
+  { id = "m-ignore", thread_id = "t-ignore", from_addr = "noise@example.com", subject = "Noise" },
+], truncated = false }
+
+[fixtures.'process/"m-response"/read']
+output = { account = "work/work", thread = { id = "t-response", messages = [] } }
+
+[fixtures.'process/"m-response"/classify']
+output = { category = "action", action_type = "reply", thread_id = "t-response", message_id = "m-response", from_addr = "person@example.com", subject = "Please reply", summary = "A reply is needed.", should_remember = false }
+
+[fixtures.'process/"m-response"/gather-context']
+output = { notes = "Prior context: person@example.com prefers short confirmations.", recalled_slugs = ["example-contact"] }
+
+[fixtures.'process/"m-response"/draft-response']
+output = { to = ["person@example.com"], body = "Thanks. I will take care of this.", reply_to_id = "m-response" }
+
+[fixtures.'process/"m-response"/plan-memory']
+output = { should_write = true, reason = "New durable contact preference from the thread.", title = "Example Contact", type = "person", summary = "Prefers short confirmation emails.", body = "person@example.com prefers short confirmation emails when closing loops.", profile = "work", slug = "example-contact", tags = ["email", "contact"], related = [], source = "gmail:work/work:t-response" }
+
+[fixtures.'process/"m-attention"/read']
+output = { account = "work/work", thread = { id = "t-attention", messages = [] } }
+
+[fixtures.'process/"m-attention"/classify']
+output = { category = "action", action_type = "needs_attention", thread_id = "t-attention", message_id = "m-attention", from_addr = "ops@example.com", subject = "Contract needs decision", summary = "Vendor contract decision is due Friday after legal review.", should_remember = true }
+
+[fixtures.'process/"m-attention"/gather-context']
+output = { notes = "Vendor Acme is on the Q3 procurement track.", recalled_slugs = ["acme-vendor"] }
+
+[fixtures.'process/"m-attention"/plan-attention']
+output = { title = "Decide Acme vendor contract", proposed_action = "Review legal notes and approve or reject the Acme contract before Friday.", context = "Ops flagged the Acme vendor contract. Legal already reviewed; decision needed by Friday. No email reply is required yet." }
+
+[fixtures.'process/"m-attention"/plan-memory']
+output = { should_write = false, reason = "Decision deadline is already tracked; no new durable fact beyond the open task." }
+
+[fixtures.'process/"m-inform"/read']
+output = { account = "work/work", thread = { id = "t-inform", messages = [] } }
+
+[fixtures.'process/"m-inform"/classify']
+output = { category = "inform", action_type = "none", thread_id = "t-inform", message_id = "m-inform", from_addr = "news@example.com", subject = "Status update", summary = "The project is on schedule.", should_remember = false }
+
+[fixtures.'process/"m-inform"/gather-context']
+output = { notes = "No durable notes changed by this status ping.", recalled_slugs = [] }
+
+[fixtures.'process/"m-inform"/information']
+output = { text = "The project is on schedule." }
+
+[fixtures.'process/"m-inform"/plan-memory']
+output = { should_write = false, reason = "Transient status update already covered by project tracking; no new durable fact." }
+
+[fixtures.'process/"m-ignore"/read']
+output = { account = "work/work", thread = { id = "t-ignore", messages = [] } }
+
+[fixtures.'process/"m-ignore"/classify']
+output = { category = "ignore", action_type = "none", thread_id = "t-ignore", message_id = "m-ignore", from_addr = "noise@example.com", subject = "Noise", summary = "No action is needed.", should_remember = false }
+
+[fixtures.'process/"m-ignore"/plan-memory']
+output = { should_write = false, reason = "Ignore-category noise; no durable fact." }
+
+[fixtures.compose-summary]
+output = { text = """# Email triage summary
+
+**Bottom line:** 1 reply parked for review, 1 needs-attention parked, 1 FYI marked read, 1 thread trashed, 1 memory write planned.
+
+## Actions
+- Reply draft parked for review (task_0000) to person@example.com re: Please reply — confirms you'll take care of it. Nothing sent yet.
+- Needs attention parked for review (task_0001) re: Contract needs decision — decide Acme vendor contract by Friday.
+
+## Needs attention / FYI
+- Status update from news@example.com — project is on schedule.
+
+## Deleted
+- Noise from noise@example.com
+
+## Memory
+- Create/update work/example-contact — durable contact preference from the reply thread.
+- Skipped memory for attention Contract needs decision — open task already covers it.
+- Skipped memory for inform Status update — transient status only.
+""" }

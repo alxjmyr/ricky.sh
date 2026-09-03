@@ -1,0 +1,58 @@
+# Slack app manifest for Ricky.
+#
+# Ricky acts AS THE USER: every scope below is a *user token scope* (xoxp),
+# not a bot scope. If applying to an existing app, only oauth_config.scopes.user
+# matters — merge it into the app's manifest (api.slack.com/apps → your app →
+# "App Manifest") or add the scopes by hand under OAuth & Permissions →
+# Scopes → **User Token Scopes** (not Bot Token Scopes), then reinstall.
+#
+# After install, copy the "User OAuth Token" (starts with xoxp-) into the
+# owning profile's `.secrets.toml` as `slack_user_token`. Never commit it.
+# Reinstalling to add scopes issues a NEW token; update the profile secret at
+# the same time because the old token stops working.
+#
+# Caution on the *:write scopes: Slack does not scope them to
+# conversations.mark alone. They also permit joining, leaving, archiving,
+# renaming, and closing conversations. Ricky implements only mark-as-read and
+# the DM-open used by slack_send_message; the extra reach is Slack's
+# granularity, not Ricky's intent. `channels:write` and `groups:write` are used
+# only by mark-as-read. `im:write` and `mpim:write` also support opening DMs and
+# group DMs, so removing them can prevent sends that need conversation lookup.
+
+display_information:
+  name: Ricky
+  description: Personal agent assistant — reads and sends Slack as its user.
+  background_color: "#2b2d31"
+
+oauth_config:
+  scopes:
+    user:
+      - search:read        # slack_search (search.messages is user-token-only)
+      - channels:read      # public channel directory (conversations.list)
+      - groups:read        # private channel directory
+      - im:read            # DM directory
+      - mpim:read          # group-DM directory
+      - channels:history   # read public channel messages + threads
+      - groups:history     # read private channel messages + threads
+      - im:history         # read DM messages + threads
+      - mpim:history       # read group-DM messages + threads
+      - users:read         # user directory (name -> ID resolution, mentions)
+      - users:read.email   # allow slack_find_user lookup by email
+      - chat:write         # slack_send_message (posts as the user)
+      - files:read         # attachment metadata + authenticated download
+      - files:write        # slack_send_message local-file attachments
+      # --- Optional read-state support -----------------------------------
+      # conversations.info (unread counts + last_read) needs no extra scope;
+      # the *:read and *:history scopes above already cover it. The four
+      # scopes below are required only by conversations.mark, i.e. by
+      # slack_mark_read. Slack scopes conversations.mark per conversation
+      # type, so all four are needed to mark any conversation read.
+      - channels:write     # slack_mark_read in public channels
+      - groups:write       # slack_mark_read in private channels
+      - im:write           # slack_mark_read in DMs
+      - mpim:write         # slack_mark_read in group DMs
+
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

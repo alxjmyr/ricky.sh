@@ -1,0 +1,18 @@
+# Secret Stuff
+.env*
+.secrets.toml
+.gmail-credentials.json
+.gmail-token.pickle
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.pyright/

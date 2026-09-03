@@ -1,0 +1,404 @@
+version = 2
+name = "email-triage"
+description = "Triage Gmail threads through typed review and explicit effects."
+max_parallel_steps = 4
+
+[args.account]
+type = "string"
+description = "Exact profile-qualified Google account id from the accessible resource catalog, such as personal/personal or work/work."
+
+[args.limit]
+type = "integer"
+description = "Maximum messages to inspect."
+default = 25
+min = 1
+max = 50
+
+[args.query]
+type = "string"
+description = "Gmail search query."
+default = "is:unread in:inbox"
+min_length = 1
+
+[schemas.classification]
+type = "object"
+required = [
+  "category",
+  "action_type",
+  "thread_id",
+  "message_id",
+  "from_addr",
+  "subject",
+  "summary",
+  "should_remember",
+]
+
+[schemas.classification.properties.category]
+type = "string"
+values = ["action", "inform", "ignore"]
+
+[schemas.classification.properties.action_type]
+type = "string"
+values = ["reply", "needs_attention", "none"]
+
+[schemas.classification.properties.thread_id]
+type = "string"
+
+[schemas.classification.properties.message_id]
+type = "string"
+
+[schemas.classification.properties.from_addr]
+type = "string"
+
+[schemas.classification.properties.subject]
+type = "string"
+
+[schemas.classification.properties.summary]
+type = "string"
+
+[schemas.classification.properties.should_remember]
+type = "boolean"
+
+[schemas.response-draft]
+type = "object"
+required = ["to", "body", "reply_to_id"]
+
+[schemas.response-draft.properties.to]
+type = "array"
+items = { type = "string" }
+
+[schemas.response-draft.properties.body]
+type = "string"
+min_length = 1
+
+[schemas.response-draft.properties.reply_to_id]
+type = "string"
+min_length = 1
+
+[schemas.attention-plan]
+type = "object"
+required = ["title", "proposed_action", "context"]
+
+[schemas.attention-plan.properties.title]
+type = "string"
+min_length = 1
+max_length = 200
+
+[schemas.attention-plan.properties.proposed_action]
+type = "string"
+min_length = 1
+
+[schemas.attention-plan.properties.context]
+type = "string"
+min_length = 1
+
+[schemas.information]
+type = "object"
+required = ["text"]
+
+[schemas.information.properties.text]
+type = "string"
+min_length = 1
+
+[schemas.memory-context]
+type = "object"
+required = ["notes", "recalled_slugs"]
+
+[schemas.memory-context.properties.notes]
+type = "string"
+
+[schemas.memory-context.properties.recalled_slugs]
+type = "array"
+items = { type = "string" }
+
+[schemas.memory-plan]
+type = "object"
+required = ["should_write", "reason"]
+
+[schemas.memory-plan.properties.should_write]
+type = "boolean"
+
+[schemas.memory-plan.properties.reason]
+type = "string"
+min_length = 1
+max_length = 500
+
+[schemas.memory-plan.properties.title]
+type = "string"
+min_length = 1
+
+[schemas.memory-plan.properties.type]
+type = "string"
+values = ["person", "org", "account", "project", "topic"]
+
+[schemas.memory-plan.properties.summary]
+type = "string"
+min_length = 1
+max_length = 300
+
+[schemas.memory-plan.properties.body]
+type = "string"
+min_length = 1
+
+[schemas.memory-plan.properties.profile]
+type = "string"
+values = ["shared", "personal", "work"]
+
+[schemas.memory-plan.properties.slug]
+type = "string"
+nullable = true
+max_length = 64
+
+[schemas.memory-plan.properties.tags]
+type = "array"
+items = { type = "string" }
+
+[schemas.memory-plan.properties.related]
+type = "array"
+items = { type = "string", max_length = 64 }
+
+[schemas.memory-plan.properties.source]
+type = "string"
+nullable = true
+
+[schemas.triage-summary]
+type = "object"
+required = ["text"]
+
+[schemas.triage-summary.properties.text]
+type = "string"
+min_length = 1
+
+[[steps]]
+id = "search"
+kind = "tool"
+tool = "gmail_search"
+args = { account = { ref = "trigger.account" }, query = { ref = "trigger.query" }, max_results = { ref = "trigger.limit" } }
+
+[[steps]]
+id = "process"
+kind = "foreach"
+needs = ["search"]
+collection = { ref = "steps.search.output.messages" }
+item_key = { ref = "item.source.id" }
+outputs = { classification = { ref = "item.steps.classify.output" }, draft = { ref = "item.steps.draft-response.output" }, reply_parked = { ref = "item.steps.park-reply.output" }, attention = { ref = "item.steps.plan-attention.output" }, attention_parked = { ref = "item.steps.park-attention.output" }, information = { ref = "item.steps.information.output" }, context = { ref = "item.steps.gather-context.output" }, memory = { ref = "item.steps.plan-memory.output" } }
+on_item_error = "collect"
+
+  [[steps.body]]
+  id = "read"
+  kind = "tool"
+  tool = "gmail_read_thread"
+  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.source.thread_id" } }
+
+  [[steps.body]]
+  id = "classify"
+  kind = "model"
+  needs = ["read"]
+  instruction = """Classify this Gmail thread for Alex.
+
+Categories:
+- action: Alex must reply, act, decide, or follow up. Set action_type to reply when an email reply should be sent in this thread. Set action_type to needs_attention when the work is non-reply (do something elsewhere, decide, calendar, wait on a third party, complete a form/task outside email, etc.).
+- inform: relevant material FYI Alex should know; no parked work required.
+- ignore: no attention needed (irrelevant cold outreach, promotions, newsletters, Nextdoor, pure noise). Set action_type to none.
+
+For inform and ignore, action_type must be none. For action, action_type must be reply or needs_attention.
+
+Preserve the supplied message and thread identity (thread_id, message_id, from_addr, subject). Write a concise summary of why the classification applies. should_remember is a hint only; downstream memory planning decides writes. Do not draft a reply. Return only the declared JSON object."""
+  inputs = { message = { ref = "item.source" }, thread = { ref = "item.steps.read.output.thread" } }
+  result_schema = "classification"
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "mark-action-read"
+  kind = "tool"
+  needs = ["classify"]
+  when = { ref = "item.steps.classify.output.category", equals = "action" }
+  tool = "gmail_modify_labels"
+  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" }, remove_labels = ["UNREAD"] }
+
+  [[steps.body]]
+  id = "gather-context"
+  kind = "agent"
+  needs = ["classify"]
+  when = { ref = "item.steps.classify.output.category", in = ["action", "inform"] }
+  instruction = "Recall durable memory notes that improve reply drafting, attention planning, or learning from this thread. Search with recall using people, companies, projects, commitments, and open loops from the classification and thread. Prefer a few high-signal notes over broad dumps. Summarize only facts that should influence a response, proposed action, or lasting memory. If nothing useful is found, return empty notes and an empty slug list. Return only the declared JSON object."
+  inputs = { classification = { ref = "item.steps.classify.output" }, message = { ref = "item.source" }, thread = { ref = "item.steps.read.output.thread" }, account = { ref = "trigger.account" } }
+  result_schema = "memory-context"
+  tools = ["recall"]
+  max_iterations = 8
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "draft-response"
+  kind = "model"
+  needs = ["gather-context"]
+  when = { ref = "item.steps.classify.output.action_type", equals = "reply" }
+  instruction = "Draft a concise response to this Gmail thread using the recalled memory context and the full thread. Match Alex's external style: direct, factually accurate, on-topic, no fluff. Return the recipient list, reply body, and source message id for the reply. Return only the declared JSON object."
+  inputs = { classification = { ref = "item.steps.classify.output" }, thread = { ref = "item.steps.read.output.thread" }, memory_context = { ref = "item.steps.gather-context.output" } }
+  result_schema = "response-draft"
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "park-reply"
+  kind = "tool"
+  needs = ["draft-response"]
+  when = { ref = "item.steps.classify.output.action_type", equals = "reply" }
+  tool = "park_for_review"
+  args = { title = { format = "Send reply: {subject}", values = { subject = { ref = "item.steps.classify.output.subject" } } }, objective = { format = "Review, edit, and send the drafted reply to {from_addr} about \"{subject}\". Ricky drafted it during email triage and did not send it.", values = { from_addr = { ref = "item.steps.classify.output.from_addr" }, subject = { ref = "item.steps.classify.output.subject" } } }, closure_criteria = "The reply is sent, or Alex decides no reply is needed, and the thread needs no further action.", current_summary = { format = "Reply draft parked for review. {summary}", values = { summary = { ref = "item.steps.classify.output.summary" } } }, next_action = "User with Ricky: read draft.md and context.md, edit the draft as needed, send it, then complete this task.", dedupe_key = { format = "gmail:{account}:{thread_id}:reply", values = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" } } }, tags = ["email-review", "source:gmail", "action:reply"], artifacts = [
+    { path = "draft.md", content = { ref = "item.steps.draft-response.output.body" } },
+    { path = "context.md", content = { format = """# Reply context
+
+- account: {account}
+- thread_id: {thread_id}
+- reply_to_message_id: {reply_to_id}
+- to: {to}
+- from: {from_addr}
+- subject: {subject}
+
+## Thread summary
+
+{summary}
+
+## Recalled memory notes
+
+{notes}
+""", values = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" }, reply_to_id = { ref = "item.steps.draft-response.output.reply_to_id" }, to = { ref = "item.steps.draft-response.output.to" }, from_addr = { ref = "item.steps.classify.output.from_addr" }, subject = { ref = "item.steps.classify.output.subject" }, summary = { ref = "item.steps.classify.output.summary" }, notes = { ref = "item.steps.gather-context.output.notes" } } } },
+  ] }
+
+  [[steps.body]]
+  id = "plan-attention"
+  kind = "model"
+  needs = ["gather-context"]
+  when = { ref = "item.steps.classify.output.action_type", equals = "needs_attention" }
+  instruction = """Create a parked attention package for this Gmail thread. title should be short and task-like. proposed_action should tell Alex the concrete next move (not an email reply draft). context should include the key facts from the thread and why it matters, plus useful memory notes. Do not draft an email. Return only the declared JSON object."""
+  inputs = { classification = { ref = "item.steps.classify.output" }, thread = { ref = "item.steps.read.output.thread" }, memory_context = { ref = "item.steps.gather-context.output" } }
+  result_schema = "attention-plan"
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "park-attention"
+  kind = "tool"
+  needs = ["plan-attention"]
+  when = { ref = "item.steps.classify.output.action_type", equals = "needs_attention" }
+  tool = "park_for_review"
+  args = { title = { ref = "item.steps.plan-attention.output.title" }, objective = { format = "Review the proposed follow-up from email triage for \"{subject}\" from {from_addr} and complete or dismiss the work.", values = { subject = { ref = "item.steps.classify.output.subject" }, from_addr = { ref = "item.steps.classify.output.from_addr" } } }, closure_criteria = "Alex has handled or explicitly dismissed the follow-up, and no further triage action is needed on this thread.", current_summary = { format = "Needs attention parked for review. {summary}", values = { summary = { ref = "item.steps.classify.output.summary" } } }, next_action = "User with Ricky: read proposed-action.md and context.md, do or adjust the follow-up, then complete this task.", dedupe_key = { format = "gmail:{account}:{thread_id}:attention", values = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" } } }, tags = ["email-review", "source:gmail", "action:needs-attention"], artifacts = [
+    { path = "proposed-action.md", content = { ref = "item.steps.plan-attention.output.proposed_action" } },
+    { path = "context.md", content = { format = """# Email attention context
+
+- account: {account}
+- thread_id: {thread_id}
+- message_id: {message_id}
+- from: {from_addr}
+- subject: {subject}
+
+## Classification summary
+
+{summary}
+
+## Additional context
+
+{context}
+
+## Recalled memory notes
+
+{notes}
+""", values = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" }, message_id = { ref = "item.steps.classify.output.message_id" }, from_addr = { ref = "item.steps.classify.output.from_addr" }, subject = { ref = "item.steps.classify.output.subject" }, summary = { ref = "item.steps.classify.output.summary" }, context = { ref = "item.steps.plan-attention.output.context" }, notes = { ref = "item.steps.gather-context.output.notes" } } } },
+  ] }
+
+  [[steps.body]]
+  id = "information"
+  kind = "model"
+  needs = ["gather-context"]
+  when = { ref = "item.steps.classify.output.category", equals = "inform" }
+  instruction = "Write one concise information note from this Gmail classification and thread. Use recalled memory only when it clarifies why the note matters. Do not draft a reply. Return only the declared JSON object."
+  inputs = { classification = { ref = "item.steps.classify.output" }, thread = { ref = "item.steps.read.output.thread" }, memory_context = { ref = "item.steps.gather-context.output" } }
+  result_schema = "information"
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "plan-memory"
+  kind = "model"
+  needs = ["gather-context"]
+  instruction = """Evaluate whether this thread should create or update durable memory. For category ignore, almost always set should_write false. For action/inform, write only when the thread adds lasting value: stable identity or contact facts; relationship or role context; material commitments, decisions, or deadlines; project/account state Alex would want later; or corrections to an existing note. Do not write for one-off logistics, pure noise, transient FYIs, or facts already captured unchanged in recalled notes. If an existing note should change, set should_write true and return a full merged replacement (title, type, summary, body, profile, slug, tags, related, source) — never a partial patch. Preserve the owning profile of an existing recalled note. For a new note, choose an accessible profile from the source account and context: the account owner's profile for account-derived facts, or shared only for facts intentionally useful in every Ricky context. Set source to a short Gmail reference using account and thread id. Memory context may be null when gather-context was skipped (ignore path). If nothing rises to the bar, set should_write false and explain in reason; omit note fields.
+
+Slug format: slugs and every related entry must be BARE slugs only — all lowercase starting with a letter or digit, then letters, digits, and hyphens, max 64 chars (regex ^[a-z0-9][a-z0-9-]{0,63}$). Do NOT prefix a slug with a profile (no "personal/", "work/", "shared/") and do NOT copy the qualified catalog form like "personal/cody-ashburn". Related must reference existing notes by their bare slug (e.g. cody-ashburn). To update an existing note that you recalled, reuse its bare slug and profile. For a new note, invent a short lowercase hyphenated bare slug (e.g. values-map-exercise). Return only the declared JSON object."""
+  inputs = { classification = { ref = "item.steps.classify.output" }, thread = { ref = "item.steps.read.output.thread" }, memory_context = { ref = "item.steps.gather-context.output" }, account = { ref = "trigger.account" } }
+  result_schema = "memory-plan"
+  on_error = "continue"
+  retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+  [[steps.body]]
+  id = "write-memory"
+  kind = "tool"
+  needs = ["plan-memory"]
+  when = { ref = "item.steps.plan-memory.output.should_write", is_true = true }
+  tool = "remember"
+  expose_output = false
+  args = { title = { ref = "item.steps.plan-memory.output.title" }, type = { ref = "item.steps.plan-memory.output.type" }, summary = { ref = "item.steps.plan-memory.output.summary" }, body = { ref = "item.steps.plan-memory.output.body" }, profile = { ref = "item.steps.plan-memory.output.profile" }, slug = { ref = "item.steps.plan-memory.output.slug" }, tags = { ref = "item.steps.plan-memory.output.tags" }, related = { ref = "item.steps.plan-memory.output.related" }, source = { ref = "item.steps.plan-memory.output.source" } }
+
+[[steps]]
+id = "partition"
+kind = "data"
+needs = ["process"]
+operator = "partition"
+args = { items = { ref = "steps.process.output" }, path = "output.classification.category", categories = { action = "action", inform = "inform", ignore = "ignore" } }
+
+[[steps]]
+id = "mark-inform-read"
+kind = "foreach"
+needs = ["partition"]
+collection = { ref = "steps.partition.output.buckets.inform" }
+item_key = { ref = "item.source.key" }
+outputs = { mark_read = { ref = "item.steps.mark-inform.output" } }
+on_item_error = "collect"
+
+  [[steps.body]]
+  id = "mark-inform"
+  kind = "tool"
+  tool = "gmail_modify_labels"
+  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.source.output.classification.thread_id" }, remove_labels = ["UNREAD"] }
+
+[[steps]]
+id = "trash-ignore"
+kind = "foreach"
+needs = ["partition"]
+collection = { ref = "steps.partition.output.buckets.ignore" }
+item_key = { ref = "item.source.key" }
+outputs = { trash = { ref = "item.steps.trash.output" } }
+on_item_error = "collect"
+
+  [[steps.body]]
+  id = "trash"
+  kind = "tool"
+  tool = "gmail_trash"
+  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.source.output.classification.thread_id" } }
+
+[[steps]]
+id = "compose-summary"
+kind = "model"
+needs = ["process", "mark-inform-read", "trash-ignore"]
+dependency_policy = "terminal"
+instruction = """Write a concise triage review for Alex. Lead with the bottom line, then sections:
+
+1) Actions — reply drafts and needs-attention tasks parked for review. Include durable task id when present, recipient/from, subject, action type (reply vs needs_attention), and a one-line gist. Nothing was sent, so never say or imply a reply went out. Note action items whose draft/plan or parking failed.
+2) Needs attention / FYI — inform items he should know, using their information notes.
+3) Deleted — ignore items moved to Trash (subject + from).
+4) Memory — which notes were planned for create/update (profile/title or slug, one-line why), and which action/inform threads were evaluated and skipped for memory.
+
+Use only the supplied run data. Do not invent sends, deletes, or memory writes. If a section is empty, say so briefly. Return only the declared JSON object with markdown-friendly plain text."""
+inputs = { account = { ref = "trigger.account" }, query = { ref = "trigger.query" }, processed = { ref = "steps.process.output" }, partition = { ref = "steps.partition.output" }, informs_marked = { ref = "steps.mark-inform-read.output" }, trashed = { ref = "steps.trash-ignore.output" } }
+result_schema = "triage-summary"
+on_error = "continue"
+retry = { max_attempts = 2, on = ["invalid_output", "provider_error"] }
+
+[[steps]]
+id = "summary"
+kind = "message"
+needs = ["compose-summary"]
+dependency_policy = "terminal"
+message = { ref = "steps.compose-summary.output.text" }
