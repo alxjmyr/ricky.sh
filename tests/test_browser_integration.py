@@ -61,9 +61,16 @@ from ricky.tools import ToolContext
 pytestmark = pytest.mark.browser_integration
 
 # Capture the operator-selected installation root before the autouse test fixture
-# replaces RICKY_USER_DATA_DIR with an isolated temporary directory.
-_CAPTURED_USER_DATA_DIR = os.environ.get("RICKY_USER_DATA_DIR", "~/.ricky")
-_CAPTURED_BINARY_DIR = os.environ.get("RICKY_BROWSER_TEST_BINARY_DIR")
+# replaces RICKY_USER_DATA_DIR and HOME with isolated temporary directories.
+_CAPTURED_USER_DATA_DIR = Path(
+    os.environ.get("RICKY_USER_DATA_DIR", "~/.ricky")
+).expanduser().resolve()
+_BINARY_DIR_OVERRIDE = os.environ.get("RICKY_BROWSER_TEST_BINARY_DIR")
+_CAPTURED_BINARY_DIR = (
+    Path(_BINARY_DIR_OVERRIDE).expanduser().resolve()
+    if _BINARY_DIR_OVERRIDE is not None
+    else _CAPTURED_USER_DATA_DIR / "browser" / "browsers"
+)
 
 
 @dataclass(frozen=True)
@@ -527,13 +534,8 @@ async def _wait_for_process_exit(pid: int) -> None:
 
 @pytest.fixture
 async def installed_browser() -> _InstalledBrowser:
-    if _CAPTURED_BINARY_DIR is None:
-        lookup_root = Path(_CAPTURED_USER_DATA_DIR).expanduser().resolve()
-        binary_dir = "browser/browsers"
-    else:
-        selected = Path(_CAPTURED_BINARY_DIR).expanduser().resolve()
-        lookup_root = selected.parent
-        binary_dir = selected.name
+    lookup_root = _CAPTURED_BINARY_DIR.parent
+    binary_dir = _CAPTURED_BINARY_DIR.name
     lookup_settings = RickySettings.model_validate(
         {"user_data_dir": str(lookup_root), "browser": {"binary_dir": binary_dir}}
     )
