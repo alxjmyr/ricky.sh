@@ -232,3 +232,31 @@ async def test_reopening_a_loosened_store_restores_private_modes(tmp_path: Path)
             assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
     finally:
         holder.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="private store modes are POSIX file modes")
+async def test_reopening_tolerates_a_disappearing_sqlite_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, settings = await _store(tmp_path)
+    store.root.chmod(0o755)
+    store.db_path.chmod(0o644)
+    real_chmod = os.chmod
+    real_is_file = Path.is_file
+
+    def sidecar_was_present(path: Path) -> bool:
+        return str(path).endswith("-wal") or real_is_file(path)
+
+    def disappearing_sidecar(path: os.PathLike[str] | str, mode: int) -> None:
+        if str(path).endswith("-wal"):
+            raise FileNotFoundError(path)
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(Path, "is_file", sidecar_was_present)
+    monkeypatch.setattr(os, "chmod", disappearing_sidecar)
+
+    await SessionStore(settings).initialize()
+
+    assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600

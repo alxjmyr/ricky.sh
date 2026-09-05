@@ -6,7 +6,7 @@ import asyncio
 import os
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -329,8 +329,11 @@ class MessagingStore:
         # evidence, so every open re-asserts the private modes instead of
         # trusting the creation path.
         os.chmod(self.root, 0o700)
-        for path in (self.db_path, Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm")):
-            if path.is_file():
+        os.chmod(self.db_path, 0o600)
+        for path in (Path(f"{self.db_path}-wal"), Path(f"{self.db_path}-shm")):
+            # SQLite removes transient sidecars when the last connection
+            # closes. Their disappearance during mode repair is benign.
+            with suppress(FileNotFoundError):
                 os.chmod(path, 0o600)
 
     def _cursor(self, transport: str, account: str) -> TransportCursor | None:
