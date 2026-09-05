@@ -31,6 +31,12 @@ credential only when you need to save that credential, and restrict it to the
 current user. `ricky setup` can securely prompt for the initial shared provider
 credential and model without contacting the provider.
 
+Use `ricky profile add NAME` to create and register another profile instead of
+manually coordinating the registry and directory. Use
+`ricky profile delete NAME` to remove one after resolving the configuration and
+schedule references it reports. See [Profiles](profiles.md) for the destructive
+deletion boundary.
+
 Never put a credential in `ricky.toml` or project `.ricky/`. Restrict access to the live user-data
 root. See [Profiles](profiles.md) before sharing a credential across contexts.
 

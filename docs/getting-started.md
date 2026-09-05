@@ -81,8 +81,14 @@ executable must already be available on `PATH` and authenticated.
 
 Because `shared` is available to every current and future profile, a credential
 stored there is intentionally universal. If the credential should not be
-shared, cancel setup and define a narrower profile first as described in
-[Profiles](profiles.md). Never put an API key in the installation `ricky.toml`.
+shared, cancel setup and create a narrower profile first:
+
+```bash
+ricky profile add personal
+```
+
+Then configure that profile as described in [Profiles](profiles.md). Never put
+an API key in the installation `ricky.toml`.
 
 You can later change the model with:
 

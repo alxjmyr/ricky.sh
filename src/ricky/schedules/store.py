@@ -8,6 +8,7 @@ import os
 import tempfile
 import tomllib
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -25,6 +26,14 @@ class ScheduleStoreError(RuntimeError):
     """A bounded schedules.toml persistence failure."""
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleReference:
+    """One schedule identity and its pinned profiles, without any content."""
+
+    id: str
+    profile_scope: ProfileScope
+
+
 class ScheduleStore:
     """Purpose-specific async CRUD over canonical schedules.toml."""
 
@@ -37,6 +46,20 @@ class ScheduleStore:
     async def list(self) -> list[ScheduleSpec]:
         schedules = await asyncio.to_thread(self._read_sync)
         return [item for item in schedules if self.scope.permits(item.profile_scope.label())]
+
+    async def list_references(self) -> tuple[ScheduleReference, ...]:
+        """Return every schedule identity, ignoring the issued profile scope.
+
+        A profile lifecycle reference scan must see the whole registry to
+        refuse an unsafe deletion, so this read deliberately omits the scope
+        filter every other path applies. It returns identity and pinned
+        profiles only, never schedule content, and never serves a runtime.
+        """
+
+        schedules = await asyncio.to_thread(self._read_sync)
+        return tuple(
+            ScheduleReference(id=item.id, profile_scope=item.profile_scope) for item in schedules
+        )
 
     async def get(self, schedule_id: str) -> ScheduleSpec:
         schedules = await self.list()

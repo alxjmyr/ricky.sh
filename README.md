@@ -40,6 +40,16 @@ uv run ruff format .       # format
 uv run pyright             # type check
 ```
 
+To prepare a release from a clean, up-to-date branch, run:
+
+```bash
+bash ./scripts/run_release.sh
+```
+
+The script selects a semantic-version bump, refreshes `uv.lock`, runs the full
+test, lint, and type-check gates, commits the version files, creates an
+annotated `vX.Y.Z` tag, and optionally pushes the commit and tag atomically.
+
 ## Configuration
 
 Configuration is **file-first** below `user_data_dir` (default: `~/.ricky`):

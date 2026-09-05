@@ -199,8 +199,9 @@ active-operation diagnostic.
 - An ordinary stateful Ricky process holds a shared lock for its complete
   lifetime. The gateway holds it for its complete service lifetime. A
   cron-launched process must acquire it before opening durable state.
-- Initialization, decommission, purge, upgrade, resume, and rollback hold the
-  exclusive form for every mutation and verification in their operation.
+- Initialization, profile creation and deletion, decommission, purge, upgrade,
+  resume, and rollback hold the exclusive form for every mutation and
+  verification in their operation.
 - Every stateful entry point checks pointer/manifest identity, requires a clean
   migration state, and verifies that its software supports the manifest's data
   generation before it loads configuration or opens subsystem state.

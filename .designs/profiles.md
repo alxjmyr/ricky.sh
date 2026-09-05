@@ -97,6 +97,36 @@ prepended in this order: `shared/SOUL.md`, then the primary profile's
 `SOUL.md` when the primary is not `shared`, then the harness-owned system
 instructions. Accessible non-primary profiles do not contribute `SOUL.md`.
 
+## Profile lifecycle
+
+Profile creation and deletion are installation lifecycle operations. They hold
+the exclusive installation operation lock, recheck bootstrap identity and data
+compatibility under that lock, and update the installation registry with an
+atomic private-file replacement.
+
+Creating a profile registers one validated compartment and publishes a minimal
+owner-only root containing `ricky.toml`. It does not create a secrets file,
+optional capability directories, or generated state. Their owning
+configuration writers and subsystems create them when needed. Creation never
+adopts an existing unregistered path and never makes the new profile the
+default implicitly.
+
+The `shared` profile cannot be deleted. Deleting the current default requires
+an explicit enabled replacement. Before detaching the profile root, deletion
+refuses configured messaging transports or routes, gateway routes, delegated
+authority ceilings, and desired schedules that still name the profile. Each
+scan reads its whole registry rather than a runtime-scoped view. Those
+references express policy or runnable intent and are never silently rewritten.
+The profile root is renamed out of service before the registry commit and is
+restored if that commit cannot be validated.
+
+Deletion removes profile-owned data below the profile root. Central durable
+records retain their original `ProfileLabel` and historical evidence; deletion
+never removes a profile from a label, promotes its data to `shared`, or treats
+profile removal as a subsystem retention operation. Once the profile is no
+longer enabled, ordinary runtime scopes cannot access records that still
+require it.
+
 ## Storage invariants
 
 Profile-authored and profile-owned data lives below
@@ -109,6 +139,12 @@ Scope enforcement belongs in each owning store and service, not only in an
 interface. Read, write, list, correlation, attachment, recovery, audit, and
 retention paths must all require a typed scope or qualified resource reference
 and reject insufficient scopes.
+
+Profile lifecycle reference scans are the one exception. Refusing an unsafe
+deletion requires every reference, including those a runtime scope cannot
+reach, so an owning store may expose one read-only registry-wide scan for that
+purpose. Such a scan returns resource identity and pinned profile labels only,
+never content, and never serves an agent runtime.
 
 Agent-usable protected values use profile-qualified identity and a profile-local encrypted store.
 A scope may list or materialize only values whose owner it includes. Safe user-authored aliases and

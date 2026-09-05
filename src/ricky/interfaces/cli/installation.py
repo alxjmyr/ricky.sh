@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 from pathlib import Path
 from typing import Any, Literal, Never
@@ -34,6 +33,7 @@ from ricky.installation import (
     require_installation,
 )
 from ricky.interfaces.cli.render import CliRenderer
+from ricky.interfaces.cli.results import emit_result, fail
 from ricky.interfaces.cli.select import provider_allowed
 from ricky.llm.factory import ProviderEntry, auth_ready, provider_entries
 from ricky.schedules.cron import CronError, UserCrontabBackend
@@ -901,26 +901,8 @@ def _emit(
     as_json: bool,
     human: str,
 ) -> None:
-    if as_json:
-        payload = result.model_dump(mode="json") if isinstance(result, BaseModel) else result
-        typer.echo(json.dumps(payload, sort_keys=True))
-        return
-    renderer.render_status(human, style="green")
+    emit_result(result, renderer, as_json=as_json, human=human)
 
 
 def _fail(exc: BaseException, renderer: CliRenderer, *, as_json: bool) -> Never:
-    message = _error_message(exc)
-    if as_json:
-        typer.echo(json.dumps({"error": message}, sort_keys=True))
-    else:
-        renderer.render_error(f"Installation error: {message}")
-    raise typer.Exit(1) from exc
-
-
-def _error_message(exc: BaseException) -> str:
-    """Render the cause with any context a handler attached while unwinding."""
-
-    notes: object = getattr(exc, "__notes__", ())
-    if not isinstance(notes, list):
-        return str(exc)
-    return "\n".join((str(exc), *(str(note) for note in notes)))
+    fail(exc, renderer, as_json=as_json, prefix="Installation error")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 from datetime import UTC, datetime
@@ -34,7 +35,7 @@ from ricky.schedules.cron import (
 )
 from ricky.schedules.render import render_approval
 from ricky.schedules.service import ScheduleService, ScheduleServiceError
-from ricky.schedules.store import ScheduleStore
+from ricky.schedules.store import ScheduleReference, ScheduleStore, ScheduleStoreError
 from ricky.schedules.types import ScheduleSpec, validate_cron_expression
 
 
@@ -475,6 +476,42 @@ async def test_schedule_store_atomic_crud_modes_and_concurrency(tmp_path: Path) 
     assert (await store.get(first.id)).cron == "0 9 * * 1"
     assert (await store.remove(second.id)).id == second.id
     assert "[[schedules]]" in store.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_schedule_store_reference_scan_reads_the_whole_registry(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    wide = _scope(settings, all_profiles=True)
+    narrow = _scope(settings)
+    now = datetime.now(UTC)
+    schedule = ScheduleSpec(
+        id="sched_" + "3" * 24,
+        job_name="personal/brief",
+        cron="*/15 * * * *",
+        project_root=str(tmp_path.resolve()),
+        profile_scope=wide,
+        approved_spec_digest="a" * 64,
+        approved_runtime_policy_digest="b" * 64,
+        created_at=now,
+        updated_at=now,
+    )
+    await ScheduleStore(settings, scope=wide).create(schedule)
+    scoped = ScheduleStore(settings, scope=narrow)
+
+    # Every scoped path hides a schedule pinned outside the issued scope, so a
+    # lifecycle refusal cannot be built on one.
+    assert await scoped.list() == []
+    with pytest.raises(ScheduleStoreError, match="not found"):
+        await scoped.get(schedule.id)
+
+    references = await scoped.list_references()
+
+    assert references == (ScheduleReference(id=schedule.id, profile_scope=wide),)
+    # Identity and pinned profiles only: the scan never returns content.
+    assert tuple(field.name for field in dataclasses.fields(ScheduleReference)) == (
+        "id",
+        "profile_scope",
+    )
 
 
 def test_renderer_uses_only_fixed_argv_and_quotes_hostile_paths(tmp_path: Path) -> None:

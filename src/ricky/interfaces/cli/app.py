@@ -62,6 +62,7 @@ from ricky.interfaces.cli.capabilities import register_capability_commands
 from ricky.interfaces.cli.chat import ChatController
 from ricky.interfaces.cli.gateway import register_gateway_commands
 from ricky.interfaces.cli.installation import register_installation_commands
+from ricky.interfaces.cli.profiles import register_profile_commands
 from ricky.interfaces.cli.protected_values import register_protected_value_commands
 from ricky.interfaces.cli.render import CliRenderer
 from ricky.interfaces.cli.select import run_model_picker
@@ -209,6 +210,7 @@ protected_values_app = typer.Typer(
 app.add_typer(protected_values_app, name="protected-values")
 register_protected_value_commands(protected_values_app)
 register_installation_commands(app)
+register_profile_commands(app)
 notification_app = typer.Typer(
     help="Inspect and reconcile durable user notifications.",
     no_args_is_help=True,
@@ -998,6 +1000,7 @@ def main_callback(
         "_upgrade-handoff",
         "decommission",
         "data",
+        "profile",
     }:
         try:
             pointer_path = bootstrap_file()
