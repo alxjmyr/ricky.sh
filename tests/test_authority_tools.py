@@ -117,7 +117,7 @@ def test_authority_cli_lists_shows_revokes_and_traces(
 
     grant_id = asyncio.run(issue())
 
-    monkeypatch.setattr("ricky.interfaces.cli.app.load_settings", lambda: config)
+    monkeypatch.setattr("ricky.interfaces.cli.executions.load_settings", lambda: config)
     runner = CliRunner()
 
     listed = runner.invoke(app, ["authority", "list"])

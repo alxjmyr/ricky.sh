@@ -333,7 +333,3 @@ def _bundle_file_errors(
                 f"({size} > {limits.instruction_char_limit})"
             )
     return errors
-
-
-def _by_name(loaded: LoadedWorkflow) -> str:
-    return loaded.spec.name

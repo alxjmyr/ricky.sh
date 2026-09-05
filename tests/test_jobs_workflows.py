@@ -1023,7 +1023,7 @@ enabled = false
     monkeypatch.setenv("RICKY_USER_DATA_DIR", str(user_root))
     runner = RecordingJobRunner(_settings(tmp_path))
     monkeypatch.setattr(
-        "ricky.interfaces.cli.app.JobRunner",
+        "ricky.interfaces.cli.jobs.JobRunner",
         lambda _settings, **_kwargs: runner,
     )
 

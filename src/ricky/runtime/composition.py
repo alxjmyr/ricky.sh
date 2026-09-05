@@ -142,10 +142,6 @@ class SessionRuntime:
         return self.capabilities.workflow_registry
 
 
-def _prompt_skill_names(registry: SkillRegistry) -> set[str]:
-    return registry.identifiers()
-
-
 def delegable_effect_tools(settings: RickySettings) -> list[Tool]:
     """Construct shipped effect tools that support task-scoped delegation."""
 
@@ -356,7 +352,7 @@ async def build_capability_runtime(
         ]
         workflows: WorkflowRegistry | None = None
         if runtime_settings.workflow.enabled:
-            skill_names = _prompt_skill_names(skills)
+            skill_names = skills.identifiers()
             workflows = discover_workflows(
                 settings=runtime_settings,
                 profile_scope=session.profile_scope,

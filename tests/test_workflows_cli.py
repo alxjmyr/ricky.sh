@@ -10,7 +10,7 @@ from typing import cast
 
 from typer.testing import CliRunner
 
-import ricky.interfaces.cli.app as cli_app
+import ricky.interfaces.cli.workflows as cli_workflows
 from ricky.agent.context import assemble_context
 from ricky.agent.events import WorkflowEvent
 from ricky.agent.session import AgentSession
@@ -171,7 +171,7 @@ max_result_chars = 1000
         encoding="utf-8",
     )
     observed: list[tuple[int, int, int, int]] = []
-    original_runner = cli_app.WorkflowRunner
+    original_runner = cli_workflows.WorkflowRunner
 
     def capture_runner(*args, **kwargs):
         runtime_settings = kwargs["settings"]
@@ -185,7 +185,7 @@ max_result_chars = 1000
         )
         return original_runner(*args, **kwargs)
 
-    monkeypatch.setattr(cli_app, "WorkflowRunner", capture_runner)
+    monkeypatch.setattr(cli_workflows, "WorkflowRunner", capture_runner)
     runner = CliRunner()
     started = runner.invoke(
         app,

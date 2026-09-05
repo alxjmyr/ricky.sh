@@ -6,6 +6,7 @@ Ricky is a personal agentic assistant and harness built with Python 3.12+.
 
 ## Reference material
 
+- Use `docs/development.md` to locate behavior owners, CLI modules, and tests.
 - Read `.designs/architecture.md` before structural changes.
 - Read the applicable current contract in `.designs/profiles.md`,
   `.designs/workflows.md`, `.designs/builtins.md`, or

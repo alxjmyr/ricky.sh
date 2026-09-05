@@ -217,22 +217,6 @@ def workflow_bundle_digest(loaded: LoadedWorkflow) -> str:
     return digest.hexdigest()
 
 
-def configured_workflow_bundle_digest(
-    spec: JobSpec,
-    *,
-    settings: RickySettings,
-    profile_scope: ProfileScope,
-) -> str | None:
-    """Resolve the executable workflow bytes included in job policy approval."""
-
-    loaded = configured_workflow_bundle(
-        spec,
-        settings=settings,
-        profile_scope=profile_scope,
-    )
-    return workflow_bundle_digest(loaded) if loaded is not None else None
-
-
 def configured_workflow_bundle(
     spec: JobSpec,
     *,

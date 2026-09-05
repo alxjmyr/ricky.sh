@@ -73,12 +73,6 @@ def _exclusive_write(directory: Path, path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-async def read_batch_payload(batch: PersistedBatch, model: type[BaseModel]) -> BaseModel:
-    if not batch.payload_path:
-        raise FileNotFoundError(f"batch payload was pruned: {batch.id}")
-    return model.model_validate_json(await asyncio.to_thread(Path(batch.payload_path).read_bytes))
-
-
 async def prune_batch_payloads(store: JobRunStore, *, scope: ProfileScope, keep: int) -> None:
     """Prune completed payload files while retaining batch/disposition metadata."""
 

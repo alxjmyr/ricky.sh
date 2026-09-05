@@ -2,7 +2,9 @@
 
 ![Ricky](ricky.jpg)
 
-A personal agentic assistant and agent harness — a cleanly implemented mini agent CLI that will grow toward persistent, multi-interface agentic workflows.
+A personal agentic assistant and harness with interactive tools, durable memory,
+structured automation, and persistent messaging. Ricky keeps permissions,
+execution, and recovery under code control.
 
 ## Status
 
@@ -28,6 +30,10 @@ Replace `X.Y.Z` with an exact published release. `uv` owns the application
 environment; Ricky owns only its bootstrap pointer and private user-data root.
 
 ## Development
+
+Start with the [contributor guide](docs/development.md) to find behavior owners,
+CLI modules, and relevant tests. [AGENTS.md](AGENTS.md) defines the required
+development commands and completion checks.
 
 ```bash
 uv sync                    # install dependencies into .venv

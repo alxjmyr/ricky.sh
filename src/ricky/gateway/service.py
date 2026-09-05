@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -59,10 +59,6 @@ class ServiceEvent(BaseModel):
 
 
 EventSink = Callable[[ServiceEvent], Awaitable[None] | None]
-
-
-class ClosableRuntime(Protocol):
-    async def aclose(self) -> None: ...
 
 
 class GatewayService:

@@ -41,6 +41,7 @@ customize how Ricky works or keep it running as a service.
 - [CLI reference](cli-reference.md)
 - [Data and safety model](data-and-safety.md)
 - [Troubleshooting](troubleshooting.md)
+- [Contributor guide](development.md)
 
 ## Command convention
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
@@ -272,12 +271,6 @@ class ExecutionDraftActivity(_FrozenModel):
 
 def summary_digest(summary: str) -> str:
     return hashlib.sha256(summary.encode("utf-8")).hexdigest()
-
-
-def draft_digest(draft: ExecutionDraft) -> str:
-    payload = draft.model_dump(mode="json")
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _utc(value: datetime, name: str) -> None:

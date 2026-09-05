@@ -50,18 +50,6 @@ class ProtectedValuesInspection(BaseModel):
     size: int = Field(ge=0)
 
 
-class ProtectedValuesUpgradePreflight(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    path: str
-    source_schema_version: int | None = Field(default=None, ge=0)
-    target_schema_version: int = SCHEMA_VERSION
-    migration_required: bool
-    backup_required: bool
-    backup_bytes: int = Field(ge=0)
-    preserves_ciphertext: bool = True
-
-
 def inspect_protected_values_store(
     path: Path,
     *,
@@ -136,10 +124,6 @@ def migrate_protected_values_store(path: Path) -> ProtectedValuesInspection:
     finally:
         connection.close()
     return inspect_protected_values_store(selected, allow_supported_old=False)
-
-
-def verify_protected_values_store(path: Path) -> ProtectedValuesInspection:
-    return inspect_protected_values_store(path, allow_supported_old=False)
 
 
 class ProtectedValuesUpgradeAdapter:

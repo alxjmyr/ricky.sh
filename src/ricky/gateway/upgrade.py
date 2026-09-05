@@ -82,17 +82,6 @@ class GatewayStoreInspection(BaseModel):
     size: int = Field(ge=0)
 
 
-class GatewayUpgradePreflight(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    path: str
-    source_schema_version: int | None = Field(default=None, ge=0)
-    target_schema_version: int = SCHEMA_VERSION
-    migration_required: bool
-    backup_required: bool
-    backup_bytes: int = Field(ge=0)
-
-
 def inspect_gateway_store(path: Path) -> GatewayStoreInspection:
     """Inspect one exact target without creating its parent or database."""
 
@@ -197,10 +186,6 @@ def _accept_current_after_create_race(path: Path, detail: str) -> GatewayStoreIn
         if attempts >= _CREATE_RACE_ATTEMPTS:
             raise _gateway_error(f"{detail}: {failure}")
         time.sleep(_CREATE_RACE_DELAY_SECONDS)
-
-
-def verify_gateway_store(path: Path) -> GatewayStoreInspection:
-    return inspect_gateway_store(path)
 
 
 class GatewayUpgradeAdapter:

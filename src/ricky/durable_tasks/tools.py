@@ -22,7 +22,6 @@ from ricky.durable_tasks.scoped import ScopedDurableTaskStore, ScopedTaskArtifac
 from ricky.durable_tasks.store import DurableTaskStore, TaskLeaseError
 from ricky.durable_tasks.types import (
     DurableTask,
-    TaskActivity,
     TaskArtifactEntry,
     TaskAuthority,
     TaskDetail,
@@ -68,10 +67,6 @@ class TaskListResult(BaseModel):
 
 class TaskDetailResult(BaseModel):
     detail: TaskDetail
-
-
-class ActivityResult(BaseModel):
-    activity: list[TaskActivity]
 
 
 class ArtifactListResult(BaseModel):

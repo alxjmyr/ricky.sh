@@ -1,8 +1,5 @@
 # TODO's and FEATURES:
-[] - CLI: Install / set up CLI
-[] - CLI: Ricky Upgrade CLI
 [] - CLI: COnfiguration Manager (maybe first TUI usecase): ensure API is extensible for web
-[] - CLI: Profile management
 [] - TOOLS: Create a disable tools list (by profile) to improve context management and other issues 
 [] - GATEWAY: Separate Background Model Config?
 [] - PERMISSIONS | AUTH : properly fix internal task tracker permissions. update to better delineate between risk, effect class, authorization (i.e. read_only, none, ambient vs mutating, ricky_state, explicit.)
@@ -16,7 +13,7 @@
 	* Agent configs by profile (i.e. separate capabilities, models, or even fully separate gateway agents)
 
 # ACTIVE DOGFOOD USECASES:
-[x] - workflows
+[] - install and set up CLI (+ profiles cli)
 [] - Calendar Management
 [] - Scheduled "Jobs"
 	* Email / Slack Triage
@@ -46,4 +43,3 @@
 # ROADMAP
 1) Nice TUI
 2) HTTP + Web Interface (Include PWA?)
-3) Packaging (installability for other users)?

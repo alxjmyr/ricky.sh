@@ -146,7 +146,3 @@ class JobStreamRegistry:
 
     def get(self, name: str) -> JobStreamAdapter | None:
         return self._adapters.get(name)
-
-
-def candidate_identity(task_id: str, revision: int) -> str:
-    return f"{task_id}@{revision}"

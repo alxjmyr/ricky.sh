@@ -61,20 +61,6 @@ def is_workspace_path(cwd: Path, path: Path) -> bool:
     return path.resolve().is_relative_to(cwd.resolve())
 
 
-def resolve_under(cwd: Path, path: str | Path) -> Path:
-    """Resolve ``path`` under ``cwd`` or reject a workspace escape.
-
-    Kept for callers that intentionally require confinement. Interactive file
-    tools use :func:`resolve_host_path` and apply the permission boundary.
-    """
-
-    root = cwd.resolve()
-    resolved = resolve_host_path(root, path)
-    if not resolved.is_relative_to(root):
-        raise ValueError(f"path escapes workspace: {path}")
-    return resolved
-
-
 def display_path(cwd: Path, path: Path) -> str:
     """Return a workspace-relative path or an exact canonical host path."""
 

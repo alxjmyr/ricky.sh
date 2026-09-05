@@ -548,7 +548,7 @@ def test_provider_free_cli_inspection_never_prints_configured_secret(
 
     asyncio.run(store.initialize())
     asyncio.run(store.enqueue(request, scope=_PERSONAL_SCOPE))
-    monkeypatch.setattr("ricky.interfaces.cli.app.load_settings", lambda: settings)
+    monkeypatch.setattr("ricky.interfaces.cli.notifications.load_settings", lambda: settings)
     result = CliRunner().invoke(app, ["notification", "show", request.id])
     assert result.exit_code == 0
     assert request.id in result.stdout

@@ -47,17 +47,6 @@ class JobsStoreInspection(BaseModel):
     size: int = Field(ge=0)
 
 
-class JobsUpgradePreflight(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    path: str
-    source_schema_version: int | None = Field(default=None, ge=0)
-    target_schema_version: int = SCHEMA_VERSION
-    migration_required: bool
-    backup_required: bool
-    backup_bytes: int = Field(ge=0)
-
-
 def inspect_jobs_store(
     path: Path,
     *,
