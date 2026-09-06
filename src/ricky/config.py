@@ -44,7 +44,13 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from ricky.installation import resolve_bootstrap_user_data_dir, write_private_file
+from ricky.installation import (
+    fsync_directory,
+    installation_operation_lock,
+    require_compatible_installation,
+    resolve_bootstrap_user_data_dir,
+    write_private_file,
+)
 from ricky.profiles import (
     SHARED_PROFILE,
     ProfileName,
@@ -2448,6 +2454,132 @@ def write_profile_secret(
     document[name] = value.get_secret_value()
     write_private_file(path, tomlkit.dumps(document))
     return path
+
+
+class GoogleAccountSetupError(RuntimeError):
+    """Account setup failed without successfully restoring its original files."""
+
+
+class _GoogleAccountImport(BaseModel):
+    """Validated fields imported from a downloaded Desktop OAuth client."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    client_id: str = Field(min_length=1)
+    client_secret: SecretStr = Field(min_length=1)
+
+
+def add_google_account(
+    name: str,
+    *,
+    profile: str,
+    email: str,
+    client_json: Path,
+) -> ProfileResourceRef:
+    """Create an account and its private OAuth client in one enabled profile."""
+    import tomlkit
+
+    resource = ProfileResourceRef(profile=profile, name=name)
+    name = resource.name
+    profile = resource.profile
+    email = email.strip()
+    if not re.fullmatch(r"[^\s@]+@[^\s@]+", email):
+        raise ValueError("expected email must contain a local part and domain without whitespace")
+    try:
+        downloaded = json.loads(client_json.expanduser().read_text(encoding="utf-8"))
+        installed = downloaded["installed"]
+        client = _GoogleAccountImport.model_validate(
+            {"client_id": installed["client_id"], "client_secret": installed["client_secret"]}
+        )
+        if not client.client_id.strip():
+            raise ValueError("empty client id")
+    except (OSError, ValueError, KeyError, TypeError):
+        # Parser and validation errors may contain the imported secret.
+        raise ValueError("could not read a valid Google Desktop OAuth client JSON file") from None
+
+    expected_pointer, expected_manifest = require_compatible_installation()
+    with installation_operation_lock(
+        mode="exclusive", timeout_seconds=5.0, operation="google_account_add"
+    ):
+        pointer, manifest = require_compatible_installation()
+        if pointer != expected_pointer or manifest != expected_manifest:
+            raise ValueError("Ricky installation changed while adding the Google account")
+        try:
+            settings = load_settings()
+        except ValueError:
+            raise ValueError(
+                "could not load the existing configuration; check profile settings and secrets"
+            ) from None
+        root = user_data_path(settings)
+        if root != Path(pointer.user_data_dir):
+            raise ValueError("resolved configuration does not match the installation")
+        if profile not in settings.profiles.enabled:
+            raise ValueError(f"profile is not enabled: {profile}")
+        configured = settings.profile_configs.get(profile)
+        if configured is not None and (
+            name in configured.google_oauth_clients
+            or (configured.google is not None and name in configured.google.accounts)
+        ):
+            raise ValueError(f"Google account already exists: {resource.qualified}")
+        config_path = profile_config_file(profile, root)
+        secrets_path = profile_secrets_file(profile, root)
+        if (
+            config_path.parent.is_symlink()
+            or not config_path.parent.is_dir()
+            or config_path.parent.parent.is_symlink()
+        ):
+            raise ValueError("owning profile directory must exist and cannot be a symbolic link")
+        try:
+            document = _open_config_document(config_path, "profile configuration file")
+            secrets = _open_config_document(secrets_path, "profile secrets file")
+        except (OSError, ValueError):
+            raise ValueError("could not safely read profile configuration and secrets") from None
+        google = document.setdefault("google", tomlkit.table())
+        accounts = google.setdefault("accounts", tomlkit.table())
+        clients = secrets.setdefault("google_oauth_clients", tomlkit.table())
+        if name in accounts or name in clients:
+            raise ValueError(f"Google account already exists: {resource.qualified}")
+        accounts[name] = {"email": email}
+        clients[name] = {
+            "client_id": client.client_id,
+            "client_secret": client.client_secret.get_secret_value(),
+        }
+        originals = {
+            path: path.read_text(encoding="utf-8") if path.exists() else None
+            for path in (config_path, secrets_path)
+        }
+        attempted: list[Path] = []
+        try:
+            for path, content in (
+                (config_path, tomlkit.dumps(document)),
+                (secrets_path, tomlkit.dumps(secrets)),
+            ):
+                attempted.append(path)
+                write_private_file(path, content)
+            # Verify the complete pair through the normal settings boundary.
+            load_settings()
+        except BaseException as exc:
+            rollback_failed = False
+            for path in reversed(attempted):
+                try:
+                    original = originals[path]
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                        fsync_directory(path.parent)
+                    else:
+                        write_private_file(path, original)
+                except BaseException:
+                    rollback_failed = True
+            if rollback_failed:
+                raise GoogleAccountSetupError(
+                    "Google account setup failed and could not restore configuration"
+                ) from None
+            if isinstance(exc, Exception):
+                raise ValueError(
+                    "Google account setup failed; original configuration restored"
+                ) from None
+            raise
+    return resource
 
 
 def _open_config_document(path: Path, label: str) -> Any:

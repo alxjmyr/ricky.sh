@@ -92,24 +92,20 @@ inspect Slack before you retry.
 Gmail and Google Calendar share profile-qualified Google accounts. Each profile has its own OAuth
 token store.
 
-Add the expected, non-secret account identity to the owning profile's `ricky.toml`, for example
-`<user_data_dir>/profiles/personal/ricky.toml`:
+Download a Desktop OAuth client JSON file from your Google Cloud project. Create the account in an
+existing profile with its expected email address:
 
-```toml
-[google.accounts.personal]
-email = "you@example.com"
+```bash
+ricky config google add personal --profile personal --email you@example.com \
+  --client-json /path/to/client_secret.json
 ```
 
-Add a Google Desktop OAuth client with the same account name to
-`<user_data_dir>/profiles/personal/.secrets.toml`:
+The command writes the account identity to the profile's `ricky.toml` and imports the OAuth client
+into its private `.secrets.toml`, preserving existing settings. It refuses an existing account name
+in that profile. The same name can exist in another profile. The JSON file is read locally and is
+not changed; keep it private. The command does not contact Google or start consent.
 
-```toml
-[google_oauth_clients.personal]
-client_id = "...apps.googleusercontent.com"
-client_secret = "..."
-```
-
-Authorize the account and check both services:
+Authorize the new account and check both services:
 
 ```bash
 ricky config google auth personal/personal

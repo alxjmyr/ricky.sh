@@ -63,6 +63,17 @@ Profile names start with a lowercase letter and contain only lowercase
 letters, digits, hyphens, and underscores. They are at most 64 characters.
 `shared` and `bundled` are reserved.
 
+Set an existing enabled profile as the default for future commands:
+
+```bash
+ricky profile set-default personal
+```
+
+Use `ricky profile set-default shared` to return to the shared default.
+Selecting the current default again leaves configuration unchanged. Add
+`--json` for a machine-readable result. The command preserves profile data
+and existing sessions; an explicit `--profile` still overrides the default.
+
 Edit the generated registry definition to describe how Ricky should route work
 to the new profile. For example:
 

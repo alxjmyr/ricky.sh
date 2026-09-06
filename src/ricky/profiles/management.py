@@ -66,6 +66,57 @@ class ProfileDeleteResult(_StrictResult):
     default_profile: ProfileName
 
 
+class ProfileDefaultResult(_StrictResult):
+    """Serializable result of selecting the installation default profile."""
+
+    previous_default: ProfileName
+    default_profile: ProfileName
+    changed: bool
+
+
+def set_default_profile(name: str) -> ProfileDefaultResult:
+    """Select one existing enabled profile without changing its owned data."""
+
+    profile = validate_profile_compartment(name)
+    expected_pointer, expected_manifest = require_compatible_installation()
+    with installation_operation_lock(
+        mode="exclusive",
+        timeout_seconds=5.0,
+        operation="profile_set_default",
+    ):
+        pointer, manifest = require_compatible_installation()
+        if pointer != expected_pointer or manifest != expected_manifest:
+            raise ProfileManagementError("Ricky installation changed while setting the default")
+        settings = load_settings()
+        root = user_data_path(settings)
+        if root != Path(pointer.user_data_dir):
+            raise ProfileManagementError("resolved configuration does not match the installation")
+        if profile not in settings.profiles.enabled:
+            raise ProfileManagementError(f"profile is not enabled: {profile}")
+        target = root / "profiles" / profile
+        if target.is_symlink() or not target.is_dir():
+            raise ProfileManagementError(f"profile directory is missing or invalid: {target}")
+
+        previous = settings.profiles.default
+        if previous != profile:
+            document, original = _root_config_document(root)
+            _profiles_table(document)["default"] = profile
+            try:
+                write_private_file(config_file(root), tomlkit.dumps(document))
+                committed = _validate_committed_settings(root)
+                if committed.profiles.default != profile:
+                    raise ProfileManagementError("committed default profile does not match")
+            except BaseException as exc:
+                _restore_root_config(root, original, failure=exc)
+                raise
+
+        return ProfileDefaultResult(
+            previous_default=previous,
+            default_profile=profile,
+            changed=previous != profile,
+        )
+
+
 def add_profile(name: str) -> ProfileAddResult:
     """Create and register one minimal private profile scaffold."""
 

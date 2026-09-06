@@ -24,6 +24,7 @@ Running `ricky` without a command starts interactive chat.
 | `ricky decommission [--json]` | Stop and remove Ricky-owned gateway service and managed schedules while preserving software, data, and the pointer. |
 | `ricky data purge [--yes --installation-id ID] [--json]` | Irreversibly remove the exact inactive initialized data root and its matching pointer. |
 | `ricky profile add NAME [--json]` | Create and enable one minimal private profile scaffold without changing the default. |
+| `ricky profile set-default NAME [--json]` | Select an existing enabled profile as the installation default. |
 | `ricky profile delete NAME [--new-default NAME] [--yes] [--json]` | Confirm and delete one unreferenced non-shared profile and all data below its profile root. |
 
 `init` is offline and noninteractive. Before a pointer exists, an explicit
@@ -65,7 +66,9 @@ data.
 
 Profile lifecycle commands hold the exclusive installation lock. `profile add`
 refuses reserved names, duplicate registry entries, and existing unregistered
-paths. `profile delete` defaults to cancellation, requires `--yes` when
+paths. `profile set-default` accepts any existing enabled profile, including
+`shared`; selecting the current default leaves configuration unchanged.
+`profile delete` defaults to cancellation, requires `--yes` when
 unattended or using JSON output, and requires `--new-default` when deleting the
 current default. It reports and refuses configured messaging, gateway,
 authority, or schedule references instead of rewriting them. Central durable
@@ -82,6 +85,7 @@ history retains its original profile labels and is not promoted or relabeled.
 | `ricky config memory` | Show memory routing and note counts. |
 | `ricky config slack` | Verify Slack authentication for every configured profile. |
 | `ricky config google` | Show Google OAuth status. |
+| `ricky config google add NAME --profile PROFILE --email EMAIL --client-json PATH` | Create a profile-owned account definition and import its Desktop OAuth client credentials. |
 | `ricky config google auth ACCOUNT` | Authorize one named Google account. |
 | `ricky config gmail` | Verify configured Gmail accounts. |
 | `ricky config gcal` | Verify configured Calendar accounts. |
@@ -94,7 +98,7 @@ equivalent fields.
 
 | Group | Subcommands |
 |---|---|
-| `profile` | `add`, `delete` |
+| `profile` | `add`, `set-default`, `delete` |
 | `workflow` | `list`, `validate`, `show`, `run`, `status`, `resume`, `abandon`, `reconcile`, `dryrun` |
 | `task` | `list`, `show`, `activity`, `artifacts`, `create`, `tag`, `complete`, `cancel`, `reopen` |
 | `job` | `list`, `validate`, `show`, `run`, `once`, `history`, `report`, `action` |

@@ -1,4 +1,5 @@
 # TODO's and FEATURES:
+[] - SKILLS: Create built in Ricky docs skill so ricky can easily reference user and config docs
 [] - CLI: COnfiguration Manager (maybe first TUI usecase): ensure API is extensible for web
 [] - TOOLS: Create a disable tools list (by profile) to improve context management and other issues 
 [] - GATEWAY: Separate Background Model Config?

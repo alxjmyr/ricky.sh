@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Coroutine
+from pathlib import Path
+from shlex import quote
 from typing import Annotated, Any
 
 import typer
@@ -11,7 +13,9 @@ from ricky import __version__
 from ricky.agent import AgentSession
 from ricky.browser import BrowserService
 from ricky.config import (
+    GoogleAccountSetupError,
     RickySettings,
+    add_google_account,
     config_file,
     load_settings,
     profile_config_file,
@@ -81,7 +85,7 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 google_config_app = typer.Typer(
-    help="Inspect or authorize named Google accounts.",
+    help="Add, inspect, or authorize named Google accounts.",
     invoke_without_command=True,
     add_completion=False,
 )
@@ -224,28 +228,36 @@ def main_callback(
         "decommission",
         "data",
         "profile",
+        "config",
     }:
-        try:
-            pointer_path = bootstrap_file()
-            if pointer_path.exists() or pointer_path.is_symlink():
-                ctx.with_resource(
-                    installation_operation_lock(
-                        mode="shared",
-                        timeout_seconds=5.0,
-                        operation="runtime",
-                    )
-                )
-                require_compatible_installation()
-        except (InstallationError, OSError) as exc:
-            CliRenderer().render_error(f"Installation error: {exc}")
-            raise typer.Exit(1) from exc
+        _enter_runtime_gate(ctx)
     if ctx.invoked_subcommand is None:
         run_with_provider_errors(lambda renderer: _chat(None, None, renderer))
+
+
+def _enter_runtime_gate(ctx: typer.Context) -> None:
+    """Keep ordinary commands under shared installation authority."""
+    try:
+        pointer_path = bootstrap_file()
+        if pointer_path.exists() or pointer_path.is_symlink():
+            ctx.with_resource(
+                installation_operation_lock(
+                    mode="shared",
+                    timeout_seconds=5.0,
+                    operation="runtime",
+                )
+            )
+            require_compatible_installation()
+    except (InstallationError, OSError) as exc:
+        CliRenderer().render_error(f"Installation error: {exc}")
+        raise typer.Exit(1) from exc
 
 
 @config_app.callback()
 def config_callback(ctx: typer.Context) -> None:
     """Show the resolved configuration (secrets redacted)."""
+    if ctx.invoked_subcommand != "google":
+        _enter_runtime_gate(ctx)
     if ctx.invoked_subcommand is None:
         root_settings = load_settings()
         scope = root_settings.resolve_profile_scope()
@@ -280,8 +292,49 @@ async def _config_model(profile: str | None, renderer: CliRenderer) -> None:
 @google_config_app.callback()
 def config_google_callback(ctx: typer.Context) -> None:
     """Show redacted OAuth status for every configured Google account."""
+    if ctx.invoked_subcommand != "add":
+        _enter_runtime_gate(ctx)
     if ctx.invoked_subcommand is None:
         run_with_provider_errors(_check_google)
+
+
+@google_config_app.command("add")
+def config_google_add(
+    account: Annotated[str, typer.Argument(help="New account name within the owning profile.")],
+    profile: Annotated[
+        str, typer.Option("--profile", help="Existing profile that owns this account.")
+    ],
+    email: Annotated[str, typer.Option("--email", help="Expected Google account email address.")],
+    client_json: Annotated[
+        Path,
+        typer.Option("--client-json", help="Downloaded Google Desktop OAuth client JSON file."),
+    ],
+) -> None:
+    """Create a profile-owned Google account and import its OAuth client."""
+    renderer = CliRenderer()
+    try:
+        resource = add_google_account(
+            account, profile=profile, email=email, client_json=client_json
+        )
+    except GoogleAccountSetupError:
+        renderer.render_error(
+            "Google account setup failed and could not restore configuration. "
+            "Check the owning profile's ricky.toml and .secrets.toml before retrying."
+        )
+        raise typer.Exit(1) from None
+    except InstallationError as exc:
+        renderer.render_error(f"Installation error: {exc}")
+        raise typer.Exit(1) from None
+    except (OSError, RuntimeError):
+        renderer.render_error("Google account setup failed; check installation access and state.")
+        raise typer.Exit(1) from None
+    except ValueError as exc:
+        renderer.render_error(str(exc))
+        raise typer.Exit(2) from None
+    renderer.render_status(f"Added Google account {resource.qualified}.")
+    renderer.render_status(
+        f"Authorize it with: ricky config google auth {quote(resource.qualified)}"
+    )
 
 
 @google_config_app.command("auth")
@@ -354,7 +407,8 @@ async def _check_google(renderer: CliRenderer) -> None:
     try:
         if not auth.account_names:
             renderer.render_status(
-                "No Google accounts are configured in an enabled profile.",
+                "No Google accounts are configured in an enabled profile. "
+                "Run ricky config google add --help to set one up.",
                 style="yellow",
             )
             raise typer.Exit(1)

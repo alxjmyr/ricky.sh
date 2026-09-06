@@ -6,7 +6,8 @@ import json
 import shutil
 import stat
 import tomllib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from ricky.profiles.management import (
     _configured_profile_references,
     add_profile,
     delete_profile,
+    set_default_profile,
 )
 from ricky.schedules.store import ScheduleStore
 from ricky.schedules.types import ScheduleSpec
@@ -507,3 +509,207 @@ def test_profile_commands_are_discoverable_without_initializing() -> None:
     assert "profile" in root_help.stdout
     assert "add" in profile_help.stdout
     assert "delete" in profile_help.stdout
+    assert "set-default" in profile_help.stdout
+
+
+def test_set_default_preserves_configuration_and_profile_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _initialize(tmp_path)
+    add_profile("personal")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    monkeypatch.chdir(project_root)
+    project_data = project_root / ".ricky"
+    project_data.mkdir()
+    marker = project_data / "keep"
+    marker.write_text("project data", encoding="utf-8")
+    config = root / "ricky.toml"
+    config.write_text(config.read_text(encoding="utf-8") + "\n# Keep this comment.\n")
+    original = tomllib.loads(config.read_text(encoding="utf-8"))
+    owned = {path: path.read_bytes() for path in (root / "profiles").rglob("*") if path.is_file()}
+
+    result = set_default_profile("personal")
+
+    assert result.model_dump() == {
+        "previous_default": "shared",
+        "default_profile": "personal",
+        "changed": True,
+    }
+    assert type(result).model_validate_json(result.model_dump_json()) == result
+    expected = original
+    expected["profiles"]["default"] = "personal"
+    assert tomllib.loads(config.read_text(encoding="utf-8")) == expected
+    assert "# Keep this comment." in config.read_text(encoding="utf-8")
+    settings = load_settings()
+    assert settings.profiles.default == "personal"
+    assert settings.resolve_profile_scope().primary == "personal"
+    assert settings.resolve_profile_scope(primary="shared").primary == "shared"
+    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+    assert {path: path.read_bytes() for path in owned} == owned
+    assert list(project_data.iterdir()) == [marker]
+    assert marker.read_text(encoding="utf-8") == "project data"
+
+    assert set_default_profile("shared").default_profile == "shared"
+    assert load_settings().profiles.default == "shared"
+
+
+def test_set_default_is_idempotent_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _initialize(tmp_path)
+    before = (root / "ricky.toml").stat()
+
+    def refuse_write(path: Path, content: str) -> None:
+        pytest.fail("an unchanged default must not rewrite configuration")
+
+    monkeypatch.setattr(profile_management, "write_private_file", refuse_write)
+    result = set_default_profile("shared")
+    assert not result.changed
+    assert result.previous_default == result.default_profile == "shared"
+    assert (root / "ricky.toml").stat() == before
+
+
+@pytest.mark.parametrize("name", ["missing", "bundled", "Work", "../work"])
+def test_set_default_rejects_unavailable_or_invalid_profile(tmp_path: Path, name: str) -> None:
+    root = _initialize(tmp_path)
+    before = (root / "ricky.toml").read_bytes()
+    with pytest.raises((ProfileManagementError, ValueError)):
+        set_default_profile(name)
+    assert (root / "ricky.toml").read_bytes() == before
+    assert [path.name for path in (root / "profiles").iterdir()] == ["shared"]
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_set_default_refuses_missing_or_symlinked_profile_root(
+    tmp_path: Path, symlink: bool
+) -> None:
+    root = _initialize(tmp_path)
+    add_profile("personal")
+    target = root / "profiles" / "personal"
+    shutil.rmtree(target)
+    if symlink:
+        target.symlink_to(root / "profiles" / "shared", target_is_directory=True)
+    before = (root / "ricky.toml").read_bytes()
+    with pytest.raises(ProfileManagementError, match="missing or invalid"):
+        set_default_profile("personal")
+    assert (root / "ricky.toml").read_bytes() == before
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_set_default_restores_registry_when_post_commit_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupted: bool,
+) -> None:
+    root = _initialize(tmp_path)
+    add_profile("personal")
+    before = (root / "ricky.toml").read_bytes()
+    failure = KeyboardInterrupt if interrupted else ValueError
+
+    def fail_validation(path: Path) -> None:
+        assert load_settings().profiles.default == "personal"
+        raise failure("simulated validation interruption")
+
+    monkeypatch.setattr(profile_management, "_validate_committed_settings", fail_validation)
+    with pytest.raises(failure, match="simulated validation interruption"):
+        set_default_profile("personal")
+    assert (root / "ricky.toml").read_bytes() == before
+    assert load_settings().profiles.default == "shared"
+
+
+def test_set_default_without_installation_does_not_create_state() -> None:
+    bootstrap_root = bootstrap_file().parent
+    with pytest.raises(InstallationError, match="not initialized"):
+        set_default_profile("shared")
+    assert not bootstrap_root.exists()
+
+
+def test_set_default_rechecks_installation_identity_under_exclusive_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _initialize(tmp_path)
+    add_profile("personal")
+    before = (root / "ricky.toml").read_bytes()
+    original_check = profile_management.require_compatible_installation
+    original_lock = profile_management.installation_operation_lock
+    locked = False
+    checks = 0
+
+    @contextmanager
+    def track_lock(**kwargs: Any) -> Iterator[None]:
+        nonlocal locked
+        assert kwargs["mode"] == "exclusive"
+        assert kwargs["operation"] == "profile_set_default"
+        with original_lock(**kwargs):
+            locked = True
+            try:
+                yield
+            finally:
+                locked = False
+
+    def changed_manifest() -> Any:
+        nonlocal checks
+        checks += 1
+        pointer, manifest = original_check()
+        if checks == 2:
+            assert locked
+            manifest = manifest.model_copy(update={"data_generation": 999})
+        else:
+            assert not locked
+        return pointer, manifest
+
+    monkeypatch.setattr(profile_management, "installation_operation_lock", track_lock)
+    monkeypatch.setattr(profile_management, "require_compatible_installation", changed_manifest)
+    with pytest.raises(ProfileManagementError, match="installation changed"):
+        set_default_profile("personal")
+    assert checks == 2
+    assert not locked
+    assert (root / "ricky.toml").read_bytes() == before
+
+
+def test_set_default_restores_registry_after_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _initialize(tmp_path)
+    add_profile("personal")
+    before = (root / "ricky.toml").read_bytes()
+    attempts = 0
+
+    def fail_after_write(path: Path, content: str) -> None:
+        nonlocal attempts
+        attempts += 1
+        write_private_file(path, content)
+        if attempts == 1:
+            raise OSError("simulated post-replacement failure")
+
+    monkeypatch.setattr(profile_management, "write_private_file", fail_after_write)
+    with pytest.raises(OSError, match="post-replacement failure"):
+        set_default_profile("personal")
+    assert attempts == 2
+    assert (root / "ricky.toml").read_bytes() == before
+
+
+def test_profile_cli_set_default_json_and_human(tmp_path: Path) -> None:
+    _initialize(tmp_path)
+    add_profile("personal")
+    result = runner.invoke(app, ["profile", "set-default", "personal", "--json"])
+    assert result.exit_code == 0, result.stdout
+    assert json.loads(result.stdout) == {
+        "previous_default": "shared",
+        "default_profile": "personal",
+        "changed": True,
+    }
+    unchanged = runner.invoke(app, ["profile", "set-default", "personal"])
+    assert unchanged.exit_code == 0
+    assert "already personal" in unchanged.stdout
+    reset = runner.invoke(app, ["profile", "set-default", "shared"])
+    assert reset.exit_code == 0
+    assert "set to shared" in reset.stdout
+    missing = runner.invoke(app, ["profile", "set-default", "missing", "--json"])
+    assert missing.exit_code == 1
+    assert "profile is not enabled" in json.loads(missing.stdout)["error"]

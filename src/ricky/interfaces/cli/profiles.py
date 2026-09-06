@@ -14,6 +14,7 @@ from ricky.profiles.management import (
     add_profile,
     check_profile_deletion,
     delete_profile,
+    set_default_profile,
 )
 
 
@@ -21,11 +22,34 @@ def register_profile_commands(root: typer.Typer) -> None:
     """Attach profile lifecycle commands to the main CLI."""
 
     profile_app = typer.Typer(
-        help="Create and delete private profile compartments.",
+        help="Manage private profile compartments and the default profile.",
         no_args_is_help=True,
         add_completion=False,
     )
     root.add_typer(profile_app, name="profile")
+
+    @profile_app.command("set-default")
+    def profile_set_default(
+        name: str = typer.Argument(..., help="Existing enabled profile name."),
+        as_json: bool = typer.Option(False, "--json", help="Emit a machine-readable result."),
+    ) -> None:
+        """Use an existing profile as the default for future commands."""
+
+        renderer = CliRenderer()
+        try:
+            result = set_default_profile(name)
+        except (InstallationError, OSError, ProfileManagementError, ValueError) as exc:
+            fail(exc, renderer, as_json=as_json, prefix="Profile error")
+        emit_result(
+            result,
+            renderer,
+            as_json=as_json,
+            human=(
+                f"Default profile set to {result.default_profile}."
+                if result.changed
+                else f"Default profile is already {result.default_profile}."
+            ),
+        )
 
     @profile_app.command("add")
     def profile_add(
