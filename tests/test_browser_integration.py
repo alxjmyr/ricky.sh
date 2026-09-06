@@ -2250,9 +2250,23 @@ async def _wait_for_snapshot_text(
 ) -> BrowserSnapshot:
     deadline = asyncio.get_running_loop().time() + 5
     while True:
-        snapshot = await service.snapshot(session_id, page_id=None)
-        if expected in snapshot.content:
-            return snapshot
+        try:
+            snapshot = await service.snapshot(session_id, page_id=None)
+        except BrowserError as exc:
+            # Navigation can finish during this read-only observation. Retry
+            # only that race; never replay the submission that preceded it.
+            if not (
+                exc.failure.retryable
+                and exc.failure.code == "backend_error"
+                and exc.failure.message
+                == "browser page navigated during snapshot; request a new snapshot"
+            ):
+                raise
+            if asyncio.get_running_loop().time() >= deadline:
+                raise
+        else:
+            if expected in snapshot.content:
+                return snapshot
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError(f"browser snapshot did not contain {expected!r}")
         await asyncio.sleep(0.05)

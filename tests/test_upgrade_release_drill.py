@@ -13,6 +13,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import tomlkit
+from tomlkit.items import Table
 
 UV = shutil.which("uv")
 
@@ -47,9 +49,11 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
         source = tmp_path / f"source-{version}"
         shutil.copytree(repository / "src", source / "src")
         shutil.copy2(repository / "README.md", source / "README.md")
-        project = (repository / "pyproject.toml").read_text(encoding="utf-8")
-        project = project.replace('version = "0.6.0"', f'version = "{version}"', 1)
-        (source / "pyproject.toml").write_text(project, encoding="utf-8")
+        project = tomlkit.parse((repository / "pyproject.toml").read_text(encoding="utf-8"))
+        metadata = project["project"]
+        assert isinstance(metadata, Table)
+        metadata["version"] = version
+        (source / "pyproject.toml").write_text(tomlkit.dumps(project), encoding="utf-8")
         _run(
             [str(UV), "build", "--wheel", "--out-dir", str(artifacts)],
             cwd=source,

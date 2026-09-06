@@ -14,6 +14,7 @@ from typer.testing import CliRunner
 import ricky.gateway.service_unit as service_unit_module
 import ricky.interfaces.cli.app as app_module
 import ricky.interfaces.cli.installation as installation_cli
+from ricky import __version__
 from ricky.installation import (
     INSTALLATION_FILENAME,
     InstallationError,
@@ -334,7 +335,7 @@ def test_help_and_version_remain_available_while_data_is_gated(
 
     assert help_result.exit_code == version_result.exit_code == 0
     assert "upgrade" in help_result.stdout
-    assert "ricky 0.6.0" in version_result.stdout
+    assert version_result.stdout.strip() == f"ricky {__version__}"
 
 
 def test_decommission_remains_available_in_failed_state_without_host_commands(
