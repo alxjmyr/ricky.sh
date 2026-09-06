@@ -41,6 +41,17 @@ ABORT_CAUSE = "the exclusive installation lock was unavailable for this upgrade"
 RESTORE_FAILURE = "stopped gateway could not be restored after upgrade abort"
 
 
+@pytest.fixture
+def simulated_upgrade_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Match the checker to the simulated 0.6.0 installation and release pair.
+
+    Patch the version input at its consumer, leaving real release comparison,
+    compatibility checks, and the CLI's actual --version output intact.
+    """
+
+    monkeypatch.setattr("ricky.upgrades.service.__version__", "0.6.0")
+
+
 def _initialize(tmp_path: Path) -> tuple[Path, str]:
     root = tmp_path / "user-data"
     result = initialize_installation(root)
@@ -183,6 +194,7 @@ def _patch_no_host_launchers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     monkeypatch.setattr(service_unit_module, "GatewayServiceUnit", FakeUnit)
 
 
+@pytest.mark.usefixtures("simulated_upgrade_version")
 def test_upgrade_check_with_local_release_source_is_offline_and_read_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -215,6 +227,7 @@ def test_upgrade_check_with_local_release_source_is_offline_and_read_only(
     assert ".operation.json" not in bootstrap_entries
 
 
+@pytest.mark.usefixtures("simulated_upgrade_version")
 def test_upgrade_check_accepts_only_exact_release_version_grammar(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -406,6 +419,7 @@ def _tool_environment(tmp_path: Path) -> InstalledToolEnvironment:
 
 
 @pytest.mark.parametrize("restore_fails", [True, False])
+@pytest.mark.usefixtures("simulated_upgrade_version")
 def test_aborted_upgrade_reports_the_original_cause_with_any_restore_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restore_fails: bool
 ) -> None:
@@ -471,6 +485,7 @@ def test_aborted_upgrade_reports_the_original_cause_with_any_restore_failure(
     assert _file_snapshot(root) == before
 
 
+@pytest.mark.usefixtures("simulated_upgrade_version")
 def test_aborted_upgrade_restore_failure_is_visible_in_human_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
