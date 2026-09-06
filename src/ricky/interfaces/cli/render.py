@@ -893,15 +893,15 @@ class CliRenderer:
         self.render_workflow_load_errors(workflow_registry.errors)
 
     def render_workflow_load_errors(self, errors: list[WorkflowLoadError]) -> None:
-        """Render malformed workflow bundles discovered at startup."""
+        """Render unavailable or invalid workflow bundles discovered at startup."""
         if not errors:
             return
         self.finish_stream()
-        table = Table(title="Workflow load errors", show_header=True)
-        table.add_column("File")
-        table.add_column("Error")
+        table = Table(title="Workflow discovery issues", show_header=True)
+        table.add_column("Source", overflow="fold", max_width=40)
+        table.add_column("Details")
         for error in errors:
-            table.add_row(error.source_path, error.message)
+            table.add_row(Text(error.source_path), Text(error.message))
         self.console.print(table)
 
     def render_workflow_show(self, description: str) -> None:

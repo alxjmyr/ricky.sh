@@ -457,6 +457,48 @@ message = "done"
     assert "is not version 2" in messages["future"]
 
 
+@pytest.mark.parametrize("tool_available", [False, True])
+def test_discovery_preserves_file_errors_with_missing_tools(
+    bundled_root: Path, tool_available: bool
+) -> None:
+    bundle = bundled_root / "workflows" / "custom"
+    bundle.mkdir(parents=True)
+    (bundle / "workflow.toml").write_text(
+        """version = 2
+name = "custom"
+description = "Custom workflow."
+[schemas.note]
+type = "object"
+[schemas.note.properties.text]
+type = "string"
+[[steps]]
+id = "read"
+kind = "agent"
+tools = ["reader"]
+instruction_file = "missing.md"
+result_schema = "note"
+""",
+        encoding="utf-8",
+    )
+    registry = discover_workflows(
+        profile_scope=ProfileScope.create("personal"),
+        skill_names=set(),
+        tool_registry=ToolRegistry([ReaderTool()] if tool_available else []),
+    )
+
+    assert registry.get("custom") is None
+    assert len(registry.errors) == 1
+    message = registry.errors[0].message
+    assert "Workflow resource does not exist: missing.md" in message
+    assert "Google" not in message
+    if tool_available:
+        assert "required tools" not in message
+    else:
+        assert "current profile scope: reader" in message
+        assert "For custom workflows, also check the tool names" in message
+        assert "unknown tool 'reader'" in message
+
+
 def test_user_discovery_uses_configured_data_dir_and_ignores_legacy_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -244,3 +244,35 @@ def test_the_shipped_authoring_skills_are_discoverable_as_bundled(tmp_path: Path
         assert skill is not None
         assert skill.profile == BUNDLED_OWNER
         assert skill.qualified_name == f"bundled/{name}"
+
+
+@pytest.mark.real_bundled_resources
+def test_email_triage_discovery_explains_missing_integrations(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    skills = discover_skills(settings=settings, profile_scope=SCOPE)
+    registry = discover_workflows(
+        settings=settings,
+        profile_scope=SCOPE,
+        skill_names=skills.identifiers(),
+        tool_registry=ToolRegistry([]),
+    )
+
+    assert registry.loaded("bundled/email-triage") is None
+    error = next(
+        error for error in registry.errors if Path(error.source_path).parent.name == "email-triage"
+    )
+    summary, details = error.message.split("\nDetails: ")
+    assert "Workflow 'email-triage' is unavailable" in summary
+    assert "current profile scope" in summary
+    for name in (
+        "gmail_search",
+        "gmail_read_thread",
+        "gmail_modify_labels",
+        "gmail_trash",
+        "recall",
+    ):
+        assert summary.count(name) == 1
+    assert "configured Google account and matching OAuth credentials" in summary
+    assert "--profile or --access-profile" in summary
+    assert "step 'search': unknown tool 'gmail_search'" in details
+    assert "foreach 'process' body step 'read'" in details

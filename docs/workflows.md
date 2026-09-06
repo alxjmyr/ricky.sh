@@ -22,6 +22,14 @@ when it resolves to one accessible workflow. A bundled workflow carries the rese
 owner and the qualified name `bundled/<name>`. A workflow you author with the same bare name
 takes precedence over a bundled workflow, which stays reachable as `bundled/<name>`.
 
+Discovery checks required tools against the current profile scope. If a tool is unavailable,
+Ricky reports the missing tools and setup guidance under **Workflow discovery issues**. Check
+integration configuration and profile access; for custom workflows, also check tool names.
+The bundled email-triage workflow requires a [configured Google account and matching OAuth
+credentials](integrations.md#connect-google-accounts) in an accessible profile. After setup,
+retry `ricky workflow list` with `--profile` or `--access-profile` as needed. The source path
+identifies the affected workflow; an unavailable tool does not mean that its file is missing.
+
 ## Inspect and validate a workflow
 
 Always validate before you run a new or changed workflow:

@@ -15,7 +15,9 @@ from ricky.profiles import BUNDLED_OWNER, ProfileResourceRef, ProfileScope
 from ricky.workflows.compile import compile_workflow
 from ricky.workflows.spec import (
     NAME_PATTERN,
+    AgentStep,
     ModelTaskBase,
+    ToolStep,
     WorkflowSpec,
     iter_steps,
     parse_workflow_toml,
@@ -293,7 +295,9 @@ def _load_dir(
             )
             problems = [*compiled.errors, *problems]
             if problems:
-                raise ValueError("; ".join(problems))
+                guidance = _unavailable_tools_message(spec, tool_registry)
+                detail = "; ".join(problems)
+                raise ValueError(f"{guidance}\nDetails: {detail}" if guidance else detail)
         except Exception as exc:  # noqa: BLE001 - malformed bundles become load errors.
             errors.append(WorkflowLoadError(source_path=str(source), message=str(exc)))
             continue
@@ -305,6 +309,31 @@ def _load_dir(
             )
         )
     return loaded, errors
+
+
+def _unavailable_tools_message(spec: WorkflowSpec, tool_registry: ToolLookup) -> str:
+    required: set[str] = set()
+    for step in iter_steps(spec.steps):
+        if isinstance(step, ToolStep):
+            required.add(step.tool)
+        elif isinstance(step, AgentStep):
+            required.update(step.tools)
+    missing = sorted(name for name in required if tool_registry.get(name) is None)
+    if not missing:
+        return ""
+    message = (
+        f"Workflow '{spec.name}' is unavailable because required tools are not available "
+        f"in the current profile scope: {', '.join(missing)}. "
+        "Check integration configuration and profile access. "
+        "For custom workflows, also check the tool names."
+    )
+    if any(name.startswith("gmail_") for name in missing):
+        message += (
+            " Gmail tools require a configured Google account and matching OAuth credentials "
+            "in an accessible profile. Complete Google setup in that profile, then retry "
+            "with --profile or --access-profile as needed."
+        )
+    return message
 
 
 def _bundle_file_errors(

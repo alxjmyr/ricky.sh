@@ -37,12 +37,26 @@ from ricky.protected_values import (
     ProtectedFieldDescriptor,
     SecureValueInputRequest,
 )
+from ricky.workflows.registry import WorkflowLoadError
 
 
 def _renderer(*, debug: bool = False) -> tuple[CliRenderer, StringIO]:
     output = StringIO()
     console = Console(file=output, force_terminal=False, color_system=None, width=100)
     return CliRenderer(console=console, debug=debug), output
+
+
+def test_workflow_discovery_issues_preserve_literal_diagnostics() -> None:
+    renderer, output = _renderer()
+    renderer.render_workflow_load_errors(
+        [WorkflowLoadError(source_path="/workflows/[red]/workflow.toml", message="Missing [tool].")]
+    )
+
+    rendered = output.getvalue()
+    assert "Workflow discovery issues" in rendered
+    assert "Source" in rendered
+    assert "/workflows/[red]/workflow.toml" in rendered
+    assert "Missing [tool]." in rendered
 
 
 @pytest.mark.parametrize("label", ["[/bold]", "[bold]Security code[/bold]"])
