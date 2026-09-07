@@ -163,11 +163,25 @@ ricky capability validate
 These commands show installed resource mappings, provenance, risk, unattended eligibility,
 confirmation requirements, guardrails, and resolved standing policy.
 
+Configure `agents.gateway_foreground` and `agents.ad_hoc_background` independently
+in `ricky.toml`. `exclude_capabilities` removes a capability from eligibility;
+`confirmation_required_capabilities` requires authenticated confirmation;
+`guardrail_required_capabilities` requires a supported, exact constraint before use.
+Gateway route settings can narrow these policies further. Use IDs from the inventory,
+then run `ricky capability validate` after editing policy.
+
+Empty policy lists do not grant effects. An ad hoc execution still needs an exact
+compiled contract, and delegated effects need their enabled authority evaluator.
+Set `[agents.ad_hoc_background.execution]` budgets explicitly before delegating effects;
+the default external-effect ceiling is zero. Browser owner settings and protected-value
+policies impose additional ceilings. Named jobs use their own authored tool and
+permission lists, described in [Jobs and schedules](jobs-and-schedules.md).
+
 ## Understand delegated-authority support
 
 The `ricky authority` command group can inspect and revoke stored task-scoped grants. Production
 browser interaction, protected-value use, and browser commit capabilities provide specialized
-evaluators when their owner policy is enabled. Plugins can populate additional capabilities.
+evaluators when their owner policy is enabled. Use the capability inventory to see which evaluators and tools are installed.
 Inspect and revoke grants with:
 
 ```bash

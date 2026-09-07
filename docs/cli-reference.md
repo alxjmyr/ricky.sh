@@ -2,8 +2,9 @@
 
 Ricky resolves one initialized `user_data_dir` through its fixed XDG bootstrap
 pointer. Skills, workflows, and jobs come from your profile roots and from the
-resources bundled with Ricky; the working directory never selects them. Use
-`--project` to bind the directory that filesystem tools may act within.
+resources bundled with Ricky; the working directory never selects them. Chat uses the current project for relative file paths and automatic read permission.
+Commands that accept `--project`, such as job and schedule commands, use it to
+select that working directory. Host paths outside it require the applicable permissions.
 
 ```text
 ricky [--version] [COMMAND]
@@ -102,7 +103,7 @@ equivalent fields.
 | `workflow` | `list`, `validate`, `show`, `run`, `status`, `resume`, `abandon`, `reconcile`, `dryrun` |
 | `task` | `list`, `show`, `activity`, `artifacts`, `create`, `tag`, `complete`, `cancel`, `reopen` |
 | `job` | `list`, `validate`, `show`, `run`, `once`, `history`, `report`, `action` |
-| `schedule` | `list`, `show`, `add`, `set`, `enable`, `disable`, `remove`, `approve`, `sync`, `doctor`, `uninstall` |
+| `schedule` | `list`, `show`, `add`, `set`, `enable`, `disable`, `remove`, `refresh`, `approve`, `sync`, `doctor`, `uninstall` |
 | `session` | `list`, `show`, `resume`, `archive` |
 | `gateway` | `status`, `doctor`, `recover`, `prune`, `audit`, `run`, `process`, `transport`, `inbox`, `service` |
 | `capability` | `list`, `show`, `validate` |

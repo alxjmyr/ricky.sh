@@ -10,6 +10,12 @@ Do not create or maintain V1 state-machine definitions. If an existing bundle
 has no version, convert the complete bundle to V2 before you change its
 behavior.
 
+Use installed `ricky` commands. In a development checkout, follow its contributor
+instructions and use `uv run ricky` (for example, `uv run ricky config`).
+All user bundles belong below the resolved profile root; projects are not
+discovery roots. Bundled resources are read-only. To customize one, copy its
+complete bundle into an accessible profile and use that qualified identity.
+
 ## Procedure
 
 1. Interview the user before you write files. Identify:
@@ -22,8 +28,7 @@ behavior.
    - the approval surfaces;
    - the expected collection sizes and stable item keys;
    - the failure, retry, interruption, and resume behavior.
-   - the owning profile and whether the bundle belongs to this project or to
-     that profile across projects;
+   - the owning profile and which project, if any, supplies the working directory;
    - every additional profile whose data or resources a run must access.
 2. Propose the execution graph in plain language. Show its roots, fan-out,
    fan-in, conditions, approvals, effects, and data flow. Get the user's
@@ -35,9 +40,7 @@ behavior.
    current session's pinned profile scope contains the owner and every profile
    the authoring work must inspect. If it does not, stop and tell the user to
    start an appropriately scoped session; a skill cannot widen its runtime
-   scope. For a project workflow, use `.ricky/workflows/<name>` and explain
-   that the invocation's primary profile owns the resource. For a reusable
-   profile workflow, run `uv run ricky config`, read `user_data_path`, and use
+   scope. Run `ricky config`, read `user_data_path`, and use
    `<resolved-user-data-dir>/profiles/<owner>/workflows/<name>`. Use `shared`
    only when the workflow is intentionally available in every runtime. Never
    guess or hardcode the user data root.
@@ -51,7 +54,7 @@ behavior.
    `--access-profile <name>` for each additional required profile. Call
    `validate_workflow` with the qualified `<owner>/<name>` after every draft;
    its session scope must match `<scope-flags>`. Also validate through
-   `uv run ricky workflow validate <owner>/<name> <scope-flags>`. Fix all
+   `ricky workflow validate <owner>/<name> <scope-flags>`. Fix all
    reported errors and validate again. Stop only when validation returns the
    compiled graph and `valid`.
 8. Show the validated graph to the user. Explain the declared model inputs,

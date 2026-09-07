@@ -63,6 +63,7 @@ from ricky.protected_values import (
     deny_unlock,
 )
 from ricky.skills.registry import SkillRegistry, discover_skills
+from ricky.skills.search import SearchSkillResourcesTool
 from ricky.skills.tool import ReadSkillResourceTool, UseSkillTool
 from ricky.tools import Tool, ToolRegistry
 from ricky.tools.base import StateGuardRegistry
@@ -344,6 +345,7 @@ async def build_capability_runtime(
             *delegable_effect_tools(runtime_settings),
             UseSkillTool(skills),
             ReadSkillResourceTool(skills),
+            SearchSkillResourcesTool(skills),
             *(
                 [ProtectedValuesCatalogTool(protected_values)]
                 if protected_values is not None

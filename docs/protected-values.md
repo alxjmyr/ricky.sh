@@ -36,8 +36,7 @@ The vault works in a desktop terminal, headless host, or SSH TTY. A foreground c
 it first needs a stored value. A gateway never prompts through Telegram or another messaging
 transport and does not fall back to a prompt after startup. You can instead unlock selected vaults
 locally when you start the gateway, as described below. Standalone jobs and scheduled processes
-cannot borrow the gateway's unlocked state. A later reviewed machine unlock provider can add a new
-unlock slot without changing protected resources or consumer tools.
+cannot borrow the gateway's unlocked state.
 
 ## Unlock selected vaults for a gateway process
 
@@ -222,7 +221,7 @@ the others.
 Prompt-each-use fields and ordinary OTP values remain unavailable unattended. An explicitly stored
 card security code can participate only when that field and resource separately allow unattended
 materialization and commits. Named and scheduled jobs cannot use the resident gateway broker in
-this phase.
+these runtimes.
 
 ## Understand the security boundary
 

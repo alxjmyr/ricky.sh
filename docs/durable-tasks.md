@@ -14,6 +14,11 @@ temporary chat tasks store model working state; workflow runs store execution of
 
 The default is `user`.
 
+An `agent` task does not start a background process by itself. Ask a running Ricky
+session to advance it, select it through a job's task source, or delegate an execution
+through the gateway. See [Jobs and schedules](jobs-and-schedules.md) and
+[Messaging and the gateway](messaging-and-gateway.md).
+
 ## Create a task
 
 ```bash
@@ -81,3 +86,14 @@ trusting a stale writer.
 Each profile has a separate task store and confined artifact workspace under
 `<user_data_dir>/profiles/<name>/tasks/`. Always supply the owning profile for an exact CLI task
 operation. Tools may access a task only when its profile is in the issued session scope.
+
+Ask Ricky to save supporting text with `write_task_artifact` or make an exact edit
+with `edit_task_artifact`. Artifact writes require a current task lease and the task's
+ownership policy. `list_task_artifacts` returns logical references; `read_task_artifact`
+reads bounded text without a lease. Use those references for attachments or background
+browser uploads, rather than constructing a path inside the task store.
+
+For a handoff, ask Ricky to record progress and the next action, then mark the task as
+waiting on the user, agent, an external response, or a time. A blocked task should name
+the blocker. `park_for_review` saves a review task with supporting artifacts and releases
+its lease so another session can pick it up.

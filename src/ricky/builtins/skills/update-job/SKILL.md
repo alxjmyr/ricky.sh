@@ -11,6 +11,12 @@ behavior unless the user explicitly requests a change.
 Do not create a new job with this skill. If no bundle exists, or the bundle
 does not declare `version = 3`, stop and use `author-job`.
 
+Use installed `ricky` commands. In a development checkout, follow its contributor
+instructions and use `uv run ricky` (for example, `uv run ricky config`).
+All user bundles belong below the resolved profile root; projects are not
+discovery roots. Bundled resources are read-only. To customize one, copy its
+complete bundle into an accessible profile and use that qualified identity.
+
 ## Procedure
 
 ### 1. Establish the baseline
@@ -19,15 +25,15 @@ does not declare `version = 3`, stop and use `author-job`.
    work must access. Confirm that the current session's pinned scope contains
    them; a skill cannot widen its runtime scope. Define `<scope-flags>` as
    `--profile <primary>` plus one `--access-profile <name>` for each additional
-   profile. Run `uv run ricky job list <scope-flags>` and resolve the exact
-   qualified resource, such as `work/daily-brief`. Then run `uv run ricky job
+   profile. Run `ricky job list <scope-flags>` and resolve the exact
+   qualified resource, such as `work/daily-brief`. Then run `ricky job
    show <owner>/<name> <scope-flags>`. Do not guess when an unqualified name is
-   ambiguous. Note whether the bundle is project-authored under `.ricky/jobs/`
-   and therefore owned by the primary profile, or profile-owned under
-   `<user_data_dir>/profiles/<owner>/jobs/`. Run `uv run ricky config` and read
-   `user_data_path`; never guess or hardcode it.
+   ambiguous. Locate the profile-owned bundle under
+   `<user_data_dir>/profiles/<owner>/jobs/`. Run `ricky config` and read
+   `user_data_path`; never guess or hardcode it. For a bundled source,
+   establish the profile copy and review its changed identity before proceeding.
 2. Read `job.toml` and `INSTRUCTIONS.md` when it exists.
-3. Run `uv run ricky job validate <owner>/<name> <scope-flags>` before
+3. Run `ricky job validate <owner>/<name> <scope-flags>` before
    editing. Record existing errors separately from the requested change. Do not
    report a pre-existing error as a regression.
 4. Record the baseline:
@@ -44,15 +50,15 @@ does not declare `version = 3`, stop and use `author-job`.
      every explicit notification tool or workflow step separately;
    - the current `context.lineage` and `context.revision` (both default to `1`
      when omitted from an older bundle).
-5. Read the recent history with `uv run ricky job history --job <owner>/<name>
-   <scope-flags>` and `uv run ricky job report <run_id> <scope-flags>` for the
-   last run. Check `uv run ricky job action show <action_id> <scope-flags>`
+5. Read the recent history with `ricky job history --job <owner>/<name>
+   <scope-flags>` and `ricky job report <run_id> <scope-flags>` for the
+   last run. Check `ricky job action show <action_id> <scope-flags>`
    when the job performs effects.
 6. Resolve any `in_doubt` action before you change effect behavior. Only the
-   user reconciles it, with `uv run ricky job action resolve`. Never change the
+   user reconciles it, with `ricky job action resolve`. Never change the
    bundle to hide an unresolved external action.
 7. List every schedule that references the job with
-   `uv run ricky schedule list`. Record its current state.
+   `ricky schedule list`. Record its current state.
 
 ### 2. Define the requested change
 
@@ -93,12 +99,12 @@ Classify the change by what it moves:
   referenced executable workflow bundle changes the exact spec/runtime pins.
   Every referencing schedule stops launching until the revision is validated.
   A revision that stays inside the existing approval envelope is accepted with
-  `uv run ricky schedule refresh <id>`.
+  `ricky schedule refresh <id>`.
 - **Approval envelope** — provider trust boundary, exact tool contracts,
   standing mutations, private-data source scopes, locked workflow arguments,
   the external-effect ceiling, and the qualified Google account identities
   issued to jobs with Gmail or Calendar tools. New or wider authority requires
-  explicit `uv run ricky schedule approve <id>`. A newly available account or
+  explicit `ricky schedule approve <id>`. A newly available account or
   changed email identity requires approval; account removal and other
   tool/source/budget reductions remain within the prior envelope and need only
   refresh. Any schedule timing edit is explicitly approved; `schedule sync`
@@ -188,11 +194,11 @@ Keep these invariants:
 
 ### 5. Validate and inspect
 
-1. Run `uv run ricky job validate <owner>/<name> <scope-flags>` after each
+1. Run `ricky job validate <owner>/<name> <scope-flags>` after each
    coherent draft.
 2. Fix every new error and validate again until it reports
    `valid and available`.
-3. Compare `uv run ricky job show <owner>/<name> <scope-flags>` with the
+3. Compare `ricky job show <owner>/<name> <scope-flags>` with the
    baseline. Confirm that only the agreed keys changed, especially the tool
    list, the standing mutations, the budget, and the sources.
 4. Do not declare the job ready on valid TOML alone. Validation proves shape,
@@ -201,7 +207,7 @@ Keep these invariants:
 
 ### 6. Prove behavior without effects
 
-1. Dry-run the job: `uv run ricky job run <owner>/<name> --dry-run
+1. Dry-run the job: `ricky job run <owner>/<name> --dry-run
    <scope-flags>`. A dry run reasons
    and reads, and mechanically disables leases, mutations, effect
    reservations, escalation, cursor commits, and fairness writes. Ask the user
@@ -212,7 +218,7 @@ Keep these invariants:
    - an empty batch and a full batch at `item_limit` or `limit`;
    - the budget bound when a bound changed;
    - the escalation path when the job can block.
-3. Read the resulting report with `uv run ricky job report <run_id>`. Confirm
+3. Read the resulting report with `ricky job report <run_id>`. Confirm
    the dispositions, and confirm that no effect was reserved.
 4. Ask separately before the first live run after an effect or authority
    change.
@@ -224,17 +230,17 @@ Keep these invariants:
 
 ### 7. Reconcile schedules last
 
-1. Run `uv run ricky schedule list`. A referencing schedule reports one exact
+1. Run `ricky schedule list`. A referencing schedule reports one exact
    gate: `lineage_required`, `validation_required`, or `approval_required`.
 2. Resolve `lineage_required` in the job file and validate again. Do not let a
    schedule command choose context implicitly.
-3. For `validation_required`, run `uv run ricky schedule refresh <id>`. Refresh
+3. For `validation_required`, run `ricky schedule refresh <id>`. Refresh
    fails closed if the current revision exceeds the stored approval envelope.
 4. For `approval_required`, report exactly what expands or crosses a boundary.
-   Run `uv run ricky schedule approve <id>` only with explicit user authority.
-5. Run `uv run ricky schedule sync` after every successful refresh or approval,
+   Run `ricky schedule approve <id>` only with explicit user authority.
+5. Run `ricky schedule sync` after every successful refresh or approval,
    then verify the schedule reports `ready`.
-6. Run `uv run ricky schedule doctor` when installed state may have drifted.
+6. Run `ricky schedule doctor` when installed state may have drifted.
 7. Never edit the crontab directly, and never rewrite desired state to make a
    changed job look approved.
 

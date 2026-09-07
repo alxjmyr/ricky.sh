@@ -16,7 +16,7 @@ commands.
 | `<user_data_dir>/profiles/<name>/ricky.toml` | Profile defaults, policy, accounts, and integration settings | No |
 | `<user_data_dir>/profiles/<name>/.secrets.toml` | Credentials owned by that profile | No |
 | `ricky.toml.example` and `.secrets.toml.example` | Authored configuration and credential references | Yes |
-| `.ricky/` | Project-local directory Ricky treats as private; no resources are discovered from it | Yes |
+| `.ricky/` | Project-local directory Ricky treats as private; no resources are discovered from it | No |
 | `user_data_dir` | Live configuration, profile data, generated state, tokens, sessions, and artifacts | No |
 
 Create the minimal scaffold before editing configuration:
@@ -132,17 +132,23 @@ Set an IANA timezone name:
 user_timezone = "America/Chicago"
 ```
 
-New sessions use this timezone for time-sensitive reasoning and scheduling defaults.
+Put this scalar before the first TOML table in the installation or primary profile file.
+New sessions use it for time-sensitive reasoning. Cron uses the host cron timezone;
+`user_timezone` does not change when the host launches schedules.
 
 ## Configure optional feature groups
 
-The included `ricky.toml.example` documents every supported setting and its default. Common sections
-are:
+The [configuration example](../ricky.toml.example) documents configuration fields and
+illustrates a multi-profile installation. Its sample values are not all defaults; do not
+copy the whole file over an initialized configuration. The
+[credential example](../.secrets.toml.example) shows the supported secret keys. Copy only
+the entries you need into the owning profile, and enter credentials locally. Common sections are:
 
 | Section | Controls |
 |---|---|
 | `[context]` | Context estimation, output reserve, large tool results, and manual compaction |
 | `[memory]` | Profile memory enablement and note limits |
+| `[durable_tasks]` | Task storage, leases, and artifact limits |
 | `[workflow]` | Workflow enablement, parallelism, retries, and data limits |
 | `[sessions]` | Persistent conversation storage, turn wall time, and retention |
 | `[jobs]` | Job bundle and run storage |
@@ -155,8 +161,9 @@ are:
 | `[browser]` | Explicit Chromium installation, runtime limits, and destination policy |
 | `[protected_values]` | Encrypted profile-vault mechanics, limits, and prompt timeout |
 
-Follow the relevant feature guide before you change an advanced section. Ricky validates typed
-settings at startup and fails instead of silently accepting an invalid value.
+Follow the relevant feature guide before you change an advanced section. Ricky validates
+supported settings at startup. Some installation sections ignore unknown keys, so check
+`ricky config` after editing; successful startup does not prove that a misspelled key took effect.
 
 `sessions.turn_wall_seconds` must be no greater than 3570 seconds so the gateway can retain 30
 seconds of inbox-claim headroom. `gateway.service.unit_dir` defaults to the XDG systemd user-unit

@@ -51,8 +51,38 @@ Ricky discovers jobs in this order:
 Resources use qualified names such as `work/project-brief`. An unqualified name is accepted only
 when it resolves to one accessible job. A bundled job carries the reserved `bundled` owner and the
 qualified name `bundled/<name>`. A job you author with the same bare name takes precedence over a
-bundled job, which stays reachable as `bundled/<name>`. Ricky ships the read-only `project-brief`
-job.
+bundled job, which stays reachable as `bundled/<name>`. No named jobs are currently shipped;
+create a profile job before using the named-job commands below.
+
+### Create your first job
+
+Find `user_data_dir` with `ricky config`. Create the directory
+`<user_data_dir>/profiles/shared/jobs/project-brief/`, then save this as `job.toml`:
+
+```toml
+version = 3
+name = "project-brief"
+description = "Summarize the current project's status without changing files."
+goal = "Read README.md and list the top-level files. Report the project purpose and next steps."
+result_notification = "never"
+
+[context]
+lineage = 1
+revision = 1
+
+[budget]
+wall_clock_seconds = 300
+iterations = 8
+max_completion_tokens_per_request = 4096
+effect_calls = 0
+
+[tools]
+allow = ["read_file", "list_dir"]
+```
+
+The job uses the runtime's configured provider and model. Run the examples from a
+project containing `README.md`, or pass `--project /absolute/path/to/project`.
+Use another owning profile if this job should not be available everywhere.
 
 ```bash
 ricky job list
@@ -156,7 +186,7 @@ A job specification pins:
 
 ## Give a named job read-oriented browser access
 
-Phase 7 named and scheduled jobs can own one exact headless browser for a run. They may open,
+Named and scheduled jobs can own one exact headless browser for a run. They may open,
 navigate, scroll, select pages, and take semantic or explicitly disclosed masked visual snapshots.
 They cannot click or fill controls, upload or download files, use protected values, hand off to a
 user, or commit a financial or generic browser transaction. Workflows still cannot contain browser
@@ -220,8 +250,10 @@ To use `browser_visual_snapshot`, set `allow_masked_visual_observations = true`,
 and list the job's pinned provider in the owning profile's
 `browser.screenshot_allowed_providers`. The selected model must independently accept images.
 
-By default, every named run enqueues an automatic terminal result through
-`messaging.job_route`. To keep a job's terminal results available only through history and reports,
+## Configure results and recurring inputs
+
+When `messaging.job_route` is configured, named runs enqueue an automatic terminal result
+through that route by default. To keep a job's terminal results available only through history and reports,
 add this top-level setting:
 
 ```toml
@@ -240,6 +272,33 @@ and required user action first. They may use headings, emphasis, lists, task lis
 quotes, links, code, formulas, and footnotes when useful. Tables should have no more than three
 short columns; large reports and media should use attachments. Telegram renders this portable
 format, and future messaging transports can render or safely downgrade the same content.
+
+Agent jobs can select recurring inputs with `[[task_sources]]` and
+`[[stream_sources]]`. Task sources find eligible tasks; they do not assign or claim
+them. Slack streams retain a cursor and bounded batches so a later run can account
+for previously seen items. For example, add either source to an agent job:
+
+```toml
+[[task_sources]]
+name = "weekly-review"
+tags_any = ["queue:weekly-review"]
+execution_modes = ["agent", "joint"]
+limit = 10
+reconsider_after_hours = 24
+
+[[stream_sources]]
+name = "team-channel"
+adapter = "slack_channel"
+channel_id = "C0123456789"
+initial_lookback_hours = 24
+item_limit = 50
+```
+
+Configure Slack in the job's scope before adding a Slack source. Give the job the
+read tools it needs and exact mutation permissions if it must advance tasks.
+Ricky injects source-accounting tools; the job records a disposition for each
+candidate or stream item instead of writing cursors directly. Workflow-backed jobs
+cannot declare these sources; pass their inputs through workflow arguments.
 
 Task-source `due_before` values must include a timezone offset, such as
 `2026-08-25T17:00:00+00:00`. Ricky normalizes offset-aware values to UTC before comparing source
@@ -310,7 +369,9 @@ messaging route.
 
 ## Schedule a named job
 
-Schedules require a POSIX host with `crontab`, `fcntl`, and an absolute `uv` executable.
+Schedules require a POSIX host with `crontab`, Python's `fcntl` support, and the installed
+`ricky` executable on `PATH` when synchronizing. Ricky records its absolute path in cron.
+Cron uses the host timezone; the `user_timezone` setting does not change cron timing.
 
 Create desired state, install it, and verify it:
 

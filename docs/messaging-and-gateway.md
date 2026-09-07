@@ -82,6 +82,11 @@ permissions, budget, overlap lock, and audit chain.
 
 ## Validate the setup
 
+Create the owning profile first with `ricky profile add personal` if it does not exist.
+Replace the sample IDs and model before starting the gateway. A work route needs its
+own transport/account or an explicitly cleared messaging route and a provider allowed
+by every profile in its scope.
+
 Check the Telegram identity, then the complete gateway configuration:
 
 ```bash
@@ -92,6 +97,24 @@ ricky gateway status
 
 `gateway doctor` validates configuration, routes, storage, credentials, capabilities, and
 supervision without calling a model.
+
+### Route notifications
+
+The route definition alone does not enable agent notifications or automatic job results.
+To permit the static `owner` route for those purposes, add these keys to the installation's
+existing `[messaging]` table:
+
+```toml
+[messaging]
+agent_routes = ["owner"]
+job_route = "owner"
+```
+
+`agent_routes` controls static routes available to agent notification and execution tools.
+`job_route` selects automatic named-job results; a job can suppress its automatic result
+with `result_notification = "never"`. The route must accept every profile in the result's
+label. The gateway owns delivery while running. For a one-time delivery check, use
+`ricky gateway transport deliver --once`.
 
 ## Run the gateway
 
@@ -160,13 +183,7 @@ that route is removed or any pinned value changes, Ricky fails closed and tells 
 `/new` archives the prior session and starts under the current route configuration; replay after a
 gateway restart resumes the same rotation instead of archiving a second conversation.
 
-The profiles routing correction changes the capability-policy digest from process-wide settings to
-the route's exact profile scope. After upgrading from the initial profiles release, send `/new`
-once in each existing live conversation when Ricky reports route-policy drift.
-
-This release intentionally does not provide aliases for earlier unqualified Telegram account
-references. Update each transport from a local name such as `bot` to `profile/bot`. Telegram
-authority principals use the same qualified account, for example
+Telegram authority principals use the qualified account, for example
 `telegram:personal/bot:TELEGRAM_USER_ID`.
 
 Cancellation is durable. A queued execution normally becomes `cancelled` immediately. A running
@@ -245,8 +262,10 @@ ricky gateway service status
 ricky gateway doctor
 ```
 
-Install enables the service by default but does not start it. The unit uses the absolute `uv` path
-and does not place secrets on the command line.
+Install enables the service by default but does not start it. The unit uses the absolute installed
+`ricky` console script and records the current working directory. Use an existing, stable directory
+when installing it. Prefer absolute `project_root` paths in gateway routes so their meaning does
+not change between a terminal launch and the service. The unit contains no secrets.
 
 To start the service with an initialized profile vault unlocked, enter its passphrase locally:
 

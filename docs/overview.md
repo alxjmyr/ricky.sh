@@ -34,13 +34,16 @@ A full chat session includes these built-in capabilities:
 - Start and validate workflows.
 - Create and coordinate durable tasks.
 
-Ricky adds integration tools only when you configure their credentials:
+Ricky adds service integrations when you configure their credentials:
 
 - Slack
 - Gmail
 - Google Calendar
 - Brave Search
 - Telegram messaging through the gateway
+
+Browser control and protected values have separate enablement and setup. See
+[Browser control](browser-control.md) and [Protected values](protected-values.md).
 
 ## How Ricky handles risk
 

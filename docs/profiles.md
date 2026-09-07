@@ -12,7 +12,7 @@ primary profile. Select another enabled primary profile with `--profile`:
 
 ```bash
 ricky chat --profile work
-ricky ask --profile personal "Summarize my open commitments."
+ricky chat --profile personal
 ```
 
 Add one or more readable profiles with repeatable `--access-profile` options:
@@ -191,5 +191,6 @@ from multiple profiles—such as sessions, executions, and notifications—carry
 label. Their owning stores reject a read or mutation unless the caller's scope includes the entire
 label.
 
-Ricky reads only the profile-era layout. Development installations created before profiles must be
-recreated or repaired manually; no legacy migration command remains in the runtime.
+Ricky validates stored format compatibility before opening an initialized installation.
+Use [upgrade and recovery commands](operations.md#upgrade-ricky) when a released
+installation needs migration. Back up unsupported development data before repairing it.

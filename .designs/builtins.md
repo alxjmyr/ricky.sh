@@ -32,6 +32,21 @@ installed wheel present the same layout, so discovery has one code path.
 The bundled root is read-only at runtime. No Ricky code writes below it. The
 authoring skills create bundles in the primary profile's user root.
 
+## Bundled user documentation
+
+The `ricky-docs` skill bundles the release's user guides and configuration examples
+as passive references. `docs/` and the repository's example TOML files are canonical;
+the build hook generates the ignored reference copy and a versioned section index.
+Normal and editable wheel builds use the same generator. The release action verifies
+the actual wheel against those sources before publication. Runtime discovery never
+copies or refreshes documentation. Developers refresh references explicitly after
+editing docs in an existing editable checkout.
+
+`search_skill_resources` searches only the active bundle with bounded literal text
+matching. Like `read_skill_resource`, it uses the `builtin.skill.use` capability and
+the registry's confined resource resolution. Pinned executions rebind both readers
+to the selected immutable skill snapshot.
+
 ## Resource origin and identity
 
 A bundled resource has no owning profile. Attributing one would be a fiction:
@@ -55,7 +70,7 @@ same bare name shadows a bundled resource of that name. Shadowing is intentional
 it is how a user replaces a shipped skill.
 
 Shadowing is silent in selection but never silent in inspection. Capability
-inventory, `ricky skill list`, `ricky workflow list`, and `ricky job list` report
+inventory, chat's `/skill`, `ricky workflow list`, and `ricky job list` report
 each resource's origin, and report a shadowed bundled resource as shadowed. A
 caller reaches a shadowed bundled resource by its qualified `bundled/<name>` form.
 

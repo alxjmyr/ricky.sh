@@ -48,6 +48,11 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
     for version in ("0.6.0", "0.6.1"):
         source = tmp_path / f"source-{version}"
         shutil.copytree(repository / "src", source / "src")
+        shutil.copytree(repository / "docs", source / "docs")
+        (source / "scripts").mkdir()
+        shutil.copy2(repository / "scripts/bundle_docs.py", source / "scripts/bundle_docs.py")
+        for name in ("hatch_build.py", "ricky.toml.example", ".secrets.toml.example"):
+            shutil.copy2(repository / name, source / name)
         shutil.copy2(repository / "README.md", source / "README.md")
         project = tomlkit.parse((repository / "pyproject.toml").read_text(encoding="utf-8"))
         metadata = project["project"]
@@ -59,6 +64,12 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
             cwd=source,
         )
         wheel = artifacts / f"ricky-{version}-py3-none-any.whl"
+        with zipfile.ZipFile(wheel) as archive:
+            references = "ricky/builtins/skills/ricky-docs/references/"
+            assert f"Ricky {version}" in archive.read(references + "INDEX.md").decode()
+            assert archive.read(references + "docs/configuration.md") == (
+                repository / "docs/configuration.md"
+            ).read_bytes()
         constraints = artifacts / f"ricky-{version}-constraints.txt"
         shutil.copy2(constraints_base, constraints)
         descriptors.append(_descriptor(artifacts, version, wheel, constraints))
@@ -95,6 +106,12 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
     executable = bin_root / "ricky"
     _run([str(executable), "init", "--user-data-dir", str(user_root)], env=environment)
     assert _run([str(executable), "--version"], env=environment).stdout.strip() == "ricky 0.6.0"
+    installed_python = tool_root / "ricky" / "bin" / "python"
+    _run(
+        [str(installed_python), "-I", "-c", _DOCS_SMOKE, "0.6.0"],
+        cwd=tmp_path,
+        env=environment,
+    )
 
     # Every bundled resource must travel inside the wheel installed in an
     # environment that has no checkout of this repository.
@@ -175,6 +192,11 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
     assert len(result["managed"]["schedules_installed"]) == 1
     assert result["managed"]["schedules_approval_required"] == []
     assert _run([str(executable), "--version"], env=environment).stdout.strip() == "ricky 0.6.1"
+    _run(
+        [str(installed_python), "-I", "-c", _DOCS_SMOKE, "0.6.1"],
+        cwd=tmp_path,
+        env=environment,
+    )
     manifest = json.loads((user_root / "installation.json").read_text(encoding="utf-8"))
     assert manifest["migration_state"] == "clean"
     assert manifest["operation_id"] is None
@@ -202,6 +224,40 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
         "start",
         "is-active",
     ]
+
+
+_DOCS_SMOKE = """
+import asyncio
+from pathlib import Path
+import sys
+import ricky
+from ricky.agent import AgentSession
+from ricky.config import RickySettings
+from ricky.skills.registry import discover_skills
+from ricky.skills.search import SearchSkillResourcesTool
+from ricky.skills.tool import ReadSkillResourceTool
+from ricky.tools import ToolContext, ToolRegistry
+
+assert Path(ricky.__file__).is_relative_to(Path(sys.prefix))
+
+async def check():
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    skills = discover_skills(settings=settings, profile_scope=session.profile_scope)
+    assert skills.activate(session, 'bundled/ricky-docs').ok
+    tools = ToolRegistry([SearchSkillResourcesTool(skills), ReadSkillResourceTool(skills)])
+    ctx = ToolContext(cwd=Path.cwd(), settings=settings, session=session)
+    result = await tools.dispatch('search_skill_resources', {
+        'query': 'schedule refresh', 'path': 'references/docs/jobs-and-schedules.md'
+    }, ctx)
+    assert not result.is_error and result.data['matches'], result.content
+    index = await tools.dispatch('read_skill_resource', {
+        'path': 'references/INDEX.md', 'limit': 1
+    }, ctx)
+    assert 'Ricky ' + sys.argv[1] in index.content, index.content
+
+asyncio.run(check())
+"""
 
 
 def _job_spec() -> str:

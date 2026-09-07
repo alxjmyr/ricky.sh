@@ -7,7 +7,7 @@ semantic snapshots, ordinary form entry, explicit consequential commits, dialogs
 local user handoff. It can also transfer reviewed files, use masked visual snapshots as a fallback,
 and fill recognized protected controls from local protected-value aliases. Gateway-owned ad hoc
 executions can use a separately enabled, guarded background surface; named jobs can use its
-read-oriented subset. Selected-tab daily-driver attachment remains deferred.
+read-oriented subset. Attachment to selected tabs in your everyday browser is not supported.
 
 ## Install and enable Chromium
 
@@ -90,10 +90,8 @@ closing the external browser, its contexts, or its tabs. It also leaves unsuppor
 tabs open and does not intercept later navigation in omitted tabs. Attachment, eligible-tab
 discovery, and destination checks share one configured attachment deadline. Ricky cannot infer
 whether an external CDP browser is visible, so local user handoff is unavailable for these sessions.
-Do not use this mode with an unrestricted daily-driver profile. User-selected tab-group attachment
-is deferred to browser-control Phase 8. That phase will re-evaluate supported upstream transports
-and, if needed, separately design a Ricky-owned extension and relay after the protected-value,
-transaction, and lifecycle safeguards are in place.
+Do not use this mode with your unrestricted everyday browser profile. Ricky cannot
+limit a CDP connection to a user-selected tab group.
 
 ## Understand ownership and cleanup
 
@@ -104,9 +102,7 @@ close. Ricky never imports or opens an ordinary Chrome profile as a persistent r
 processes and tabs remain externally owned.
 
 Configured resources use host-local exclusive leases. If another Ricky runtime has one open,
-opening, checking, setting up, or resetting it fails as busy. One future coordinated browser owner
-may serialize multiple agents against a profile; competing Chromium processes may not open the
-same profile directory. If Ricky cannot confirm that an owned Chromium process closed, it reports
+opening, checking, setting up, or resetting it fails as busy. Competing Chromium processes must not open the same profile directory. If Ricky cannot confirm that an owned Chromium process closed, it reports
 the cleanup failure and keeps that resource busy rather than risking a second process on the same
 profile.
 
@@ -172,7 +168,7 @@ persistent profiles. CDP attachment and user handoff are unavailable in the back
 
 The guarded transaction surface supports semantic interactions, protected fills when the gateway
 was locally started with the required vault unlocked, task-artifact uploads, downloads, and
-semantic-first coordinate fallback. Gateway inbound messages are text-only in this phase. To
+semantic-first coordinate fallback. Gateway inbound messages are text-only. To
 upload a file, first store it as an in-scope durable-task artifact and authorize its exact id in
 the form `task/<profile>/<task-id>/<artifact-path>`. Compilation pins its size and SHA-256 digest;
 the worker rereads it within the browser byte budgets and rejects it if it changed. Arbitrary host

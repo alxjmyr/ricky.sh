@@ -97,16 +97,17 @@ content. SQLite stores are integrity-checked and captured with WAL state;
 declared files retain modes and digests. Rollback verifies this evidence before
 restoring it and cannot serve as an arbitrary downgrade mechanism.
 
-Only deterministic profile-owned job migrations may write authored job files,
-and only when requested with `--update-jobs`. Resources bundled with Ricky are
-read-only; a release replaces them. Safe representation or authority narrowing can preserve a
+Current upgrades validate authored job bundles without rewriting them.
+`--update-jobs` permits supported deterministic updates and safe schedule refresh;
+it cannot approve expanded authority. Resources bundled with Ricky are read-only;
+a release replaces them. Safe representation or authority narrowing can preserve a
 schedule, but any authority expansion still requires the ordinary explicit
 schedule approval. Until then, desired schedule state is retained while its
 managed cron entry is withheld.
 
-Notification correlations always carry a profile label. Records created by an earlier development
-version without correlation labels are not compatible with this format. Migrate those records or,
-for disposable development data, recreate the notification store before upgrading.
+Notification correlations carry a profile label. If an upgrade reports an unsupported
+stored format, preserve the data and use the documented recovery path. Do not delete
+a store to bypass compatibility checks on an installation you need to retain.
 
 ## Know what reaches a model
 

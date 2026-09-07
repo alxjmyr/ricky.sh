@@ -12,6 +12,12 @@ Do not create a new workflow with this skill. Do not edit a V1 workflow. If the
 bundle has no `version = 2`, stop and tell the user to convert it with
 `author-workflow` before applying behavioral changes.
 
+Use installed `ricky` commands. In a development checkout, follow its contributor
+instructions and use `uv run ricky` (for example, `uv run ricky config`).
+All user bundles belong below the resolved profile root; projects are not
+discovery roots. Bundled resources are read-only. To customize one, copy its
+complete bundle into an accessible profile and use that qualified identity.
+
 ## Procedure
 
 ### 1. Establish the baseline
@@ -20,18 +26,17 @@ bundle has no `version = 2`, stop and tell the user to convert it with
    work must access. Confirm that the current session's pinned scope contains
    them; a skill cannot widen its runtime scope. Define `<scope-flags>` as
    `--profile <primary>` plus one `--access-profile <name>` for each additional
-   profile. Run `uv run ricky workflow list <scope-flags>` and resolve the
-   exact qualified resource, such as `work/inbox-triage`. Note whether it is a
-   project bundle under `.ricky/workflows/<name>/`, owned by the primary
-   profile, or a profile bundle under
-   `<user_data_dir>/profiles/<owner>/workflows/<name>/`. Run `uv run ricky
-   config` and read `user_data_path` rather than guessing or hardcoding it. Do
-   not guess when an unqualified name is ambiguous.
+   profile. Run `ricky workflow list <scope-flags>` and resolve the
+   exact qualified resource, such as `work/inbox-triage`. Locate the profile-owned bundle under
+   `<user_data_dir>/profiles/<owner>/workflows/<name>/`. Run `ricky config`
+   and read `user_data_path` rather than guessing it. For a bundled source,
+   establish the profile copy and review referencing jobs before proceeding.
+   Do not guess when an unqualified name is ambiguous.
 2. Read `workflow.toml` and every instruction file that it references. Read
    passive bundle resources only when the workflow or requested change uses
    them.
 3. Call `validate_workflow` with `<owner>/<name>` before editing; its session
-   scope must match `<scope-flags>`. Also run `uv run ricky workflow validate
+   scope must match `<scope-flags>`. Also run `ricky workflow validate
    <owner>/<name> <scope-flags>`. Record existing validation errors separately
    from the requested change. Do not represent a pre-existing error as a
    regression.
@@ -157,7 +162,7 @@ Keep these V2 invariants:
 ### 5. Validate and inspect
 
 1. Call `validate_workflow` with `<owner>/<name>` after each coherent draft,
-   and run `uv run ricky workflow validate <owner>/<name> <scope-flags>`.
+   and run `ricky workflow validate <owner>/<name> <scope-flags>`.
 2. Fix all new errors and validate again until the result is `valid`.
 3. Compare the compiled graph with the baseline. Confirm that only the agreed
    nodes, edges, conditions, schemas, projections, approvals, and effects

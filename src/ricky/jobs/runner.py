@@ -102,6 +102,7 @@ from ricky.runtime import (
     build_session_runtime,
 )
 from ricky.skills.registry import SkillRegistry
+from ricky.skills.search import SearchSkillResourcesTool
 from ricky.skills.spec import parse_skill_markdown
 from ricky.skills.tool import ReadSkillResourceTool, UseSkillTool
 from ricky.tool_contracts import EffectAttemptReason
@@ -2272,6 +2273,7 @@ def _rebind_skill_tools(registry: ToolRegistry, skills: SkillRegistry) -> ToolRe
     replacements: dict[str, Tool] = {
         "use_skill": cast(Tool, UseSkillTool(skills)),
         "read_skill_resource": cast(Tool, ReadSkillResourceTool(skills)),
+        "search_skill_resources": cast(Tool, SearchSkillResourcesTool(skills)),
     }
     return ToolRegistry([replacements.get(tool.name, tool) for tool in registry.tools()])
 

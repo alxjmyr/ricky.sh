@@ -16,6 +16,15 @@ Check the resolved paths:
 ricky config
 ```
 
+## A lifecycle command cannot acquire the installation lock
+
+Chat, the gateway, and other stateful commands hold a shared installation lock while
+running. Profile lifecycle commands and upgrades need exclusive access. A lifecycle
+command launched from inside the running agent can therefore time out waiting for its
+parent runtime. Exit chat or stop the affected Ricky process, then run the command in
+your terminal. Upgrade can stop an exactly matched managed gateway as part of its own
+documented apply sequence. Do not delete a lock file to force access.
+
 ## A model provider is not ready
 
 For OpenRouter or Anthropic, confirm that the corresponding key reports `set`:
@@ -43,10 +52,12 @@ ricky config model
 Optional toolpacks load only when their required configuration is present.
 
 - Slack requires `slack_user_token`.
-- Gmail and Google Calendar require at least one configured Google account, its OAuth client, and
-  a valid authorization token.
+- Gmail and Google Calendar tools load when an accessible Google account has matching OAuth
+  client credentials. Using them also requires an authorization token with the service scopes.
 - Web search requires `brave_search_api_key`.
-- Memory and workflows must be enabled in `<user_data_dir>/ricky.toml`.
+- Memory and workflows must be enabled in the resolved profile scope. A profile can disable
+  either even when it is enabled in the installation configuration.
+- Browser tools require browser enablement and a supported runtime. See [Browser control](browser-control.md).
 
 Run the integration check described in [Integrations](integrations.md).
 
@@ -61,7 +72,8 @@ ricky workflow validate <name>
 
 Check that the bundle directory matches the declared name and that the runtime scope includes its
 owning profile. Use a qualified name such as `work/inbox-triage` when multiple accessible profiles
-contain the same local name. Project bundles are owned by the primary profile.
+contain the same local name. Put user bundles below `<user_data_dir>/profiles/<profile>/`; project directories are not
+discovery roots. Restart chat after adding or editing a bundle.
 
 ## A long chat exceeds its context budget
 
@@ -178,7 +190,7 @@ ricky gateway status
 Then inspect the transport:
 
 ```bash
-ricky gateway transport doctor
+ricky gateway transport doctor telegram personal/bot
 ```
 
 Use `gateway recover` without `--apply` to preview interrupted-state recovery. See
@@ -259,7 +271,7 @@ ricky schedule sync
 
 ## A command or option differs from these docs
 
-Use the installed CLI help as the source of truth for your checkout:
+Use the installed CLI help as the source of truth for your version:
 
 ```bash
 ricky --help

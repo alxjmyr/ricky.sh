@@ -1,6 +1,6 @@
 ---
 name: author-job
-description: Interview the user about repeatable unattended work, create a strict version 3 project- or profile-owned job bundle, validate it with `ricky job validate` until clean, dry-run it, and show the resolved profile scope and authority for approval. Use when the user asks to create a Ricky job, make an ad-hoc run repeatable, or prepare work for a schedule.
+description: Interview the user about repeatable unattended work, create a strict version 3 profile-owned job bundle, validate it with `ricky job validate` until clean, dry-run it, and show the resolved profile scope and authority for approval. Use when the user asks to create a Ricky job, make an ad-hoc run repeatable, or prepare work for a schedule.
 ---
 
 # Author a job bundle
@@ -15,12 +15,18 @@ Do not create a bundle for work that runs one time. Use one ad-hoc command
 instead:
 
 ```
-uv run ricky job once "<goal>" --tool read_file --tool grep_search
+ricky job once "<goal>" --tool read_file --tool grep_search
 ```
 
 An ad-hoc run is read-only, holds no job name, takes no lock, keeps no cursor,
 and creates no recurrence state. Create a bundle only when the work repeats,
 needs continuity between runs, needs standing mutation, or needs a schedule.
+
+Use installed `ricky` commands. In a development checkout, follow its contributor
+instructions and use `uv run ricky` (for example, `uv run ricky config`).
+All user bundles belong below the resolved profile root; projects are not
+discovery roots. Bundled resources are read-only. To customize one, copy its
+complete bundle into an accessible profile and use that qualified identity.
 
 ## Procedure
 
@@ -42,8 +48,7 @@ needs continuity between runs, needs standing mutation, or needs a schedule.
      is a fresh public-HTTPS session or one exact authenticated resource with
      exact allowed origins and optional masked-image disclosure;
    - the trigger: manual only, or a cron schedule;
-   - the owning profile and whether the bundle belongs to this project or to
-     that profile across projects;
+   - the owning profile and which project, if any, supplies the working directory;
    - every additional profile whose data or resources a run must access.
 2. State the job in plain language. Show its goal, inputs, tool list, standing
    mutations, budget, and escalation path. Get the user's agreement before you
@@ -56,9 +61,7 @@ needs continuity between runs, needs standing mutation, or needs a schedule.
 4. Confirm that the current session's pinned profile scope contains the owner
    and every profile the authoring work must inspect. If it does not, stop and
    tell the user to start an appropriately scoped session; a skill cannot widen
-   its runtime scope. For a project job, use `.ricky/jobs/<name>` and explain
-   that the invocation's primary profile owns the resource. For a reusable
-   profile job, run `uv run ricky config`, read `user_data_path`, and use
+   its runtime scope. Run `ricky config`, read `user_data_path`, and use
    `<resolved-user-data-dir>/profiles/<owner>/jobs/<name>`. Use `shared` only
    when the job is intentionally available in every runtime. Never guess or
    hardcode the user data root.
@@ -68,32 +71,32 @@ needs continuity between runs, needs standing mutation, or needs a schedule.
    `goal` key.
 6. Define `<scope-flags>` as `--profile <primary>` plus one
    `--access-profile <name>` for each additional required profile. Validate
-   after every draft with `run_shell`: `uv run ricky job validate
+   after every draft with `run_shell`: `ricky job validate
    <owner>/<name> <scope-flags>`. Fix every reported error and validate again.
    Stop only when the command reports `valid and available`.
-7. Show the resolved job with `uv run ricky job show <owner>/<name>
+7. Show the resolved job with `ricky job show <owner>/<name>
    <scope-flags>`. Explain the owner and complete profile scope, the
    resolved provider and model, the agent tool list or workflow target and
    locked arguments, the standing mutations, the budget, and each declared
    source. Show the automatic result-notification policy separately from any
    explicit notification tool or workflow step.
-8. Prove behavior with a dry run: `uv run ricky job run <owner>/<name>
+8. Prove behavior with a dry run: `ricky job run <owner>/<name>
    --dry-run <scope-flags>`. A
    dry run reasons and reads, and mechanically disables leases, mutations,
    effect reservations, escalation, and cursor commits. Ask the user before a
    dry run that reads external user data. Ask separately before the first live
    run.
 9. Add a schedule only after the user approves the live behavior:
-   `uv run ricky schedule add <owner>/<name> --cron "<expression>"
-   <scope-flags>`, then `uv run ricky schedule sync <scope-flags>`. Explain
+   `ricky schedule add <owner>/<name> --cron "<expression>"
+   <scope-flags>`, then `ricky schedule sync <scope-flags>`. Explain
    that the schedule pins the profile scope and current
    exact spec and runtime-policy revisions plus a separate authority envelope.
    For jobs with Gmail or Calendar tools, that envelope snapshots the currently
    issued qualified account ids and expected email identities; it does not add
    an account allowlist to `job.toml`.
-   A later edit needs validation and `uv run ricky schedule refresh <id>`;
+   A later edit needs validation and `ricky schedule refresh <id>`;
    authority, trust-boundary, or timing expansion instead needs
-   `uv run ricky schedule approve <id>`. Run `schedule sync` afterward.
+   `ricky schedule approve <id>`. Run `schedule sync` afterward.
 
 ## Authoring rules
 
@@ -103,8 +106,7 @@ needs continuity between runs, needs standing mutation, or needs a schedule.
   an unknown key is an error.
 - Keep `name` equal to the bundle directory name.
 - Do not add a `profile` key to `job.toml`. The bundle location establishes a
-  profile job's owner; the invocation establishes a project job's owner and
-  the complete runtime scope.
+  job's owner; the invocation establishes the complete runtime scope and working directory.
 - Keep `description` short, non-empty, and no longer than 500 characters. It
   goes into the run's system context.
 - Set `provider` and `model` only when the job needs a specific one. Omit both
@@ -241,7 +243,7 @@ needs continuity between runs, needs standing mutation, or needs a schedule.
 - Expect one run of a name at a time. A second launch ends `skipped_locked`.
 - Never plan a retry around an external effect. The harness reserves the action
   first and reports ambiguity as `in_doubt`; only the user reconciles it with
-  `uv run ricky job action resolve`.
+  `ricky job action resolve`.
 - Expect every changed job or workflow revision to require validation. Model,
   goal wording, and authority reductions can be refreshed without reapproval.
   Provider changes, new or changed tool contracts, new private-data scope,

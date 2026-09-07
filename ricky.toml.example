@@ -5,7 +5,8 @@
 #
 # Secrets do NOT belong here. Put each credential in the owning profile's
 # <user_data_dir>/profiles/<name>/.secrets.toml.
-# Every value below is optional; omit to use the built-in default.
+# This is a worked configuration, not a dump of defaults. Omit optional values
+# to use defaults; see docs/configuration.md for initialization and ownership.
 
 # User-global assistant data is distinct from the repo-local .ricky/. The XDG
 # bootstrap pointer is the sole persisted authority for user_data_dir, so this
@@ -208,8 +209,8 @@ argon2_memory_kib = 65536
 #   description = "Dedicated local Chromium debugging instance"
 #   endpoint = "http://127.0.0.1:9222"
 
-# Guided workflows (project bundles under .ricky/workflows/; user bundles under
-# <user_data_dir>/profiles/<name>/workflows/).
+# Guided workflows come from the installed package and
+# <user_data_dir>/profiles/<name>/workflows/. Projects are not discovery roots.
 [workflow]
 enabled = true
 # Load-time ceiling on one instruction, instruction file, or template.

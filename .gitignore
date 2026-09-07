@@ -11,6 +11,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+src/ricky/builtins/skills/ricky-docs/references/
 
 # Tooling caches
 .pytest_cache/

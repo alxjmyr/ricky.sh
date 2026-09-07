@@ -35,6 +35,8 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           uv build --wheel --out-dir dist
+          uv run python scripts/bundle_docs.py \
+            --wheel "dist/ricky-${version}-py3-none-any.whl"
           uv export --frozen --no-dev --no-emit-project --no-header \
             --format requirements.txt \
             --output-file "dist/ricky-${version}-constraints.txt"

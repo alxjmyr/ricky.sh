@@ -84,6 +84,40 @@ with `uv run pytest && uv run ruff check . && uv run pyright`; the full suite
 includes real Chromium integration. A source move should preserve command
 options, output, exit codes, and test assertions, as well as resource cleanup.
 
+## Maintain the bundled user docs
+
+Edit `docs/`, `ricky.toml.example`, and `.secrets.toml.example` as the canonical
+sources. Do not edit generated files below
+`src/ricky/builtins/skills/ricky-docs/references/`.
+
+The Hatch build hook runs `scripts/bundle_docs.py` when building a wheel,
+including an editable installation. It bundles user guides and examples, checks
+local file links, and generates a versioned section index. The contributor guide
+stays in the repository. No runtime writes or network fetches refresh these files.
+
+After editing documentation in an existing editable checkout, refresh and check it:
+
+```bash
+uv run python scripts/bundle_docs.py
+uv run python scripts/bundle_docs.py --check
+```
+
+The documentation tests check freshness, CLI examples, and job examples. Review
+behavioral claims against their code owner when changing features; matching package
+bytes cannot prove that a guide describes the behavior correctly.
+
+Build and verify the actual release wheel with:
+
+```bash
+uv build --wheel --out-dir dist
+uv run python scripts/bundle_docs.py --wheel dist/ricky-X.Y.Z-py3-none-any.whl
+```
+
+Replace `X.Y.Z` with the project version. The release action runs this verification
+before publishing. Missing, extra, or stale references fail verification. A source
+distribution includes the canonical inputs and hook so rebuilding it also bundles
+the matching documentation.
+
 ## Improvement needs outcome evidence
 
 Memory, editable profile skills, and workflow fixtures provide ways to retain
