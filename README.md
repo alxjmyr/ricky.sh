@@ -1,6 +1,6 @@
 # Ricky.sh
 
-An agentic personal assistant. Like most people named Ricky... Its fine, but not exceptional...lol
+An agentic personal assistant. Like most people named Ricky... He's fine, but not exceptional...
 Guaranteed to be marginally more productive than a drunk guy in a Canadian trailer park.
 
 ![Ricky](ricky.jpg)
