@@ -1,5 +1,4 @@
 # TODO's and FEATURES:
-[] - SKILLS: Create built in Ricky docs skill so ricky can easily reference user and config docs
 [] - CLI: COnfiguration Manager (maybe first TUI usecase): ensure API is extensible for web
 [] - TOOLS: Create a disable tools list (by profile) to improve context management and other issues 
 [] - GATEWAY: Separate Background Model Config?
@@ -12,9 +11,10 @@
 [] - GATEWAY: Redesign gateway configuration around profiles
 	* Profile specific job message / notification routing
 	* Agent configs by profile (i.e. separate capabilities, models, or even fully separate gateway agents)
+[] - MODELS / AGENT: Provider Caching (are we effectively using this?)
+[] - MODELS / AGENT: Context Mangement- 3 low lift improvments to context management and context efficiency
 
 # ACTIVE DOGFOOD USECASES:
-[] - install and set up CLI (+ profiles cli)
 [] - Calendar Management
 [] - Scheduled "Jobs"
 	* Email / Slack Triage

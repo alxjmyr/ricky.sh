@@ -1,12 +1,12 @@
 # Ricky.sh
 
+An agentic personal assistant. Like most people named Ricky... Its fine, but not exceptional...lol
+Guaranteed to be marginally more productive than a drunk guy in a Canadian trailer park.
+
 ![Ricky](ricky.jpg)
 
-A personal agentic assistant and harness with interactive tools, durable memory,
-structured automation, and persistent messaging. Ricky keeps permissions,
-execution, and recovery under code control.
-
 ## Status
+Its a work in progress... 
 
 See [the architecture](.designs/architecture.md) for the current system design
 and engineering boundaries.
@@ -15,6 +15,12 @@ and engineering boundaries.
 
 Start with the [Ricky documentation](docs/README.md) for installation, everyday use,
 integrations, automation, persistent messaging, and operations.
+
+But really... don't bother. Ricky is pretty self aware... 
+Just holler at him... "Yo... Ricky, make the google accounts work for me. Make no mistakes". And he'll mostly figure it out.
+
+
+## Install it
 
 Released Linux builds install as versioned GitHub wheels managed by `uv`:
 
@@ -81,45 +87,3 @@ authority for `user_data_dir`. Choose a custom root only during the first
 selections. Settings and credentials are not read from general environment
 variables. Run `ricky config` to inspect resolved settings; secrets are shown
 only as set or not set.
-
-### Google Auth Configuration
-```
-1. **On the remote** (where Ricky runs):
-
-   ricky config google auth work --no-browser --callback-port 8676
-
-   This prints a long `https://accounts.google.com/o/oauth2/v2/auth?...` URL. Don't open it yet.
-
-2. **On your local machine**, set up the reverse tunnel:
-
-   ssh -N \
-    -o ExitOnForwardFailure=yes \
-    -L 8676:127.0.0.1:8676 \
-    <user>@<remote-host>
-   This forwards connections to your local port 8676 back to the remote's `127.0.0.1:8676`, where Ricky's loopback server is listening.
-
-3. **Now** open the consent URL from step 1 in your local browser. Google redirects to `http://127.0.0.1:8676?...`, which hits your local browser, tunnels back through SSH to the remote, and Ricky's listener picks up the auth code.
-```
-
-## LLM providers
-
-Ricky supports OpenRouter, the Anthropic Messages API, and a local Claude Code
-CLI. Choose and persist a default with `ricky config model`, or pin one
-session with `--provider` / `--model`:
-
-```bash
-ricky ask -p claude_code -m sonnet "Reply exactly: ricky-ok"
-ricky chat -p claude_code
-```
-
-Claude Code routing requires the `claude` CLI to be installed and logged into
-the intended subscription. It uses the CLI as an LLM-only endpoint: Claude's
-built-in tools, settings, MCP configuration, and project access are disabled;
-Ricky retains tool dispatch, permissions, loop control, skills, and events. By
-default, one isolated provider-native session is reused per Ricky session;
-`resume_sessions = false` restores stateless full-transcript requests. Calls use
-a neutral working directory, remove stray Anthropic API-key/token variables
-from the subprocess environment, and never fall back silently to another
-provider.
-Claude Code has no CLI equivalents for canonical `temperature` or `max_tokens`
-request fields, so this adapter intentionally ignores them.
