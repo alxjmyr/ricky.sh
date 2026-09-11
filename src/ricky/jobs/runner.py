@@ -716,6 +716,7 @@ class JobRunner:
                     profile_label=session.profile_scope.label(),
                     profile_scope=profile_scope,
                     service=self.notification_service,
+                    store=self.store,
                 )
             await prune_transcripts(
                 self.store,

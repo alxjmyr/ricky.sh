@@ -84,6 +84,24 @@ contract internally. If a runner must apply an additional wrapper, declare a
 stable `state_guard_id`; startup validation requires that guard to be
 registered.
 
+## Deterministic runtime rejections
+
+A tool or state guard may attach `ToolRuntimeFailure` to an error result only
+when it has rejected the call before mutation or external dispatch. The typed
+`state_conflict` classification carries a safe fingerprint of the observed
+state and actionable recovery guidance. It must not classify transient failures,
+post-mutation errors, or ambiguous effects. A receipt, when present, must say
+`not_performed`. Neither the fingerprint nor guidance may contain secrets.
+
+The agent loop exposes this evidence in `ToolCallFinishedEvent`. For the same
+canonical arguments and unchanged conflict state, it supplies explicit recovery
+context after two failing response rounds and terminates after three. Duplicate
+calls within one response count as one round so the model has an opportunity to
+repair. Observing changed state, success, or an unclassified outcome for those
+arguments resets their conflict count; unrelated reads do not. The guard never
+retries or replays a tool or infers completion. Old results and events without
+classification retain their ordinary error behavior.
+
 ## External effects
 
 Use `effect_kind = "external"` when the operation changes state outside

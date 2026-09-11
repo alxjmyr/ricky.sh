@@ -137,6 +137,10 @@ receipt for each external action that remains part of the run. An abandoned deni
 later performed call can supersede an earlier invalid proposal only when Ricky can correlate the
 two as the same repaired action.
 
+Failure notifications include confirmed external effects from the run’s durable action ledger,
+with operation names and action IDs. A successful action does not make the overall job successful;
+review the failure and any unresolved effects before deciding what to do next.
+
 ## Author a named job
 
 Use the included authoring skill:

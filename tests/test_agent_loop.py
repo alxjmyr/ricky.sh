@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ricky.agent import AgentLoop, AgentSession
 from ricky.agent.events import (
     AgentEvent,
     PermissionRequestedEvent,
+    ToolCallFinishedEvent,
     UserInteractionRequiredEvent,
 )
 from ricky.config import RickySettings
@@ -33,6 +34,7 @@ from ricky.llm import (
 )
 from ricky.permissions import GrantScope, PermissionResponse
 from ricky.profiles import ProfileLabel
+from ricky.tool_contracts import ToolRuntimeFailure
 from ricky.tools import (
     EffectIdentity,
     EffectReceipt,
@@ -925,3 +927,223 @@ async def test_parallel_tool_calls_are_started_before_finishing(tmp_path: Path) 
     assert isinstance(second_result, ToolResultPart)
     assert first_result.call_id == "call_a"
     assert second_result.call_id == "call_b"
+
+
+class _RuntimeConflictParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    expected_revision: int = 1
+
+
+class _RuntimeConflictTool:
+    name: ClassVar[str] = "runtime_conflict"
+    description: ClassVar[str] = "Exercise classified runtime failures."
+    Params: ClassVar[type[BaseModel]] = _RuntimeConflictParams
+    risk: ClassVar[Risk] = "read_only"
+
+    def __init__(self, results: list[ToolResult]) -> None:
+        self.results = results
+        self.calls = 0
+
+    async def run(self, params: BaseModel, ctx: ToolContext) -> ToolResult:
+        self.calls += 1
+        return self.results.pop(0)
+
+
+def _runtime_conflict(revision: str = "2") -> ToolResult:
+    return ToolResult(
+        content="stale task revision",
+        is_error=True,
+        runtime_failure=ToolRuntimeFailure(
+            kind="state_conflict",
+            state_fingerprint=f"task:revision:{revision}",
+            recovery="Use the held lease to complete the task instead of claiming again.",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_repeated_runtime_conflicts_warn_then_stop(tmp_path: Path) -> None:
+    settings = RickySettings(max_turn_iterations=100)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    tool = _RuntimeConflictTool([_runtime_conflict() for _ in range(4)])
+    (tmp_path / "receipt.txt").write_text("effect already performed")
+    provider = FakeProvider(
+        [
+            [_tool_message("a", tool.name, {})],
+            [_tool_message("read", "read_file", {"path": "receipt.txt"})],
+            [_tool_message("b", tool.name, {})],
+            [_tool_message("c", tool.name, {})],
+            [_final_message("must not run")],
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([*builtin_tools(), tool]),
+        settings=settings,
+        cwd=tmp_path,
+    )
+    events = await _collect_events(loop, session, "finish task")
+    assert tool.calls == 3
+    assert len(provider.requests) == 4
+    assert (
+        "Another identical failure will stop this turn" in provider.requests[-1].model_dump_json()
+    )
+    assert "Use the held lease" in provider.requests[-1].model_dump_json()
+    assert events[-2].kind == "agent_error"
+    assert events[-2].error_type == "ToolRuntimeRepairLimit"
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].iterations == 4
+    assert len([m for m in session.history if m.role == "tool"]) == 4
+    failures = [e for e in events if isinstance(e, ToolCallFinishedEvent) and e.runtime_failure]
+    assert len(failures) == 3
+    assert ToolCallFinishedEvent.model_validate_json(failures[0].model_dump_json()) == failures[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", ["state", "success", "transient", "arguments"])
+async def test_runtime_conflict_recovery_and_changed_state_remain_allowed(
+    tmp_path: Path,
+    reset: str,
+) -> None:
+    settings = RickySettings(max_turn_iterations=20)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    initial = [_runtime_conflict(), _runtime_conflict()]
+    if reset == "state":
+        results = [*initial, _runtime_conflict("3"), _runtime_conflict("2")]
+    elif reset == "success":
+        results = [*initial, ToolResult(content="progress recorded"), _runtime_conflict()]
+    elif reset == "transient":
+        results = [
+            ToolResult(content="service temporarily unavailable", is_error=True) for _ in range(4)
+        ]
+    else:
+        results = [*initial, _runtime_conflict()]
+    tool = _RuntimeConflictTool(results)
+    scripts: list[list[StreamEvent | BaseException]] = [
+        [_tool_message(str(i), tool.name, {})] for i in range(len(results))
+    ]
+    if reset == "arguments":
+        scripts[-1] = [_tool_message("recover", tool.name, {"expected_revision": 2})]
+    scripts.append([_final_message("recovered")])
+    provider = FakeProvider(scripts)
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([*builtin_tools(), tool]),
+        settings=settings,
+        cwd=tmp_path,
+    )
+    events = await _collect_events(loop, session, "finish task")
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].error is None
+    assert not any(e.kind == "agent_error" for e in events)
+
+
+def test_runtime_failure_contract_rejects_unsafe_outcomes_and_reads_old_events() -> None:
+    failure = _runtime_conflict().runtime_failure
+    assert failure is not None
+    assert ToolRuntimeFailure.model_validate_json(failure.model_dump_json()) == failure
+    with pytest.raises(ValidationError):
+        ToolRuntimeFailure(kind="state_conflict", state_fingerprint=2, recovery="read task")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError):
+        ToolResult(content="success", runtime_failure=failure)
+    for disposition in ("performed", "in_doubt"):
+        with pytest.raises(ValidationError):
+            ToolResult(
+                content="error",
+                is_error=True,
+                runtime_failure=failure,
+                effect_receipt=EffectReceipt(disposition=disposition),  # type: ignore[arg-type]
+            )
+    old_event = ToolCallFinishedEvent.model_validate_json(
+        '{"turn_id":"t","call_id":"c","tool_name":"read_file","is_error":true,"content_chars":5}'
+    )
+    assert old_event.runtime_failure is None
+    assert ToolResult.model_validate_json('{"content":"old"}').runtime_failure is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_runtime_conflicts_allow_feedback_before_termination(
+    tmp_path: Path,
+) -> None:
+    settings = RickySettings(max_turn_iterations=100)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    tool = _RuntimeConflictTool([_runtime_conflict() for _ in range(4)])
+    batch = MessageDone(
+        message=Message(
+            role="assistant",
+            content=[ToolCallPart(id=f"batch_{i}", name=tool.name, args={}) for i in range(3)],
+        ),
+        usage=Usage(),
+        stop_reason="tool_calls",
+    )
+    provider = FakeProvider(
+        [
+            [batch],
+            [_tool_message("next", tool.name, {})],
+            [_final_message("recovered")],
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        cwd=tmp_path,
+    )
+    events = await _collect_events(loop, session, "finish task")
+    assert tool.calls == 4
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].error is None
+    assert (
+        "Another identical failure will stop this turn" in provider.requests[-1].model_dump_json()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reset", ["success", "state"])
+async def test_same_response_runtime_conflict_reset_drops_pending_failure(
+    tmp_path: Path,
+    reset: str,
+) -> None:
+    settings = RickySettings(max_turn_iterations=100)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    reset_result = ToolResult(content="done") if reset == "success" else _runtime_conflict("3")
+    tool = _RuntimeConflictTool(
+        [
+            _runtime_conflict(),
+            _runtime_conflict(),
+            reset_result,
+            _runtime_conflict(),
+            _runtime_conflict(),
+        ]
+    )
+    batch = MessageDone(
+        message=Message(
+            role="assistant",
+            content=[
+                ToolCallPart(id="batch_failure", name=tool.name, args={}),
+                ToolCallPart(id="batch_reset", name=tool.name, args={}),
+            ],
+        ),
+        usage=Usage(),
+        stop_reason="tool_calls",
+    )
+    provider = FakeProvider(
+        [
+            [_tool_message("initial", tool.name, {})],
+            [batch],
+            [_tool_message("after_reset_1", tool.name, {})],
+            [_tool_message("after_reset_2", tool.name, {})],
+            [_final_message("recovered")],
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        cwd=tmp_path,
+    )
+    events = await _collect_events(loop, session, "finish task")
+    assert tool.calls == 5
+    assert events[-1].kind == "turn_finished"
+    assert events[-1].error is None

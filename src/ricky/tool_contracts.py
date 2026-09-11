@@ -23,6 +23,16 @@ class ToolContractError(ValueError):
     """One tool declaration violates the shared authoring contract."""
 
 
+class ToolRuntimeFailure(BaseModel):
+    """Safe evidence of a deterministic rejection before mutation or dispatch."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    kind: Literal["state_conflict"]
+    state_fingerprint: str = Field(min_length=1, max_length=512)
+    recovery: str = Field(min_length=1, max_length=2_000)
+
+
 class ToolMetadata(BaseModel):
     """Validated execution-neutral facts declared by one tool implementation."""
 

@@ -77,6 +77,7 @@ EMPTY_RESPONSE_RECOVERY = (
     "non-empty final answer."
 )
 MAX_IDENTICAL_REJECTED_TOOL_CALLS = 2
+MAX_IDENTICAL_RUNTIME_FAILURES = 3
 
 
 @dataclass(frozen=True)
@@ -222,6 +223,8 @@ class AgentLoop:
         )
         user_message_pending = user_input
         rejected_call_counts: dict[str, int] = {}
+        runtime_failure_counts: dict[tuple[str, str, str], int] = {}
+        runtime_recovery: str | None = None
 
         async for event in self._start_events(session, turn_id, user_input):
             yield event
@@ -232,6 +235,9 @@ class AgentLoop:
                 iterations += 1
                 iteration_registry = self._registry_for(session)
                 iteration_system_sections = dict(extra_system_sections or {})
+                if runtime_recovery is not None:
+                    iteration_system_sections["tool_runtime_recovery"] = runtime_recovery
+                    runtime_recovery = None
                 if last_response_was_empty:
                     iteration_system_sections["empty_response_recovery"] = EMPTY_RESPONSE_RECOVERY
                 assembly = assemble_context(
@@ -320,7 +326,9 @@ class AgentLoop:
 
                 interaction_required = False
                 repair_limit_error: str | None = None
+                runtime_limit_error: str | None = None
                 rejected_in_response: dict[str, str] = {}
+                failures_in_response: dict[tuple[str, str, str], ToolCallFinishedEvent] = {}
                 async for event in self._dispatch_tool_calls(
                     session,
                     turn_id,
@@ -332,6 +340,51 @@ class AgentLoop:
                         interaction_required = True
                     if isinstance(event, ToolCallRejectedEvent):
                         rejected_in_response.setdefault(event.input_digest, event.tool_name)
+                    if isinstance(event, ToolCallFinishedEvent) and event.input_digest is not None:
+                        current_failure = event.runtime_failure
+                        for prior_key in (
+                            runtime_failure_counts.keys() | failures_in_response.keys()
+                        ):
+                            if prior_key[0] == event.input_digest and (
+                                not event.is_error
+                                or current_failure is None
+                                or prior_key[1:]
+                                != (
+                                    current_failure.kind,
+                                    current_failure.state_fingerprint,
+                                )
+                            ):
+                                runtime_failure_counts.pop(prior_key, None)
+                                failures_in_response.pop(prior_key, None)
+                    if (
+                        isinstance(event, ToolCallFinishedEvent)
+                        and event.is_error
+                        and event.runtime_failure is not None
+                        and event.input_digest is not None
+                        and event.effect_disposition in (None, "not_performed")
+                    ):
+                        failure = event.runtime_failure
+                        key = (event.input_digest, failure.kind, failure.state_fingerprint)
+                        failures_in_response.setdefault(key, event)
+                recovery_messages: list[str] = []
+                for key, failed_event in failures_in_response.items():
+                    count = runtime_failure_counts.get(key, 0) + 1
+                    runtime_failure_counts[key] = count
+                    failure = failed_event.runtime_failure
+                    assert failure is not None
+                    if count >= MAX_IDENTICAL_RUNTIME_FAILURES:
+                        runtime_limit_error = (
+                            "identical tool call repeatedly failed against unchanged state: "
+                            f"{failed_event.tool_name}. {failure.recovery}"
+                        )
+                    elif count == MAX_IDENTICAL_RUNTIME_FAILURES - 1:
+                        recovery_messages.append(
+                            f"{failed_event.tool_name} has failed twice against unchanged state. "
+                            "Another identical failure will stop this turn. "
+                            f"{failure.recovery} Do not replay previously performed effects."
+                        )
+                if recovery_messages:
+                    runtime_recovery = "\n".join(recovery_messages)
                 for input_digest, tool_name in rejected_in_response.items():
                     count = rejected_call_counts.get(input_digest, 0) + 1
                     rejected_call_counts[input_digest] = count
@@ -347,16 +400,21 @@ class AgentLoop:
                         usage=turn_usage,
                     )
                     return
-                if repair_limit_error is not None:
+                if repair_limit_error is not None or runtime_limit_error is not None:
+                    limit_error = repair_limit_error or runtime_limit_error
                     yield AgentErrorEvent(
                         turn_id=turn_id,
-                        message=repair_limit_error,
-                        error_type="ToolArgumentRepairLimit",
+                        message=limit_error or "tool repair limit reached",
+                        error_type=(
+                            "ToolArgumentRepairLimit"
+                            if repair_limit_error is not None
+                            else "ToolRuntimeRepairLimit"
+                        ),
                     )
                     yield TurnFinishedEvent(
                         turn_id=turn_id,
                         iterations=iterations,
-                        error=repair_limit_error,
+                        error=limit_error,
                         usage=turn_usage,
                     )
                     return
@@ -484,6 +542,7 @@ class AgentLoop:
                     call_id=resolved_call.call.id,
                     tool_name=resolved_call.tool_name,
                     is_error=resolved_call.result.is_error,
+                    runtime_failure=resolved_call.result.runtime_failure,
                     content_chars=len(resolved_call.result.content),
                     content=resolved_call.result.content,
                     artifact_id=(

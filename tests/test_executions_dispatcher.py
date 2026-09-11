@@ -313,3 +313,110 @@ async def test_terminal_projection_failure_does_not_starve_other_requests(
     records = await NotificationStore(settings).list(scope=SCOPE, status="pending")
     assert len(records) == 1
     assert records[0].request.source_id == request_ids[1]
+
+
+async def test_failed_execution_reports_effect_but_keeps_task_blocked(tmp_path: Path) -> None:
+    from ricky.tools.base import EffectIdentity
+
+    settings = _settings(tmp_path)
+    task = await _task(settings)
+    jobs = JobRunStore(settings)
+    await jobs.initialize()
+    run = JobRun(
+        id="jobrun_bookkeeping_failure",
+        job_name="personal/brief",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="session",
+        started_at=datetime.now(UTC),
+        outcome="failed",
+        error="Task revision conflict",
+        final_message="Everything succeeded.",
+        trigger="execution",
+        trigger_id="execution_" + "c" * 32,
+    )
+    await jobs.insert(run.model_copy(update={"outcome": None}), scope=SCOPE)
+    action = await jobs.reserve_action(
+        job_name="personal/brief",
+        run_id=run.id,
+        effect_budget=1,
+        scope=SCOPE,
+        identity=EffectIdentity(
+            action_key="b" * 64,
+            operation="gmail.trash",
+            target="message",
+            occurrence="once",
+            summary="Move message to Trash",
+        ),
+    )
+    await jobs.resolve_action(action.id, "performed", scope=SCOPE, provider_reference="message")
+    await jobs.finish(run.model_copy(update={"finished_at": datetime.now(UTC)}), scope=SCOPE)
+    request = ExecutionRequest(
+        id="execution_" + "c" * 32,
+        kind="named_job",
+        status="failed",
+        named_job="personal/brief",
+        job_digest="a" * 64,
+        profile_scope=SCOPE,
+        notification_route="owner",
+        request_key="bookkeeping-failure",
+        created_at=datetime.now(UTC),
+        task_id=task.id,
+        task_revision=task.revision,
+        run_id=run.id,
+    )
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    await dispatcher._update_task(request, task, run)
+    await dispatcher._notify(request, run)
+    tasks = await ScopedDurableTaskStore.create(settings, scope=SCOPE)
+    updated = await tasks.get_task(task.id)
+    assert updated.status == "blocked"
+    assert updated.lease is None
+    assert updated.current_summary is not None
+    assert "Task revision conflict" in updated.current_summary
+    assert action.id in updated.current_summary
+    records = await NotificationStore(settings).list(scope=SCOPE)
+    assert len(records) == 1
+    assert records[0].request.title == "Execution failed"
+    assert records[0].request.body == updated.current_summary
+    assert "Everything succeeded" not in records[0].request.body
+    assert len(await jobs.actions_for_run(run.id, scope=SCOPE)) == 1
+
+
+async def test_receipt_read_failure_does_not_claim_task(tmp_path: Path) -> None:
+    import pytest
+
+    from ricky.jobs.store import JobStoreError
+
+    settings = _settings(tmp_path)
+    task = await _task(settings)
+    run = JobRun(
+        id="jobrun_missing_receipt_store",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="session",
+        started_at=datetime.now(UTC),
+        outcome="failed",
+        error="Task revision conflict",
+    )
+    request = ExecutionRequest(
+        id="execution_" + "d" * 32,
+        kind="named_job",
+        status="failed",
+        named_job="personal/brief",
+        job_digest="a" * 64,
+        profile_scope=SCOPE,
+        notification_route="owner",
+        request_key="missing-receipt-store",
+        created_at=datetime.now(UTC),
+        task_id=task.id,
+        task_revision=task.revision,
+        run_id=run.id,
+    )
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    with pytest.raises(JobStoreError):
+        await dispatcher._update_task(request, task, run)
+    tasks = await ScopedDurableTaskStore.create(settings, scope=SCOPE)
+    assert await tasks.get_task(task.id) == task

@@ -8,13 +8,19 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from ricky.agent.events import AgentEvent
 from ricky.agent.session import AgentSession
 from ricky.config import RickySettings
 from ricky.llm import ImagePart, ToolArtifactRef
-from ricky.tool_contracts import EffectAttemptReason, EffectKind, Risk, UnattendedUse
+from ricky.tool_contracts import (
+    EffectAttemptReason,
+    EffectKind,
+    Risk,
+    ToolRuntimeFailure,
+    UnattendedUse,
+)
 
 if TYPE_CHECKING:
     # Annotation-only import: importing permissions at runtime would cycle back
@@ -95,6 +101,7 @@ class ToolResult(BaseModel):
     data: JsonValue = None
     """Optional typed workflow data. Normal model transcripts use content only."""
     is_error: bool = False
+    runtime_failure: ToolRuntimeFailure | None = None
     effect_receipt: EffectReceipt | None = None
     artifact: ToolArtifactRef | None = None
     full_content_chars: int | None = Field(default=None, ge=0)
@@ -102,6 +109,18 @@ class ToolResult(BaseModel):
     user_interaction: UserInteractionRequest | None = None
     follow_up_media: list[ImagePart] = Field(default_factory=list, max_length=20)
     """Canonical user-input media appended by the harness after this tool result."""
+
+    @model_validator(mode="after")
+    def _validate_runtime_failure(self) -> ToolResult:
+        if self.runtime_failure is not None:
+            if not self.is_error:
+                raise ValueError("runtime failure requires an error result")
+            if (
+                self.effect_receipt is not None
+                and self.effect_receipt.disposition != "not_performed"
+            ):
+                raise ValueError("runtime failure requires a pre-effect rejection")
+        return self
 
 
 @runtime_checkable

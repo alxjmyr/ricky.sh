@@ -554,3 +554,55 @@ def test_provider_free_cli_inspection_never_prints_configured_secret(
     assert request.id in result.stdout
     assert "profiles: shared, personal" in result.stdout
     assert sentinel not in result.stdout
+
+
+async def test_failed_job_notification_includes_performed_effect(tmp_path: Path) -> None:
+    from ricky.tools.base import EffectIdentity
+
+    settings = _settings(tmp_path, job_route="owner")
+    jobs = JobRunStore(settings)
+    await jobs.initialize()
+    run = JobRun(
+        id="jobrun_partial_failure",
+        job_name="hourly",
+        spec_digest="a" * 64,
+        provider="openrouter",
+        model="model",
+        profile_scope=_PERSONAL_SCOPE,
+        session_id="session",
+        started_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+        outcome="failed",
+        error="Bookkeeping failed",
+    )
+    await jobs.insert(run.model_copy(update={"outcome": None}), scope=_PERSONAL_SCOPE)
+    action = await jobs.reserve_action(
+        job_name="hourly",
+        run_id=run.id,
+        effect_budget=1,
+        scope=_PERSONAL_SCOPE,
+        identity=EffectIdentity(
+            action_key="b" * 64,
+            operation="gmail.trash",
+            target="message",
+            occurrence="once",
+            summary="Move message to Trash",
+        ),
+    )
+    await jobs.resolve_action(
+        action.id, "performed", scope=_PERSONAL_SCOPE, provider_reference="message"
+    )
+    await jobs.finish(
+        run.model_copy(update={"finished_at": datetime.now(UTC)}), scope=_PERSONAL_SCOPE
+    )
+    service = NotificationService(settings)
+    assert (
+        await project_job_notifications(
+            settings, store=jobs, service=service, route="owner", profile_scope=_PERSONAL_SCOPE
+        )
+        == 1
+    )
+    [record] = await service.store.list(scope=_PERSONAL_SCOPE)
+    assert record.request.title == "Job failed: hourly"
+    assert "Bookkeeping failed" in record.request.body
+    assert action.id in record.request.body

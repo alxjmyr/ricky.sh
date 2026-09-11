@@ -116,6 +116,11 @@ the owning worker cancels and joins it. Ricky records the terminal state as `can
 no work became observable. Provider output, a reserved or performed external effect, or ambiguous
 finalization instead produces `uncertain`.
 
+Failed execution notifications and durable-task summaries retain confirmed external effects,
+including operation names and action IDs. The execution remains failed or uncertain, and an
+incomplete task can remain blocked even when an external action succeeded. Long reports include
+receipt counts and omit excess details; inspect the job action ledger for the complete evidence.
+
 The gateway already runs an execution worker. Do not start a second continuous worker unless you
 have intentionally designed the deployment for it.
 

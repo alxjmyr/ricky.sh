@@ -1011,14 +1011,23 @@ class ExecutionDispatcher:
             content = read.content[:remaining]
             artifact_text.append(f"## {entry.path}\n{content}")
             remaining -= len(content)
-        payload = task.model_dump(mode="json")
-        payload["lease"] = None
+        payload = task.model_dump(mode="json", exclude={"lease"})
         sections = {
             "execution": (
                 f"Execution request: {request.id}\n"
-                "This is a fresh background session. No foreground conversation history is present."
+                "This background session started without foreground conversation history. "
+                "Tool results and actions in this session remain part of the current attempt."
             ),
-            "linked_durable_task": json.dumps(payload, sort_keys=True),
+            "linked_durable_task": (
+                "Task snapshot at dispatch (historical, not live state):\n"
+                "Task mutations advance its revision. Later task read and mutation results "
+                "supersede this snapshot. The execution's pinned task revision identifies "
+                "what was authorized, not the task's current revision. Lease information is "
+                "omitted from this snapshot; omission does not mean the task is unclaimed. "
+                "After claiming successfully, use the held lease to record progress or "
+                "completion; do not claim again while that lease is held.\n"
+                + json.dumps(payload, sort_keys=True)
+            ),
         }
         if artifact_text:
             sections["selected_task_artifacts"] = "\n\n".join(artifact_text)
@@ -1041,6 +1050,18 @@ class ExecutionDispatcher:
             raise ExecutionDispatchError("durable task baton currently belongs to the user")
         return task
 
+    async def _result_summary(self, run: JobRun) -> str:
+        from ricky.jobs.reporting import failure_summary
+        from ricky.jobs.store import JobRunStore
+
+        return await failure_summary(
+            run,
+            _bounded_result(run, self.settings.executions.result_text_limit),
+            store=JobRunStore(self.settings),
+            scope=run.profile_scope,
+            limit=self.settings.executions.result_text_limit,
+        )
+
     async def _update_task(
         self, request: ExecutionRequest, original: DurableTask | None, run: JobRun
     ) -> ExecutionRequest:
@@ -1050,6 +1071,7 @@ class ExecutionDispatcher:
         current = await store.get_task(request.task_id)
         if current.status in {"completed", "cancelled"} or current.execution_mode == "user":
             return request
+        summary = await self._result_summary(run)
         holder = f"execution:{request.id}"
         try:
             claimed = await store.claim(
@@ -1060,7 +1082,6 @@ class ExecutionDispatcher:
                 executor_id=request.id,
             )
             assert claimed.lease is not None
-            summary = _bounded_result(run, self.settings.executions.result_text_limit)
             if request.status == "succeeded":
                 updated = await store.progress(
                     claimed.id,
@@ -1097,7 +1118,7 @@ class ExecutionDispatcher:
     async def _notify(self, request: ExecutionRequest, run: JobRun | None) -> None:
         profile_label = request.profile_scope.label()
         summary = (
-            _bounded_result(run, self.settings.executions.result_text_limit)
+            await self._result_summary(run)
             if run is not None
             else (request.error or f"Execution {request.status}")
         )

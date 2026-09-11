@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ricky.config import RickySettings
+from ricky.jobs.reporting import failure_summary
 from ricky.jobs.store import JobRunStore
 from ricky.jobs.types import JobRun
 from ricky.notifications import (
@@ -22,6 +23,7 @@ async def enqueue_job_notification(
     profile_label: ProfileLabel,
     profile_scope: ProfileScope,
     service: NotificationService,
+    store: JobRunStore | None = None,
 ) -> NotificationRecord | None:
     """Project one already-durable named-job terminal state with stable deduplication."""
 
@@ -40,6 +42,14 @@ async def enqueue_job_notification(
         summary = run.final_message or "Job completed successfully."
     else:
         summary = run.error or f"Job ended with outcome {run.outcome}."
+        if store is not None:
+            summary = await failure_summary(
+                run,
+                summary,
+                store=store,
+                scope=profile_scope,
+                limit=service.settings.body_char_limit,
+            )
     common = {
         "route": route,
         "job_name": run.job_name,
@@ -77,6 +87,7 @@ async def project_job_notifications(
             profile_label=run.profile_scope.label(),
             profile_scope=profile_scope,
             service=service,
+            store=store,
         )
         if record is not None:
             projected += 1

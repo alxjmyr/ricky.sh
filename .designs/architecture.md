@@ -287,6 +287,10 @@ durable evidence shows nothing observable; otherwise it becomes `uncertain` or
 - An execution request is a fenced attempt under an immutable contract, not a
   second task system. Delegated authority can narrow the runnable contract but
   cannot add tools or profiles.
+- Linked task context is explicitly a historical snapshot at dispatch. Later
+  task reads and mutation results supersede its mutable state; the contract's
+  pinned task revision continues to identify the authorization boundary. A
+  snapshot omits lease credentials and never asserts current lease ownership.
 - A gateway-owned execution can enter a fenced
   `awaiting_transaction_approval` state while its worker remains alive. The
   store owns the approval occurrence, TTL, wakeup, invalidation, and safe

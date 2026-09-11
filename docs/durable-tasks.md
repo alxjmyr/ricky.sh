@@ -83,6 +83,15 @@ Ricky uses expiring, fenced leases so only one session can mutate a task at a ti
 inspect it concurrently. If a process stops, lease expiry lets a later session recover without
 trusting a stale writer.
 
+A successful claim advances the task revision and gives that session a lease for
+progress and completion. The initial task snapshot in a background execution is
+historical; subsequent task reads and updates provide newer state. A revision
+conflict reports the current revision and guidance for recovering without
+overriding another session's lease. If an unattended agent repeats the same claim
+against unchanged conflicting state, Ricky supplies a recovery reminder after
+two failing response rounds and stops the turn after three. This limit does not
+retry external actions or mark the task completed.
+
 Each profile has a separate task store and confined artifact workspace under
 `<user_data_dir>/profiles/<name>/tasks/`. Always supply the owning profile for an exact CLI task
 operation. Tools may access a task only when its profile is in the issued session scope.

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, model_validator
 from ricky.agent.context_types import ContextBudget, ContextReport, ContextSection
 from ricky.llm import Usage
 from ricky.permissions.types import GrantOption
+from ricky.tool_contracts import ToolRuntimeFailure
 
 
 def _now() -> datetime:
@@ -324,6 +325,7 @@ class ToolCallFinishedEvent(EventBase):
     call_id: str
     tool_name: str
     is_error: bool
+    runtime_failure: ToolRuntimeFailure | None = None
     content_chars: int
     content: str | None = None
     data_chars: int = 0
