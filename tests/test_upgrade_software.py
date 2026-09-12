@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -126,6 +129,9 @@ def _fixture(tmp_path: Path) -> tuple[Any, InstalledToolEnvironment, _Lock]:
 def test_uv_install_uses_exact_cached_pair_sanitized_environment_and_no_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/test-only/bus")
+    monkeypatch.setenv("UNRELATED_API_TOKEN", "test-only-credential")
     journal, environment, lock = _fixture(tmp_path)
     uv = tmp_path / "uv"
     uv.write_text("binary", encoding="utf-8")
@@ -165,6 +171,12 @@ def test_uv_install_uses_exact_cached_pair_sanitized_environment_and_no_shell(
     kwargs = next(kwargs for command, kwargs in calls if "install" in command)
     assert "shell" not in kwargs
     assert "PYTHONPATH" not in kwargs["env"]
+    for _command, options in calls:
+        assert not {"XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "UNRELATED_API_TOKEN"} & (
+            options["env"].keys()
+        )
+    assert kwargs["env"]["UV_TOOL_DIR"] == environment.tool_root
+    assert kwargs["env"]["UV_TOOL_BIN_DIR"] == environment.bin
     os.close(lock.descriptor)
 
 
@@ -232,3 +244,166 @@ def test_uv_minimum_is_checked_before_replacement(
     with pytest.raises(SoftwareReplacementError, match="requires uv"):
         controller.install_target(journal)
     os.close(lock.descriptor)
+
+
+@pytest.mark.parametrize("action", ["resume", "rollback"])
+@pytest.mark.parametrize(
+    "session_keys",
+    [
+        (),
+        ("XDG_RUNTIME_DIR",),
+        ("DBUS_SESSION_BUS_ADDRESS",),
+        ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"),
+    ],
+)
+def test_real_handoff_preserves_session_for_gateway_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    session_keys: tuple[str, ...],
+) -> None:
+    """Run a child and the real unit reconciliation with an isolated fake manager."""
+    journal, environment, lock = _fixture(tmp_path)
+    session = {
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=" + str(tmp_path / "runtime" / "bus"),
+    }
+    for key, value in session.items():
+        monkeypatch.delenv(key, raising=False)
+        if key in session_keys:
+            monkeypatch.setenv(key, value)
+    monkeypatch.setenv("UNRELATED_API_TOKEN", "test-only-credential")
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path / "wrong-tools"))
+    monkeypatch.setenv("UV_TOOL_BIN_DIR", str(tmp_path / "wrong-bin"))
+    expected = {key: session[key] for key in session_keys}
+    result_path = tmp_path / "result.json"
+    executable = Path(environment.executable)
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(f"""\
+            import asyncio
+            import hashlib
+            import json
+            import os
+            import sys
+            from pathlib import Path
+            from unittest.mock import patch
+            from ricky.config import RickySettings
+            from ricky.gateway.service_unit import GatewayServiceUnit, CommandResult
+            from ricky.upgrades.integrations import (
+                ManagedUpgradeController, ManagedIntegrationError,
+            )
+            from ricky.upgrades.journal import UpgradeManagedBinding
+
+            expected = {expected!r}
+            for key in ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'):
+                assert os.environ.get(key) == expected.get(key)
+            assert 'UNRELATED_API_TOKEN' not in os.environ
+            assert os.environ['UV_TOOL_DIR'] == {environment.tool_root!r}
+            assert os.environ['UV_TOOL_BIN_DIR'] == {environment.bin!r}
+            fd = int(sys.argv[sys.argv.index('--lock-fd') + 1])
+            assert os.fstat(fd).st_ino == {os.fstat(lock.descriptor).st_ino}
+            assert sys.argv[sys.argv.index('--action') + 1] == {action!r}
+            settings = RickySettings.model_validate({{
+                'user_data_dir': {str(tmp_path / "data")!r},
+                'project_data_dir': {str(tmp_path / "project")!r},
+                'gateway': {{'service': {{'unit_dir': {str(tmp_path / "units")!r}}}}},
+            }})
+            unit = GatewayServiceUnit(settings, executable={environment.executable!r})
+            unit.install()
+            binding = UpgradeManagedBinding(
+                gateway_unit_path=str(unit.unit_path.resolve()),
+                gateway_unit_sha256=hashlib.sha256(unit.render().encode()).hexdigest(),
+                gateway_was_enabled=True,
+            )
+            calls = []
+            def fake_manager(args):
+                calls.append(list(args))
+                assert args[0:2] == ('systemctl', '--user')
+                available = bool(expected)
+                return CommandResult(tuple(args), 0 if available else 1, '', '')
+            controller = ManagedUpgradeController(
+                user_data_dir=Path({str(tmp_path / "data")!r}),
+                executable=Path({environment.executable!r}),
+                run_async=asyncio.run,
+            )
+            with patch('ricky.gateway.service_unit.subprocess_runner', fake_manager):
+                try:
+                    outcome = controller._reconcile_gateway(
+                        settings, binding,
+                        endpoint={"source" if action == "rollback" else "target"!r},
+                    )
+                except ManagedIntegrationError as exc:
+                    assert not expected
+                    assert str(exc) == 'user service manager did not reload the gateway unit'
+                    outcome = 'unavailable'
+            result = {{'outcome': outcome, 'calls': calls}}
+            Path({str(result_path)!r}).write_text(json.dumps(result))
+            """),
+        encoding="utf-8",
+    )
+    controller = UvToolSoftwareController(
+        environment=environment,
+        lock=lock,  # type: ignore[arg-type]
+        uv_executable=executable,
+    )
+    try:
+        with pytest.raises(UpgradeHandoffComplete) as completed:
+            controller._handoff(journal, action=action)
+        assert completed.value.exit_code == 0
+        assert lock.transferred
+        result = json.loads(result_path.read_text())
+        assert result["outcome"] == ("inactive" if session_keys else "unavailable")
+        assert result["calls"] == [
+            ["systemctl", "--user", "daemon-reload"],
+            *([["systemctl", "--user", "enable", "ricky-gateway.service"]] if session_keys else []),
+        ]
+        assert not (tmp_path / "project").exists()
+    finally:
+        os.close(lock.descriptor)
+
+
+@pytest.mark.parametrize("spawn_fails", [False, True])
+def test_handoff_keeps_lock_on_spawn_failure_and_reaps_timed_out_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_fails: bool
+) -> None:
+    journal, environment, lock = _fixture(tmp_path)
+    events: list[str] = []
+
+    class Child:
+        def wait(self, *, timeout: int | None = None) -> int:
+            assert lock.transferred
+            if timeout is not None:
+                events.append("timeout")
+                raise subprocess.TimeoutExpired("test-child", timeout)
+            events.append("reaped")
+            return -9
+
+        def kill(self) -> None:
+            events.append("killed")
+
+    def popen(*args: Any, **kwargs: Any) -> Child:
+        assert not lock.transferred
+        if spawn_fails:
+            raise OSError("test spawn failure")
+        return Child()
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    controller = UvToolSoftwareController(
+        environment=environment,
+        lock=lock,  # type: ignore[arg-type]
+        uv_executable=Path(environment.executable),
+    )
+    try:
+        if spawn_fails:
+            with pytest.raises(SoftwareReplacementError, match="could not be started"):
+                controller._handoff(journal, action="resume")
+            assert not lock.transferred
+            assert events == []
+        else:
+            with pytest.raises(UpgradeHandoffComplete) as completed:
+                controller._handoff(journal, action="resume")
+            assert completed.value.exit_code == -9
+            assert events == ["timeout", "killed", "reaped"]
+    finally:
+        os.close(lock.descriptor)

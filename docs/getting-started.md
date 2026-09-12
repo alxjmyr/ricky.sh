@@ -206,6 +206,12 @@ ricky upgrade --resume
 ricky upgrade --rollback --yes
 ```
 
+Software replacement can succeed before gateway reconciliation fails. If the
+failure reports that the user service manager could not reload the gateway
+unit, restore access to your user systemd session and run `ricky upgrade --resume`
+from your normal login terminal. Do not reinstall Ricky or reset its data to
+recover this failure.
+
 See [Operations](operations.md#upgrade-ricky) for backup scope, recovery, and
 schedule outcomes.
 

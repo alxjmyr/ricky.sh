@@ -230,7 +230,7 @@ class UvToolSoftwareController:
             child = subprocess.Popen(
                 arguments,
                 stdin=subprocess.DEVNULL,
-                env=self._environment_variables(),
+                env=self._handoff_environment(),
                 pass_fds=(self._lock.descriptor,),
             )
         except OSError as exc:
@@ -252,6 +252,15 @@ class UvToolSoftwareController:
         environment = _sanitized_environment()
         environment["UV_TOOL_DIR"] = self._environment.tool_root
         environment["UV_TOOL_BIN_DIR"] = self._environment.bin
+        return environment
+
+    def _handoff_environment(self) -> dict[str, str]:
+        # The replacement Ricky reconciles user services. Package installation
+        # and version probes do not need access to the session's service manager.
+        environment = self._environment_variables()
+        for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
         return environment
 
 
