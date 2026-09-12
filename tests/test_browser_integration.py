@@ -12,7 +12,6 @@ import signal
 import socket
 import sqlite3
 import threading
-import time
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
@@ -163,7 +162,7 @@ class _FixtureHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
         if path == "/slow":
-            time.sleep(1.0)
+            self.server.release_slow.wait(timeout=30)  # type: ignore[attr-defined]
         if path == "/phase4":
             body = b"""<!doctype html>
 <html>
@@ -490,6 +489,7 @@ def _fixture_server(
     post_hook: Callable[[str], None] | None = None,
 ) -> Iterator[tuple[str, Counter[str]]]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FixtureHandler)
+    server.release_slow = threading.Event()  # type: ignore[attr-defined]
     server.requests = Counter()  # type: ignore[attr-defined]
     server.submissions = []  # type: ignore[attr-defined]
     server.redirect_target = redirect_target  # type: ignore[attr-defined]
@@ -505,6 +505,7 @@ def _fixture_server(
         port = server.server_port
         yield f"http://{host}:{port}", server.requests  # type: ignore[attr-defined]
     finally:
+        server.release_slow.set()  # type: ignore[attr-defined]
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
@@ -579,7 +580,6 @@ async def test_real_chrome_navigates_snapshots_scrolls_and_blocks_private_origin
                 "browser": {
                     "enabled": True,
                     "headless": True,
-                    "navigation_timeout_seconds": 0.5,
                     "allowed_private_origins": [allowed_origin],
                 },
             }
@@ -647,7 +647,42 @@ async def test_real_chrome_navigates_snapshots_scrolls_and_blocks_private_origin
                 )
             assert download.value.failure.code == "download_blocked"
             assert allowed_requests["/download"] == 1
+        finally:
+            await service.aclose()
 
+        profile_ephemeral = (
+            Path(settings.user_data_dir) / "profiles" / "personal" / settings.browser.ephemeral_dir
+        )
+        assert not profile_ephemeral.exists()
+        assert not Path(settings.project_data_dir).exists()
+
+
+async def test_real_chrome_navigation_timeout_is_not_retried(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+) -> None:
+    # Keep the response pending until teardown instead of racing two short sleeps.
+    with _fixture_server() as (allowed_origin, allowed_requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "browser": {
+                    "enabled": True,
+                    "headless": True,
+                    "navigation_timeout_seconds": 5,
+                    "allowed_private_origins": [allowed_origin],
+                },
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        try:
+            session = await service.open_session(headless=True)
             with pytest.raises(BrowserError) as timed_out:
                 await service.navigate(
                     session.session_id,

@@ -8,6 +8,21 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def plain_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI text assertions independent of CI's forced terminal styling."""
+
+    from typer import rich_utils
+
+    # Rich also checks these at console creation time. Individual rendering
+    # tests can opt back into a terminal explicitly.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
+    # Typer reads GITHUB_ACTIONS/FORCE_COLOR at import time; changing the
+    # environment in a fixture is too late. CliRunner captures plain text.
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", False)
+
+
+@pytest.fixture(autouse=True)
 def isolate_user_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep every test away from real user data and bootstrap configuration."""
 
