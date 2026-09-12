@@ -26,7 +26,6 @@ from ricky.browser.types import (
     BrowserFinancialTransactionEnvelope,
     BrowserFundingSource,
     BrowserHandoff,
-    BrowserInstallStatus,
     BrowserMoney,
     BrowserNavigation,
     BrowserPage,
@@ -40,6 +39,7 @@ from ricky.browser.types import (
     BrowserSessionClosed,
     BrowserSiteFundingSource,
     BrowserSnapshot,
+    BrowserStatus,
     BrowserTarget,
     BrowserTargetDescriptor,
     BrowserTransactionEnvelope,
@@ -331,11 +331,11 @@ def _models() -> tuple[BaseModel, ...]:
             reason="captcha",
             prompt="Complete the CAPTCHA in the headed browser, then reply when ready.",
         ),
-        BrowserInstallStatus(
+        BrowserStatus(
             enabled=True,
             ready=True,
-            install_dir="/safe/browser/root",
-            executable="/safe/browser/root/chromium",
+            playwright_version="1.62.0",
+            executable="/usr/bin/google-chrome-stable",
         ),
     )
 

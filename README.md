@@ -1,7 +1,7 @@
 # Ricky.sh
 
 An agentic personal assistant. Like most people named Ricky... He's fine, but not exceptional...
-Guaranteed to be marginally more productive than a drunk guy in a Canadian trailer park.
+Guaranteed to be marginally more productive... 60% of the time it works every time
 
 ![Ricky](ricky.jpg)
 

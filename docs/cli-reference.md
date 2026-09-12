@@ -119,10 +119,9 @@ Read the corresponding feature guide before using a state-changing or unattended
 
 | Command | Behavior |
 |---|---|
-| `ricky browser install` | Explicitly download the Chromium build matched to Playwright and verify its executable. This does not enable browser control. Exits nonzero if installation or verification fails. |
-| `ricky browser status` | Report enablement, headed or headless mode, binary location, and Chromium readiness without launching Chromium or downloading files. Exits `0` when the locked executable is ready, even if browser control is disabled; exits `1` when it is missing or readiness inspection fails. |
+| `ricky browser status` | Report enablement, display mode, Chrome executable and version, Playwright version, and bounded readiness diagnostics without opening a browser window or downloading files. Exits `0` when Chrome discovery succeeds, even if browser control is disabled; exits `1` otherwise. Discovery does not prove launch readiness. |
 | `ricky browser resources` | List safe metadata for configured resources in an issued profile scope. Repeat `--access-profile` to include another accessible profile. Endpoints and filesystem paths are omitted. |
-| `ricky browser setup PROFILE/NAME` | Open one persistent resource headed for local sign-in or configuration. No model provider or browser snapshot is used. The terminal wait is interruptible and cleanup completes before exit. |
+| `ricky browser setup PROFILE/NAME` | Open ordinary headed Chrome for local sign-in or configuration in one dedicated persistent resource. No automation connection, model provider, or browser snapshot is used. The terminal wait is interruptible and cleanup completes before exit. |
 | `ricky browser check PROFILE/NAME` | Open and close one configured resource to verify availability. CDP checks use the configured attachment deadline and disconnect without printing tab content. |
 | `ricky browser reset PROFILE/NAME` | Confirm and delete only one idle persistent resource's browser state. Use `--yes` to supply confirmation non-interactively. |
 

@@ -176,8 +176,10 @@ request.
 Every network action is identified before it runs:
 
 - provider verification is authenticated and may be billable;
-- OAuth authorization contacts an external service and may open a browser; and
-- browser installation downloads the Chromium build matched to Playwright.
+- OAuth authorization contacts an external service and may open a browser.
+
+Browser control uses host-installed Google Chrome Stable. Installation, initialization, and
+ordinary startup never download a browser; the host owns Chrome installation and updates.
 
 Declining remote verification does not invalidate locally valid configuration.
 Optional assets, integrations, services, and unattended work remain separate,

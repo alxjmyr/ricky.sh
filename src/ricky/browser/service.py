@@ -35,7 +35,7 @@ from ricky.browser.backend import (
     BrowserPageHandle,
     BrowserSessionHandle,
 )
-from ricky.browser.install import browser_binary_dir, browser_status
+from ricky.browser.chrome import browser_status
 from ricky.browser.lease import BrowserResourceLease
 from ricky.browser.playwright_backend import PlaywrightBrowserBackend
 from ricky.browser.policy import (
@@ -49,6 +49,7 @@ from ricky.browser.resources import (
     ResolvedBrowserResource,
     browser_resource_configuration_digest,
     persistent_browser_path,
+    prepare_persistent_browser,
     require_browser_resource,
     resolve_browser_resources,
 )
@@ -311,7 +312,7 @@ class BrowserService:
         *,
         scope: ProfileScope,
         backend: BrowserBackend,
-        executable_path: Path,
+        executable_path: Path | None,
         runtime_guard: BrowserExecutionGuard | None = None,
     ) -> None:
         self._settings = settings
@@ -344,10 +345,10 @@ class BrowserService:
         backend: BrowserBackend | None = None,
         runtime_guard: BrowserExecutionGuard | None = None,
     ) -> BrowserService:
-        """Construct without starting Chromium or creating profile state."""
+        """Construct without starting Chrome or creating profile state."""
 
         status = await browser_status(settings)
-        executable = Path(status.executable) if status.executable else browser_binary_dir(settings)
+        executable = Path(status.executable) if status.ready and status.executable else None
         selected_backend = backend or PlaywrightBrowserBackend()
         return cls(
             settings,
@@ -382,6 +383,7 @@ class BrowserService:
             await self._runtime_guard.settle_effect_action(action_id)
 
     async def open_session(self, *, headless: bool | None = None) -> BrowserSession:
+        executable = self._require_executable()
         async with self._registry_lock:
             self._ensure_open()
             if len(self._sessions) >= self._settings.browser.max_sessions:
@@ -401,7 +403,7 @@ class BrowserService:
                 raise BrowserError(
                     BrowserFailure(
                         code="unattended_denied",
-                        message="background browser sessions must use owned headless Chromium",
+                        message="background browser sessions must use owned headless Chrome",
                     )
                 )
             guard_facts = self._guard_facts(
@@ -428,7 +430,7 @@ class BrowserService:
                 mode="owned_ephemeral",
                 user_data_dir=state_dir,
                 download_temp_dir=download_temp_dir,
-                executable_path=self._executable_path,
+                executable_path=executable,
                 headless=selected_headless,
                 navigation_timeout_ms=self._settings.browser.navigation_timeout_seconds * 1_000,
                 operation_timeout_ms=self._settings.browser.operation_timeout_seconds * 1_000,
@@ -499,11 +501,12 @@ class BrowserService:
         qualified: str,
         *,
         headless: bool | None = None,
-        start_blank: bool = False,
     ) -> BrowserSession:
         """Open one exact configured persistent profile or CDP attachment."""
 
         resolved = self._require_resource(qualified)
+        if isinstance(resolved.settings, PersistentBrowserResourceSettings):
+            self._require_executable()
         async with self._registry_lock:
             self._ensure_open()
             if len(self._sessions) >= self._settings.browser.max_sessions:
@@ -532,7 +535,7 @@ class BrowserService:
                     BrowserFailure(
                         code="unattended_denied",
                         message=(
-                            "background browser resources must use Ricky-owned headless Chromium"
+                            "background browser resources must use Ricky-owned headless Chrome"
                         ),
                     )
                 )
@@ -553,7 +556,7 @@ class BrowserService:
             attachment_deadline: float | None = None
             try:
                 if isinstance(resolved.settings, PersistentBrowserResourceSettings):
-                    state_dir = self._prepare_persistent_state(resolved.ref)
+                    state_dir = prepare_persistent_browser(self._settings, resolved.ref)
                     download_temp_dir = self._confined_state_path(
                         self._instance_id, session_id, "download-attempts"
                     )
@@ -566,7 +569,7 @@ class BrowserService:
                         mode=mode,
                         user_data_dir=state_dir,
                         download_temp_dir=download_temp_dir,
-                        executable_path=self._executable_path,
+                        executable_path=self._require_executable(),
                         headless=selected_headless,
                         navigation_timeout_ms=(
                             self._settings.browser.navigation_timeout_seconds * 1_000
@@ -581,7 +584,6 @@ class BrowserService:
                             else self._settings.browser.max_pages + 50
                         ),
                         download_file_byte_limit=(self._settings.browser.download_file_byte_limit),
-                        start_blank=start_blank,
                     )
                 else:
                     if headless is not None:
@@ -591,13 +593,6 @@ class BrowserService:
                                 message=(
                                     "attached browser resources do not accept a headless override"
                                 ),
-                            )
-                        )
-                    if start_blank:
-                        raise BrowserError(
-                            BrowserFailure(
-                                code="resource_kind_mismatch",
-                                message="attached browser resources cannot replace external tabs",
                             )
                         )
                     selected_headless = None
@@ -3457,7 +3452,10 @@ class BrowserService:
     def _resource_model(self, resolved: ResolvedBrowserResource) -> BrowserResource:
         lease = BrowserResourceLease(self._settings, resolved.ref)
         persistent = isinstance(resolved.settings, PersistentBrowserResourceSettings)
-        available = os.name == "posix" and (not persistent or self._executable_path.is_file())
+        available = os.name == "posix" and (
+            not persistent
+            or (self._executable_path is not None and self._executable_path.is_file())
+        )
         busy = lease.is_active() if available else False
         return BrowserResource(
             resource=resolved.ref,
@@ -3493,18 +3491,18 @@ class BrowserService:
             )
         return resolved
 
-    def _prepare_persistent_state(self, ref: ProfileResourceRef) -> Path:
-        ensure_private_user_data_root(self._settings)
-        path = persistent_browser_path(self._settings, ref)
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        current = persistent_browser_path(self._settings, ref)
-        if current != path:
-            raise ValueError("persistent browser path changed before creation")
-        current.mkdir(exist_ok=True, mode=0o700)
-        if os.name == "posix":
-            os.chmod(current.parent, 0o700)
-            os.chmod(current, 0o700)
-        return current
+    def _require_executable(self) -> Path:
+        if self._executable_path is None or not self._executable_path.is_file():
+            raise BrowserError(
+                BrowserFailure(
+                    code="not_installed",
+                    message=(
+                        "Google Chrome Stable is unavailable; "
+                        "install Chrome and run ricky browser status"
+                    ),
+                )
+            )
+        return self._executable_path
 
     def _confined_state_path(self, *parts: str) -> Path:
         relative = PurePosixPath(self._settings.browser.ephemeral_dir, *parts).as_posix()

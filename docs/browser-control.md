@@ -1,28 +1,29 @@
 # Use browser control
 
-Ricky can run profile-scoped Chromium sessions during an interactive terminal conversation. It
+Ricky can run profile-scoped Chrome sessions during an interactive terminal conversation. It
 supports ephemeral sessions, dedicated persistent profiles, and explicit attachment to a local
-Chromium debugging instance. Page control includes navigation, scrolling, tab selection, bounded
+Chrome debugging instance. Page control includes navigation, scrolling, tab selection, bounded
 semantic snapshots, ordinary form entry, explicit consequential commits, dialogs, popups, and
 local user handoff. It can also transfer reviewed files, use masked visual snapshots as a fallback,
 and fill recognized protected controls from local protected-value aliases. Gateway-owned ad hoc
 executions can use a separately enabled, guarded background surface; named jobs can use its
 read-oriented subset. Attachment to selected tabs in your everyday browser is not supported.
 
-## Install and enable Chromium
+## Enable installed Chrome
 
-Install the Chromium build matched to Ricky's locked Playwright version:
+Install Google Chrome Stable through your operating system or Google's installer. Ricky uses the
+host installation and never downloads or updates a browser. Bundled Chromium, Chrome for Testing,
+and other browser brands are not supported. Playwright remains Ricky's control library.
 
-```bash
-ricky browser install
-```
-
-This explicit command stores browser binaries below `user_data_dir`. Normal startup and browser
-tool calls never download a browser. Inspect readiness without launching Chromium:
+Check executable discovery and version compatibility:
 
 ```bash
 ricky browser status
 ```
+
+This check does not open a browser window. Launch can still fail if the host's display, sandbox,
+or enterprise policy prevents it. For a nonstandard installation, set the absolute
+`browser.executable_path` in installation configuration.
 
 Then enable browser control in `<user_data_dir>/ricky.toml`:
 
@@ -52,7 +53,12 @@ Set up authentication locally without constructing a model provider or taking a 
 ricky browser setup personal/ricky-personal
 ```
 
-Sign in and configure the headed Chromium window, then return to the terminal and press Enter.
+Setup opens ordinary headed Chrome without Playwright attached, automation launch flags, or
+Ricky network interception. Sign in locally, then close Chrome normally to finish and save the
+profile. Ctrl+C cancels setup and recent sign-ins may not be saved. Ricky retains the resource
+lease until its owned processes have stopped.
+Controlled Chrome uses the same native credential-store selection as ordinary setup. Background
+workers must run as the same host user with access to the credential store used during setup.
 Later chat sessions can ask Ricky to list browser resources and open `personal/ricky-personal`.
 Ricky asks for fresh permission every time it opens a configured resource; that decision cannot be
 remembered as a session grant.
@@ -65,25 +71,49 @@ ricky browser check personal/ricky-personal
 ricky browser reset personal/ricky-personal
 ```
 
-Reset permanently deletes that resource's cookies, local storage, cache, and other Chromium state
+Reset permanently deletes that resource's cookies, local storage, cache, and other Chrome state
 after confirmation. It leaves the resource configuration in place.
 
-## Attach a dedicated local Chromium instance
+## Replace an older bundled-browser installation
 
-CDP resources provide advanced, whole-browser attachment for a dedicated Chromium process. Start
-Chromium separately with a loopback debugging port and a dedicated user-data directory, then add:
+The Chrome-only release starts with fresh browser profiles; it does not convert old Chromium
+profiles or accept the former browser configuration fields.
+
+1. Close active browser sessions and stop workers that could reopen them. Before replacing the
+   older Ricky release, record its browser-binary directory from `ricky browser status`.
+2. Install Google Chrome Stable through the host and update Ricky. Remove `browser.browser_kind`
+   and `browser.binary_dir` from installation configuration. Keep the resource names and other
+   browser settings you still use.
+3. Run `ricky browser status`. For each persistent resource, run `ricky browser reset PROFILE/NAME`
+   and then `ricky browser setup PROFILE/NAME` to sign in again. Reset deletes that resource's
+   previous authentication and browser state.
+4. Once the old browser processes are stopped, remove only the obsolete installation-owned
+   browser-binary directory recorded in step 1. Preserve profile configuration, protected values,
+   downloads, other Ricky data, and your everyday Chrome profile.
+
+Terminal and background executions acquire the same exclusive resource lease. A persistent
+resource used by background executions must be configured with `headless = true`; setup still
+opens a visible window for local login.
+
+## Attach a dedicated local Chrome instance
+
+CDP resources provide advanced, whole-browser attachment for a dedicated Chrome process. Start
+Chrome separately with a loopback debugging port and a dedicated user-data directory, then add:
 
 ```toml
 # <user_data_dir>/profiles/personal/ricky.toml
 [browser.resources.local-debug]
 kind = "cdp"
-description = "Dedicated local Chromium debugging instance"
+description = "Dedicated local Chrome debugging instance"
 endpoint = "http://127.0.0.1:9222"
 ```
 
 The endpoint must be an exact loopback HTTP address with an explicit port. It is resolved from
 local configuration and is never accepted from the model or printed in normal resource output.
 Use `ricky browser check personal/local-debug` before opening it in chat.
+
+You are responsible for starting this endpoint with Google Chrome Stable. A CDP endpoint does
+not attest the executable behind it; Chrome-only support is not a browser-identity security check.
 
 CDP exposes every eligible HTTP or HTTPS tab in that dedicated browser. Ricky disconnects without
 closing the external browser, its contexts, or its tabs. It also leaves unsupported and overflow
@@ -97,16 +127,16 @@ limit a CDP connection to a user-selected tab group.
 
 Each interactive Ricky runtime owns its browser connection. Ephemeral browser data lives below the
 primary profile's private data directory and is removed when that runtime closes. A persistent
-resource uses a dedicated Chromium directory below its owning Ricky profile and retains state after
+resource uses a dedicated Chrome directory below its owning Ricky profile and retains state after
 close. Ricky never imports or opens an ordinary Chrome profile as a persistent resource. CDP
 processes and tabs remain externally owned.
 
 Configured resources use host-local exclusive leases. If another Ricky runtime has one open,
-opening, checking, setting up, or resetting it fails as busy. Competing Chromium processes must not open the same profile directory. If Ricky cannot confirm that an owned Chromium process closed, it reports
+opening, checking, setting up, or resetting it fails as busy. Competing Chrome processes must not open the same profile directory. If Ricky cannot confirm that an owned Chrome process closed, it reports
 the cleanup failure and keeps that resource busy rather than risking a second process on the same
 profile.
 
-Browser binaries are installation-owned and remain available across sessions. A gateway foreground
+Chrome installation and updates belong to the host, outside Ricky data. A gateway foreground
 turn never owns or directly calls a browser. It can start, inspect, cancel, or reconcile a durable
 execution whose worker owns one browser for that complete attempt. A named job can own one bounded
 read-oriented browser. Browser tools remain unavailable inside workflows and resumed nonresident
@@ -231,7 +261,7 @@ the page. CAPTCHA, passkey, SSO, and unsupported protected controls still requir
 `browser_upload` accepts a current snapshot reference for an enabled file control. Before asking
 for permission, Ricky reads the selected local files once and freezes their names, media types,
 sizes, SHA-256 digests, and bytes. The review shows those facts without exposing a physical path.
-If a source file changes while the prompt is open, Chromium still receives the reviewed bytes.
+If a source file changes while the prompt is open, Chrome still receives the reviewed bytes.
 File selection can run page JavaScript, so it is an external effect, is never replayed
 automatically, and does not offer a remembered permission grant. Ricky requires a fresh local
 decision for every upload; an allow rule cannot suppress it.
@@ -256,7 +286,7 @@ remains in scope. Durable downloads survive browser and chat shutdown.
 
 Downloads are unavailable in CDP-attached sessions because Ricky does not own that browser's
 download preferences or external storage. A server that omits or lies about `Content-Length` can
-use more temporary space while Chromium receives the file, but Ricky still rejects an oversized
+use more temporary space while Chrome receives the file, but Ricky still rejects an oversized
 completed file before durable publication.
 
 ## Use visual fallback
@@ -366,7 +396,7 @@ A screenshot can contain names, messages, account details, images, or other ambi
 anywhere else in the viewport. Allow screenshot disclosure only to a provider suitable for the
 resource owner's data.
 
-Persistent Chromium state is sensitive. It can contain cookies, local storage, cache, and account
+Persistent Chrome state is sensitive. It can contain cookies, local storage, cache, and account
 sessions. Ricky confines it with owner-only filesystem permissions and does not serialize it into
 tool results, but does not add application-level encryption at rest. Back up or expose the owning
 profile directory only with the same care you would use for a signed-in browser profile.

@@ -781,13 +781,13 @@ class BrowserHandoff(BrowserModel):
     prompt: str = Field(min_length=1, max_length=1_000)
 
 
-class BrowserInstallStatus(BrowserModel):
+class BrowserStatus(BrowserModel):
     enabled: bool
-    browser: Literal["chromium"] = "chromium"
     ready: bool
-    install_dir: str = Field(min_length=1, max_length=4_000)
     executable: str | None = Field(default=None, max_length=4_000)
-    repair_command: str = "uv run ricky browser install"
+    version: str | None = Field(default=None, max_length=100)
+    playwright_version: str = Field(min_length=1, max_length=100)
+    diagnostic: str | None = Field(default=None, max_length=1_000)
 
 
 class BrowserError(RuntimeError):

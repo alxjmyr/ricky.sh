@@ -59,7 +59,7 @@ installations.
 
 Initialization creates only `installation.json`, a minimal `ricky.toml`, and
 `profiles/shared/`. It enables `shared` as the default profile. It does not
-create secret files, download Chromium, configure services, or enable optional
+create secret files, download a browser, configure services, or enable optional
 features.
 
 Running `ricky init` again verifies the same installation without overwriting
@@ -148,12 +148,9 @@ ricky ask "Explain the difference between an AI agent and a chatbot in three sen
 
 ## Add optional capabilities
 
-Optional components require separate actions. Chromium, for example, is not
-downloaded by installation or initialization:
-
-```bash
-ricky browser install
-```
+Optional components require separate configuration. Browser control uses host-installed Google
+Chrome Stable. Install Chrome externally, then check it with `ricky browser status`; Ricky never
+downloads a separate browser.
 
 Continue with the feature you need:
 

@@ -22,9 +22,8 @@ def test_browser_defaults_are_conservative() -> None:
     browser = RickySettings().browser
 
     assert browser.enabled is False
-    assert browser.browser_kind == "chromium"
     assert browser.headless is False
-    assert browser.binary_dir == "browser/browsers"
+    assert browser.executable_path is None
     assert browser.ephemeral_dir == "browser/ephemeral"
     assert browser.persistent_dir == "browser/persistent"
     assert browser.lease_dir == "browser/leases"
@@ -151,7 +150,7 @@ def test_browser_loads_root_toml_and_nested_environment(
         """[browser]
 enabled = true
 headless = false
-binary_dir = "installed/chromium"
+executable_path = "/opt/google/chrome/google-chrome"
 ephemeral_dir = "runtime/browser"
 max_pages = 4
 allowed_private_origins = ["http://127.0.0.1:8080"]
@@ -165,7 +164,7 @@ allowed_private_origins = ["http://127.0.0.1:8080"]
 
     assert browser.enabled is True
     assert browser.headless is False
-    assert browser.binary_dir == "installed/chromium"
+    assert browser.executable_path == Path("/opt/google/chrome/google-chrome")
     assert browser.ephemeral_dir == "runtime/browser"
     assert browser.max_pages == 4
     assert browser.allowed_private_origins == ["http://127.0.0.1:8080"]
@@ -174,7 +173,6 @@ allowed_private_origins = ["http://127.0.0.1:8080"]
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("binary_dir", "../escape"),
         ("ephemeral_dir", "/tmp/escape"),
         ("persistent_dir", "../profiles"),
         ("lease_dir", "/tmp/leases"),
@@ -441,3 +439,14 @@ def test_profile_runtime_keeps_resource_catalog_profile_owned(tmp_path: Path) ->
 
     assert set(personal.profile_configs) == {"personal"}
     assert "work" not in personal.profile_configs
+
+
+@pytest.mark.parametrize("field", ["binary_dir", "browser_kind"])
+def test_removed_browser_configuration_is_rejected(field: str) -> None:
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        BrowserSettings.model_validate({field: "chromium"})
+
+
+def test_chrome_override_requires_absolute_path() -> None:
+    with pytest.raises(ValidationError, match="absolute path"):
+        BrowserSettings(executable_path=Path("google-chrome"))

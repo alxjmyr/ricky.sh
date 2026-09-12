@@ -457,6 +457,6 @@ class FakeBrowserBackend:
 def fake_executable(tmp_path: Path) -> Path:
     """Return a harmless existing path for launch-option assertions."""
 
-    path = tmp_path / "fake-chromium"
+    path = tmp_path / "fake-chrome"
     path.touch()
     return path

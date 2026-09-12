@@ -109,16 +109,16 @@ default_model = "sonnet"
 cli_path = "claude"
 resume_sessions = true
 
-# Profile-scoped, Ricky-owned browser control. Chromium is never downloaded at
-# startup; install the locked build explicitly with `ricky browser install`.
+# Profile-scoped browser control using host-installed Google Chrome Stable.
+# Ricky never downloads or updates a browser.
 [browser]
 enabled = false
-browser_kind = "chromium"
+# Optional absolute path to a Google Chrome Stable executable.
+# executable_path = "/usr/bin/google-chrome-stable"
 # Interactive sessions are headed by default so browser activity stays visible.
 headless = false
-# Binary state is relative to user_data_dir. Session state paths are relative to
-# the owning profile directory. Ephemeral state is removed when its runtime closes.
-binary_dir = "browser/browsers"
+# Session state paths are relative to the owning profile directory.
+# Ephemeral state is removed when its runtime closes.
 ephemeral_dir = "browser/ephemeral"
 persistent_dir = "browser/persistent"
 lease_dir = "browser/leases"
@@ -206,7 +206,7 @@ argon2_memory_kib = 65536
 #
 #   [browser.resources.local-debug]
 #   kind = "cdp"
-#   description = "Dedicated local Chromium debugging instance"
+#   description = "Dedicated local Chrome debugging instance"
 #   endpoint = "http://127.0.0.1:9222"
 
 # Guided workflows come from the installed package and

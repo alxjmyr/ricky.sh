@@ -343,7 +343,7 @@ class _BrowserTool:
 
 class BrowserSessionOpenTool(_BrowserTool):
     name = "browser_session_open"
-    description = "Open one Ricky-owned ephemeral Chromium session for foreground Web browsing."
+    description = "Open one Ricky-owned ephemeral Chrome session for foreground Web browsing."
     Params = BrowserSessionOpenParams
 
     async def run(self, params: BrowserSessionOpenParams, ctx: ToolContext) -> ToolResult:

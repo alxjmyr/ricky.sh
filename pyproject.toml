@@ -77,6 +77,6 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-ra"
 markers = [
-    "browser_integration: requires the explicitly installed Playwright Chromium binary",
+    "browser_integration: requires the host-installed Google Chrome Stable",
     "real_bundled_resources: discovers the real skills, workflows, and jobs shipped with Ricky",
 ]

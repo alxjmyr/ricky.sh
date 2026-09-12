@@ -33,7 +33,7 @@ Use these exact commands and flags:
 | CLI | `uv run ricky` |
 
 The sanctioned inner-loop test command excludes only tests that control a real
-Playwright Chromium process. Browser unit, service, policy, backend-contract,
+Google Chrome process. Browser unit, service, policy, backend-contract,
 and tool tests still run. Use it while iterating when the current changes do not
 affect the real-browser boundaries below. It is not a completion gate or a
 substitute for the full test command.

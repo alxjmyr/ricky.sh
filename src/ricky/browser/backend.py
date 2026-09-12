@@ -34,7 +34,6 @@ class BrowserLaunchOptions:
     operation_timeout_ms: float
     max_redirects: int
     page_discovery_limit: int
-    start_blank: bool = False
     download_file_byte_limit: int = 50_000_000
 
 

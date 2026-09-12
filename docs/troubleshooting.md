@@ -116,16 +116,20 @@ lock automatically.
 
 For a headed browser launched from a long-lived tmux server, create a fresh pane after the desktop
 session has set `DISPLAY` or `WAYLAND_DISPLAY`. For CDP attachment, confirm that the dedicated
-Chromium process is still listening on the configured loopback port. Ricky supports only exact
+Chrome process is still listening on the configured loopback port. Ricky supports only exact
 loopback HTTP endpoints and does not start, stop, or repair an external CDP browser.
 
-Launching Playwright's bundled Chromium executable directly can fail with `No usable sandbox` on
-Linux hosts that restrict unprivileged user namespaces. Prefer a system-installed Chrome or
-Chromium package with a working host sandbox for a manually launched CDP resource, and always use
-a dedicated non-default user-data directory. Configuring host user namespaces is the stronger
-alternative. The Chromium `--no-sandbox` flag weakens browser isolation and should not be the
-normal solution; restrict it to a disposable, loopback-only diagnostic browser if no safer option
-exists, and do not use that browser for unrelated or sensitive sites.
+If Chrome is missing, install Google Chrome Stable through the host's package manager or Google's
+installer, then run `ricky browser status`. Ricky has no browser installer or bundled fallback.
+Use `browser.executable_path` for an absolute nonstandard Stable executable. A successful version
+check does not prove that Chrome can launch: verify display availability, host sandbox support,
+and enterprise automation policies separately. Use a dedicated non-default user-data directory
+for external CDP resources.
+
+Chrome branding does not guarantee that automated sessions pass verification. Setup runs ordinary
+Chrome without automation attached; controlled browsing can still encounter site restrictions.
+Local handoff is available only in Ricky-owned visible sessions. Autonomous challenge recovery and
+remote takeover are outside the current browser feature set.
 
 ## A browser file or visual operation fails
 

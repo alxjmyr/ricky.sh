@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ricky.config import (
     BrowserResourceSettings,
     RickySettings,
+    ensure_private_user_data_root,
     profile_data_path,
     profile_data_subpath,
 )
@@ -83,13 +85,29 @@ def browser_resource_configuration_digest(resource: ResolvedBrowserResource) -> 
 
 
 def persistent_browser_path(settings: RickySettings, ref: ProfileResourceRef) -> Path:
-    """Resolve one persistent Chromium profile below its owning Ricky profile."""
+    """Resolve one persistent Chrome profile below its owning Ricky profile."""
 
     relative = PurePosixPath(
         settings.browser.persistent_dir,
         browser_resource_digest(ref),
     ).as_posix()
     return _profile_browser_subpath(settings, ref.profile, relative)
+
+
+def prepare_persistent_browser(settings: RickySettings, ref: ProfileResourceRef) -> Path:
+    """Create private profile state after the caller acquires its resource lease."""
+
+    ensure_private_user_data_root(settings)
+    path = persistent_browser_path(settings, ref)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    current = persistent_browser_path(settings, ref)
+    if current != path:
+        raise ValueError("persistent browser path changed before creation")
+    current.mkdir(exist_ok=True, mode=0o700)
+    if os.name == "posix":
+        os.chmod(current.parent, 0o700)
+        os.chmod(current, 0o700)
+    return current
 
 
 def browser_lease_path(settings: RickySettings, ref: ProfileResourceRef) -> Path:

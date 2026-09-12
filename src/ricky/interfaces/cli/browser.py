@@ -1,4 +1,4 @@
-"""Provider-free browser installation, resource, and readiness commands."""
+"""Provider-free Chrome resource and readiness commands."""
 
 from __future__ import annotations
 
@@ -8,17 +8,13 @@ from typing import Any
 
 import typer
 
-from ricky.browser.install import (
-    BrowserInstallationError,
-    browser_status,
-    install_chromium,
-)
+from ricky.browser.chrome import ChromeDiscoveryError, browser_status
 from ricky.browser.service import BrowserService
+from ricky.browser.setup import manual_browser_setup
 from ricky.browser.types import (
     BrowserError,
-    BrowserFailure,
-    BrowserInstallStatus,
     BrowserResourceList,
+    BrowserStatus,
 )
 from ricky.config import RickySettings, load_settings
 from ricky.interfaces.cli.render import CliRenderer
@@ -38,21 +34,11 @@ _RESOURCE_ARGUMENT = typer.Argument(..., help="Qualified browser resource as pro
 
 
 def register_browser_commands(browser_app: typer.Typer) -> None:
-    """Attach browser installation commands to the main CLI composition root."""
-
-    @browser_app.command("install")
-    def browser_install() -> None:
-        """Explicitly install the Chromium build locked to Playwright."""
-
-        settings = load_settings()
-        renderer = CliRenderer()
-        renderer.render_status("Installing the locked Playwright Chromium build…")
-        status = _run_browser_command(lambda: install_chromium(settings), renderer)
-        renderer.render_status(_render_install(status), style="green")
+    """Attach browser resource and readiness commands to the main CLI composition root."""
 
     @browser_app.command("status")
     def browser_readiness() -> None:
-        """Inspect Chromium configuration and readiness without launching it."""
+        """Inspect Chrome executable availability without opening a browser."""
 
         settings = load_settings()
         renderer = CliRenderer()
@@ -98,7 +84,7 @@ def register_browser_commands(browser_app: typer.Typer) -> None:
         resource: str = _RESOURCE_ARGUMENT,
         yes: bool = typer.Option(False, "--yes", help="Skip the destructive confirmation."),
     ) -> None:
-        """Delete one idle Ricky-owned persistent Chromium profile."""
+        """Delete one idle Ricky-owned persistent Chrome profile."""
 
         renderer = CliRenderer()
         if not yes and not typer.confirm(
@@ -112,12 +98,12 @@ def register_browser_commands(browser_app: typer.Typer) -> None:
 
 
 def _run_browser_command(
-    operation: Callable[[], Coroutine[Any, Any, BrowserInstallStatus]],
+    operation: Callable[[], Coroutine[Any, Any, BrowserStatus]],
     renderer: CliRenderer,
-) -> BrowserInstallStatus:
+) -> BrowserStatus:
     try:
         return asyncio.run(operation())
-    except (BrowserInstallationError, OSError, ValueError) as exc:
+    except (ChromeDiscoveryError, OSError, ValueError) as exc:
         renderer.render_error(f"Browser error: {exc}")
         raise typer.Exit(1) from exc
 
@@ -128,7 +114,7 @@ def _run_resource_command(
 ) -> Any:
     try:
         return asyncio.run(operation())
-    except (BrowserError, BrowserInstallationError, OSError, ValueError) as exc:
+    except (BrowserError, ChromeDiscoveryError, OSError, ValueError) as exc:
         renderer.render_error(f"Browser error: {exc}")
         raise typer.Exit(1) from exc
 
@@ -147,25 +133,17 @@ async def _list_resources(
 
 
 async def _setup_resource(resource: str, renderer: CliRenderer) -> None:
-    service = await _resource_service(resource)
-    try:
-        configured = service.resource(resource)
-        if configured.kind != "persistent":
-            raise BrowserError(
-                BrowserFailure(
-                    code="resource_kind_mismatch",
-                    message="browser setup is only available for persistent browser resources",
-                )
-            )
-        session = await service.open_resource(resource, headless=False, start_blank=True)
+    ref = ProfileResourceRef.from_qualified(resource)
+    settings = load_settings()
+    scope = settings.resolve_profile_scope(ref.profile)
+    async with manual_browser_setup(settings, scope=scope, resource=ref) as process:
         renderer.render_status(
-            f"Opened headed browser resource {resource}. Complete local setup in Chromium.",
+            f"Opened Chrome resource {resource}. "
+            "Complete local setup, then close Chrome normally to save your sign-in. "
+            "Ctrl+C cancels setup; recent sign-ins may not be saved.",
             style="green",
         )
-        await renderer.read_line("Press Enter when setup is complete: ")
-        await service.close_session(session.session_id)
-    finally:
-        await service.aclose()
+        await process.wait()
 
 
 async def _check_resource(resource: str) -> None:
@@ -193,26 +171,20 @@ async def _resource_service(resource: str) -> BrowserService:
     return service
 
 
-def _render_install(status: BrowserInstallStatus) -> str:
-    lines = [
-        "Chromium is installed and ready.",
-        f"binary directory: {status.install_dir}",
-    ]
-    if not status.enabled:
-        lines.append("browser control remains disabled; set browser.enabled = true to use it")
-    return "\n".join(lines)
-
-
-def _render_status(status: BrowserInstallStatus, settings: RickySettings) -> str:
+def _render_status(status: BrowserStatus, settings: RickySettings) -> str:
     lines = [
         f"browser control: {'enabled' if status.enabled else 'disabled'}",
-        f"owned browser: {settings.browser.browser_kind}",
         f"interactive mode: {'headless' if settings.browser.headless else 'headed'}",
-        f"binary directory: {status.install_dir}",
-        f"Chromium: {'ready' if status.ready else 'not installed'}",
+        f"Google Chrome Stable: {'available' if status.ready else 'unavailable'}",
+        f"Playwright: {status.playwright_version}",
+        "Readiness checks executable identity; use browser check to test launch capability.",
     ]
-    if not status.ready:
-        lines.append(f"repair: {status.repair_command}")
+    if status.executable:
+        lines.append(f"executable: {status.executable}")
+    if status.version:
+        lines.append(f"Chrome version: {status.version}")
+    if status.diagnostic:
+        lines.append(status.diagnostic)
     return "\n".join(lines)
 
 

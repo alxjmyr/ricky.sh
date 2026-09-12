@@ -147,7 +147,7 @@ capability_app = typer.Typer(
 app.add_typer(capability_app, name="capability")
 register_capability_commands(capability_app)
 browser_app = typer.Typer(
-    help="Install Chromium and manage browser resources.",
+    help="Check Chrome and manage browser resources.",
     no_args_is_help=True,
     add_completion=False,
 )

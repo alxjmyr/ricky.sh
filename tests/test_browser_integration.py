@@ -1,18 +1,21 @@
-"""Real Chromium integration coverage for the browser boundary."""
+"""Real Chrome integration coverage for the browser boundary."""
 
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import hashlib
 import json
 import os
+import shutil
 import signal
 import socket
+import sqlite3
 import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -28,9 +31,12 @@ from pydantic import SecretStr
 
 from ricky.agent import AgentSession
 from ricky.attachments import LoadedAttachment, browser_download_path
-from ricky.browser.install import BrowserInstallationError, browser_status
+from ricky.browser.chrome import browser_status
+from ricky.browser.lease import BrowserResourceLease
 from ricky.browser.playwright_backend import PlaywrightBrowserBackend
+from ricky.browser.resources import persistent_browser_path
 from ricky.browser.service import BrowserService, BrowserVisualCapture
+from ricky.browser.setup import manual_browser_setup
 from ricky.browser.tools import (
     BrowserCommitParams,
     BrowserCommitTool,
@@ -60,22 +66,9 @@ from ricky.tools import ToolContext
 
 pytestmark = pytest.mark.browser_integration
 
-# Capture the operator-selected installation root before the autouse test fixture
-# replaces RICKY_USER_DATA_DIR and HOME with isolated temporary directories.
-_CAPTURED_USER_DATA_DIR = Path(
-    os.environ.get("RICKY_USER_DATA_DIR", "~/.ricky")
-).expanduser().resolve()
-_BINARY_DIR_OVERRIDE = os.environ.get("RICKY_BROWSER_TEST_BINARY_DIR")
-_CAPTURED_BINARY_DIR = (
-    Path(_BINARY_DIR_OVERRIDE).expanduser().resolve()
-    if _BINARY_DIR_OVERRIDE is not None
-    else _CAPTURED_USER_DATA_DIR / "browser" / "browsers"
-)
-
 
 @dataclass(frozen=True)
 class _InstalledBrowser:
-    binary_dir: Path
     executable: Path
 
 
@@ -85,6 +78,31 @@ class _FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = self.path.partition("?")[0]
         self.server.requests[path] += 1
+        if path == "/manual-login":
+            self.send_response(302)
+            self.send_header(
+                "Set-Cookie",
+                "fixture_session=local-test-account; Max-Age=3600; HttpOnly; SameSite=Lax; Path=/",
+            )
+            self.send_header("Location", "/manual-account")
+            self.end_headers()
+            return
+        if path == "/manual-account":
+            authenticated = "fixture_session=local-test-account" in self.headers.get("Cookie", "")
+            if authenticated:
+                self.server.requests["authenticated-account"] += 1
+            body = (
+                b"<html><body><h1>Local account authenticated</h1></body></html>"
+                if authenticated
+                else b"<html><body><h1>Local account signed out</h1></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            with suppress(BrokenPipeError, ConnectionResetError):
+                self.wfile.write(body)
+            return
         if path == "/start":
             self.send_response(302)
             self.send_header("Location", "/page?token=server-secret&source=fixture")
@@ -492,12 +510,12 @@ def _fixture_server(
         thread.join(timeout=2)
 
 
-def _owned_chromium_pid(state_dir: Path) -> int:
-    """Resolve only the main Chromium process for one exact isolated state directory."""
+def _owned_chrome_pid(state_dir: Path) -> int:
+    """Resolve only the main Chrome process for one exact isolated state directory."""
 
     proc = Path("/proc")
     if not proc.is_dir():
-        pytest.skip("Chromium process failure drill requires procfs")
+        pytest.skip("Chrome process failure drill requires procfs")
     expected = str(state_dir).encode()
     matches: list[int] = []
     for candidate in proc.iterdir():
@@ -520,7 +538,7 @@ def _owned_chromium_pid(state_dir: Path) -> int:
         parent = int(parent_line.partition(":")[2].strip())
         if parent not in matched:
             roots.append(pid)
-    assert len(roots) == 1, f"expected one Chromium owner for {state_dir}, found {roots}"
+    assert len(roots) == 1, f"expected one Chrome owner for {state_dir}, found {roots}"
     return roots[0]
 
 
@@ -534,31 +552,16 @@ async def _wait_for_process_exit(pid: int) -> None:
 
 @pytest.fixture
 async def installed_browser() -> _InstalledBrowser:
-    lookup_root = _CAPTURED_BINARY_DIR.parent
-    binary_dir = _CAPTURED_BINARY_DIR.name
-    lookup_settings = RickySettings.model_validate(
-        {"user_data_dir": str(lookup_root), "browser": {"binary_dir": binary_dir}}
-    )
-    try:
-        status = await browser_status(lookup_settings)
-    except BrowserInstallationError:
-        pytest.skip(
-            "Playwright Chromium readiness could not be inspected; "
-            "run uv run ricky browser install (or set RICKY_BROWSER_TEST_BINARY_DIR)"
-        )
+    status = await browser_status(RickySettings())
     if not status.ready:
-        pytest.skip(
-            "Playwright Chromium is not installed; run uv run ricky browser install "
-            "(or set RICKY_BROWSER_TEST_BINARY_DIR)"
+        pytest.fail(
+            f"Real-browser integration requires installed Google Chrome Stable: {status.diagnostic}"
         )
     assert status.executable is not None
-    return _InstalledBrowser(
-        binary_dir=Path(status.install_dir),
-        executable=Path(status.executable),
-    )
+    return _InstalledBrowser(executable=Path(status.executable))
 
 
-async def test_real_chromium_navigates_snapshots_scrolls_and_blocks_private_origin(
+async def test_real_chrome_navigates_snapshots_scrolls_and_blocks_private_origin(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -664,7 +667,7 @@ async def test_real_chromium_navigates_snapshots_scrolls_and_blocks_private_orig
         assert not Path(settings.project_data_dir).exists()
 
 
-async def test_real_chromium_phase4_files_visual_masks_and_coordinate_freshness(
+async def test_real_chrome_phase4_files_visual_masks_and_coordinate_freshness(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -944,7 +947,7 @@ async def test_real_chromium_phase4_files_visual_masks_and_coordinate_freshness(
         assert not ephemeral.exists()
 
 
-async def test_real_chromium_classifies_and_fills_protected_field_without_commit(
+async def test_real_chrome_classifies_and_fills_protected_field_without_commit(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1060,7 +1063,7 @@ async def test_real_chromium_classifies_and_fills_protected_field_without_commit
             await service.aclose()
 
 
-async def test_real_chromium_prepared_financial_and_generic_transaction_envelopes(
+async def test_real_chrome_prepared_financial_and_generic_transaction_envelopes(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1288,7 +1291,7 @@ async def test_real_chromium_prepared_financial_and_generic_transaction_envelope
             await service.aclose()
 
 
-async def test_real_chromium_binds_dispatch_destination_and_escalates_financial_signals(
+async def test_real_chrome_binds_dispatch_destination_and_escalates_financial_signals(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1429,7 +1432,7 @@ async def test_real_chromium_binds_dispatch_destination_and_escalates_financial_
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process failure drill requires POSIX signals")
-async def test_real_chromium_kill_before_commit_dispatch_is_not_performed(
+async def test_real_chrome_kill_before_commit_dispatch_is_not_performed(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1479,7 +1482,7 @@ async def test_real_chromium_kill_before_commit_dispatch_is_not_performed(
             prepared = await tool.prepare_effect(arguments, ctx)
             entry = service._sessions[session.session_id]  # noqa: SLF001 - exact process drill
             assert entry.state_dir is not None
-            browser_pid = _owned_chromium_pid(entry.state_dir)
+            browser_pid = _owned_chrome_pid(entry.state_dir)
             os.kill(browser_pid, signal.SIGKILL)
             await _wait_for_process_exit(browser_pid)
 
@@ -1494,7 +1497,7 @@ async def test_real_chromium_kill_before_commit_dispatch_is_not_performed(
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process failure drill requires POSIX signals")
-async def test_real_chromium_kill_after_commit_dispatch_is_terminal_and_not_replayed(
+async def test_real_chrome_kill_after_commit_dispatch_is_terminal_and_not_replayed(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1554,7 +1557,7 @@ async def test_real_chromium_kill_after_commit_dispatch_is_terminal_and_not_repl
             prepared = await tool.prepare_effect(arguments, ctx)
             entry = service._sessions[session.session_id]  # noqa: SLF001 - exact process drill
             assert entry.state_dir is not None
-            browser_pid = _owned_chromium_pid(entry.state_dir)
+            browser_pid = _owned_chrome_pid(entry.state_dir)
 
             result = await tool.run_prepared(params, prepared, ctx)
 
@@ -1569,7 +1572,7 @@ async def test_real_chromium_kill_after_commit_dispatch_is_terminal_and_not_repl
             await service.aclose()
 
 
-async def test_real_chromium_rejects_oversized_download_before_publication(
+async def test_real_chrome_rejects_oversized_download_before_publication(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1603,7 +1606,7 @@ async def test_real_chromium_rejects_oversized_download_before_publication(
             )
             assert unexpected.disposition == "in_doubt"
             assert unexpected.failure is not None
-            # Chromium may surface the aborted attachment as the route failure
+            # Chrome may surface the aborted attachment as the route failure
             # or as the resulting unsupported error page. Both are fail-closed.
             assert unexpected.failure.code in {"download_blocked", "destination_blocked"}
             await service.close_session(session.session_id)
@@ -1630,7 +1633,7 @@ async def test_real_chromium_rejects_oversized_download_before_publication(
             await service.aclose()
 
 
-async def test_real_chromium_interacts_commits_handles_dialog_and_popup(
+async def test_real_chrome_interacts_commits_handles_dialog_and_popup(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1915,7 +1918,7 @@ async def test_non_network_action_destinations_are_blocked(
                 assert scripted_popup.failure is not None
                 assert scripted_popup.failure.code == "destination_blocked"
             else:
-                # Chromium currently refuses direct data: popups before creating
+                # Chrome currently refuses direct data: popups before creating
                 # a page. The initiating click still completed, but no unsafe page
                 # exists to select or inspect.
                 assert scripted_popup.disposition == "performed"
@@ -1959,9 +1962,300 @@ async def test_non_network_action_destinations_are_blocked(
             await service.aclose()
 
 
+@pytest.fixture
+async def chrome_display(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Provision a disposable display for real headed Chrome without using a user's desktop."""
+
+    xvfb = shutil.which("Xvfb")
+    if xvfb is None:
+        pytest.fail("Headed Chrome integration requires host-installed Xvfb")
+    process = await asyncio.create_subprocess_exec(
+        xvfb,
+        "-displayfd",
+        "1",
+        "-screen",
+        "0",
+        "1280x900x24",
+        "-nolisten",
+        "tcp",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        assert process.stdout is not None
+        display_number = await asyncio.wait_for(process.stdout.readline(), timeout=10)
+        assert display_number.strip().isdigit(), "Xvfb did not report a display"
+        monkeypatch.setenv("DISPLAY", f":{display_number.decode().strip()}")
+        monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        yield
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+
+
+def _close_chrome_windows_on_test_display() -> int:
+    """Send the ordinary window-manager close event on this test's isolated Xvfb display."""
+
+    xlib = ctypes.CDLL("libX11.so.6")
+    window = ctypes.c_ulong
+    atom = ctypes.c_ulong
+    display_type = ctypes.c_void_p
+
+    class ClientMessage(ctypes.Structure):
+        _fields_ = [
+            ("type", ctypes.c_int),
+            ("serial", ctypes.c_ulong),
+            ("send_event", ctypes.c_int),
+            ("display", display_type),
+            ("window", window),
+            ("message_type", atom),
+            ("format", ctypes.c_int),
+            ("data", ctypes.c_long * 5),
+        ]
+
+    class Event(ctypes.Union):
+        _fields_ = [("client", ClientMessage), ("padding", ctypes.c_long * 24)]
+
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    xlib.XOpenDisplay.restype = display_type
+    xlib.XDefaultRootWindow.argtypes = [display_type]
+    xlib.XDefaultRootWindow.restype = window
+    xlib.XQueryTree.argtypes = [
+        display_type,
+        window,
+        ctypes.POINTER(window),
+        ctypes.POINTER(window),
+        ctypes.POINTER(ctypes.POINTER(window)),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    xlib.XInternAtom.argtypes = [display_type, ctypes.c_char_p, ctypes.c_int]
+    xlib.XInternAtom.restype = atom
+    xlib.XGetWMProtocols.argtypes = [
+        display_type,
+        window,
+        ctypes.POINTER(ctypes.POINTER(atom)),
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    xlib.XSendEvent.argtypes = [
+        display_type,
+        window,
+        ctypes.c_int,
+        ctypes.c_long,
+        ctypes.POINTER(Event),
+    ]
+    xlib.XFlush.argtypes = [display_type]
+    xlib.XFree.argtypes = [ctypes.c_void_p]
+    xlib.XCloseDisplay.argtypes = [display_type]
+    display = xlib.XOpenDisplay(None)
+    assert display, "isolated Xvfb display unavailable"
+    try:
+        root = xlib.XDefaultRootWindow(display)
+        returned_root, parent = window(), window()
+        children = ctypes.POINTER(window)()
+        child_count = ctypes.c_uint()
+        assert xlib.XQueryTree(
+            display,
+            root,
+            ctypes.byref(returned_root),
+            ctypes.byref(parent),
+            ctypes.byref(children),
+            ctypes.byref(child_count),
+        )
+        close_atom = xlib.XInternAtom(display, b"WM_DELETE_WINDOW", 0)
+        protocols_atom = xlib.XInternAtom(display, b"WM_PROTOCOLS", 0)
+        closed = 0
+        try:
+            for index in range(child_count.value):
+                candidate = children[index]
+                protocols = ctypes.POINTER(atom)()
+                protocol_count = ctypes.c_int()
+                if not xlib.XGetWMProtocols(
+                    display, candidate, ctypes.byref(protocols), ctypes.byref(protocol_count)
+                ):
+                    continue
+                try:
+                    if close_atom not in [protocols[i] for i in range(protocol_count.value)]:
+                        continue
+                    event = Event()
+                    event.client.type = 33  # X11 ClientMessage
+                    event.client.display = display
+                    event.client.window = candidate
+                    event.client.message_type = protocols_atom
+                    event.client.format = 32
+                    event.client.data[0] = close_atom
+                    assert xlib.XSendEvent(display, candidate, 0, 0, ctypes.byref(event))
+                    closed += 1
+                finally:
+                    xlib.XFree(protocols)
+        finally:
+            xlib.XFree(children)
+        xlib.XFlush(display)
+        return closed
+    finally:
+        xlib.XCloseDisplay(display)
+
+
+async def _close_manual_chrome_normally(process: asyncio.subprocess.Process) -> None:
+    async with asyncio.timeout(10):
+        while process.returncode is None:
+            await asyncio.to_thread(_close_chrome_windows_on_test_display)
+            await asyncio.sleep(0.05)
+        await process.wait()
+    assert process.returncode == 0
+
+
+async def test_real_manual_chrome_setup_owns_profile_without_automation(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+    chrome_display: Any,
+) -> None:
+    settings = RickySettings.model_validate(
+        {
+            "user_data_dir": str(tmp_path / "user"),
+            "project_data_dir": str(tmp_path / "project"),
+            "browser": {"executable_path": str(installed_browser.executable)},
+            "profile_configs": {
+                "personal": {
+                    "browser": {
+                        "resources": {
+                            "manual": {"kind": "persistent", "description": "Manual test profile"},
+                        }
+                    }
+                }
+            },
+        }
+    )
+    resource = ProfileResourceRef(profile="personal", name="manual")
+    state = persistent_browser_path(settings, resource)
+    async with manual_browser_setup(
+        settings,
+        scope=settings.resolve_profile_scope("personal"),
+        resource=resource,
+    ) as process:
+        async with asyncio.timeout(10):
+            while not (state / "Last Version").exists():
+                assert process.returncode is None, "ordinary Chrome exited during startup"
+                await asyncio.sleep(0.05)
+        arguments = (Path("/proc") / str(process.pid) / "cmdline").read_bytes().split(b"\0")
+        assert f"--user-data-dir={state} ".encode() in b" ".join(arguments)
+        assert b"about:blank" in b" ".join(arguments)
+        assert not any(
+            b"remote-debugging" in arg or b"enable-automation" in arg for arg in arguments
+        )
+        assert not (state / "DevToolsActivePort").exists()
+        contender = BrowserResourceLease(settings, resource)
+        with pytest.raises(BrowserError) as busy:
+            contender.acquire()
+        assert busy.value.failure.code == "resource_busy"
+        await _close_manual_chrome_normally(process)
+    assert process.returncode is not None
+    assert not (Path("/proc") / str(process.pid)).exists()
+    contender.acquire()
+    contender.release()
+    assert state.is_relative_to(tmp_path / "user" / "profiles" / "personal")
+    assert not (tmp_path / "project").exists()
+    assert not (Path.home() / ".config" / "google-chrome").exists()
+
+
+async def test_real_manual_login_cookie_reused_by_headless_and_headed_control(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+    chrome_display: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _fixture_server() as (origin, requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "browser": {
+                    "enabled": True,
+                    "executable_path": str(installed_browser.executable),
+                    "allowed_private_origins": [origin],
+                },
+                "profile_configs": {
+                    profile: {
+                        "browser": {
+                            "resources": {
+                                "login": {
+                                    "kind": "persistent",
+                                    "description": "Local authentication fixture",
+                                }
+                            }
+                        }
+                    }
+                    for profile in ("personal", "work")
+                },
+            }
+        )
+        scope = settings.resolve_profile_scope("personal", access_profiles=["work"])
+        resource = ProfileResourceRef(profile="personal", name="login")
+        original_spawn = asyncio.create_subprocess_exec
+
+        async def open_fixture(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+            # Supply a local login URL as a human would, without attaching any controller.
+            args = tuple(f"{origin}/manual-login" if arg == "about:blank" else arg for arg in args)
+            return await original_spawn(*args, **kwargs)
+
+        with monkeypatch.context() as setup_patch:
+            setup_patch.setattr("ricky.browser.setup.asyncio.create_subprocess_exec", open_fixture)
+            async with manual_browser_setup(settings, scope=scope, resource=resource) as process:
+                async with asyncio.timeout(20):
+                    while requests["authenticated-account"] == 0:
+                        assert process.returncode is None
+                        await asyncio.sleep(0.05)
+                assert not (
+                    persistent_browser_path(settings, resource) / "DevToolsActivePort"
+                ).exists()
+                await _close_manual_chrome_normally(process)
+        assert process.returncode is not None
+        cookie_db = persistent_browser_path(settings, resource) / "Default" / "Cookies"
+        with closing(sqlite3.connect(f"file:{cookie_db}?mode=ro", uri=True)) as connection:
+            assert connection.execute(
+                "SELECT count(*) FROM cookies WHERE name = 'fixture_session'"
+            ).fetchone() == (1,), "manual setup must persist its dummy authentication cookie"
+
+        for headless in (True, False):
+            service = BrowserService(
+                settings,
+                scope=scope,
+                backend=PlaywrightBrowserBackend(),
+                executable_path=installed_browser.executable,
+            )
+            try:
+                session = await service.open_resource("personal/login", headless=headless)
+                await service.navigate(
+                    session.session_id, page_id=None, url=f"{origin}/manual-account"
+                )
+                snapshot = await service.snapshot(session.session_id, page_id=None)
+                assert "Local account authenticated" in snapshot.content
+                assert "Local account signed out" not in snapshot.content
+                await service.close_session(session.session_id)
+                isolated = await service.open_resource("work/login", headless=headless)
+                await service.navigate(
+                    isolated.session_id, page_id=None, url=f"{origin}/manual-account"
+                )
+                snapshot = await service.snapshot(isolated.session_id, page_id=None)
+                assert "Local account signed out" in snapshot.content
+                assert "Local account authenticated" not in snapshot.content
+            finally:
+                await service.aclose()
+        assert requests["authenticated-account"] == 3
+        assert not (tmp_path / "project").exists()
+        assert not (Path.home() / ".config" / "google-chrome").exists()
+
+
+@pytest.mark.parametrize("headless", [True, False], ids=["headless", "headed"])
 async def test_real_persistent_resource_reuses_profile_state_across_sessions(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
+    headless: bool,
+    chrome_display: Any,
 ) -> None:
     with _fixture_server() as (origin, _requests):
         settings = RickySettings.model_validate(
@@ -1970,7 +2264,7 @@ async def test_real_persistent_resource_reuses_profile_state_across_sessions(
                 "project_data_dir": str(tmp_path / "project"),
                 "browser": {
                     "enabled": True,
-                    "headless": True,
+                    "headless": headless,
                     "allowed_private_origins": [origin],
                 },
                 "profile_configs": {
@@ -1980,7 +2274,7 @@ async def test_real_persistent_resource_reuses_profile_state_across_sessions(
                                 "main": {
                                     "kind": "persistent",
                                     "description": "Persistent integration browser",
-                                    "headless": True,
+                                    "headless": headless,
                                 }
                             }
                         }
@@ -1991,7 +2285,7 @@ async def test_real_persistent_resource_reuses_profile_state_across_sessions(
                                 "main": {
                                     "kind": "persistent",
                                     "description": "Isolated work browser",
-                                    "headless": True,
+                                    "headless": headless,
                                 }
                             }
                         }
@@ -2015,6 +2309,20 @@ async def test_real_persistent_resource_reuses_profile_state_across_sessions(
                 BrowserActionRequest(kind="commit", activation="click"),
             )
             assert saved.disposition == "performed"
+            if not headless:
+                before_handoff = await service.snapshot(first.session_id, page_id=None)
+                await service.handoff(first.session_id, page_id=None, reason="captcha")
+                stale = await service.action(
+                    _target(before_handoff, "Save local marker"),
+                    BrowserActionRequest(kind="click"),
+                )
+                assert stale.disposition == "not_performed"
+                assert stale.failure is not None
+                assert stale.failure.code == "stale_target"
+                after_handoff = await service.snapshot(first.session_id, page_id=None)
+                assert after_handoff.snapshot_id != before_handoff.snapshot_id
+                assert "Persistent browser state" in after_handoff.content
+
             await service.close_session(first.session_id)
 
             work = await service.open_resource("work/main")
@@ -2042,11 +2350,10 @@ async def test_real_cdp_disconnect_leaves_external_browser_and_tab_alive(
     with _fixture_server() as (origin, requests):
         port = _unused_loopback_port()
         endpoint = f"http://127.0.0.1:{port}"
-        external_state = tmp_path / "external-chromium"
+        external_state = tmp_path / "external-chrome"
         process = await asyncio.create_subprocess_exec(
             str(installed_browser.executable),
             "--headless=new",
-            "--no-sandbox",
             "--disable-dev-shm-usage",
             "--no-first-run",
             "--no-default-browser-check",
@@ -2225,7 +2532,7 @@ async def _coordinate_transaction(
         envelope_sha256="f" * 64,
     )
     # A real fresh-review prompt naturally separates preparation and dispatch.
-    # Let Chromium finish restoring its temporary screenshot masking before the
+    # Let Chrome finish restoring its temporary screenshot masking before the
     # second pixel recapture that immediately precedes the synthetic click.
     await asyncio.sleep(0.05)
     return await service.coordinate_commit_prepared(prepared, transaction)

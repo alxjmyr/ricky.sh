@@ -1,19 +1,18 @@
-"""Browser installation CLI tests."""
+"""Chrome readiness CLI tests."""
 
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import Mock
 
 from typer.testing import CliRunner
 
 from ricky.browser.types import (
-    BrowserInstallStatus,
-    BrowserPage,
     BrowserResource,
     BrowserResourceList,
-    BrowserSession,
-    BrowserSessionClosed,
+    BrowserStatus,
 )
 from ricky.interfaces.cli.app import app
 from ricky.interfaces.cli.browser import _setup_resource
@@ -22,13 +21,16 @@ from ricky.profiles import ProfileResourceRef
 runner = CliRunner()
 
 
-def _status(tmp_path: Path, *, enabled: bool, ready: bool) -> BrowserInstallStatus:
+def _status(tmp_path: Path, *, enabled: bool, ready: bool) -> BrowserStatus:
     root = tmp_path / "user-data" / "browser" / "browsers"
-    return BrowserInstallStatus(
+    return BrowserStatus(
         enabled=enabled,
         ready=ready,
-        install_dir=str(root),
-        executable=str(root / "chromium-123" / "chrome"),
+        playwright_version="1.62.0",
+        diagnostic=None
+        if ready
+        else "Install Google Chrome Stable through your host package manager.",
+        executable=str(root / "google-chrome"),
     )
 
 
@@ -45,8 +47,8 @@ def test_browser_status_reports_missing_binary_and_repair_command(
 
     assert result.exit_code == 1
     assert "browser control: enabled" in result.stdout
-    assert "Chromium: not installed" in result.stdout
-    assert "uv run ricky browser install" in result.stdout
+    assert "Google Chrome Stable: unavailable" in result.stdout
+    assert "Install Google Chrome Stable" in result.stdout
 
 
 def test_browser_status_is_successful_when_installed_but_disabled(
@@ -62,23 +64,13 @@ def test_browser_status_is_successful_when_installed_but_disabled(
 
     assert result.exit_code == 0
     assert "browser control: disabled" in result.stdout
-    assert "Chromium: ready" in result.stdout
+    assert "Google Chrome Stable: available" in result.stdout
 
 
-def test_browser_install_does_not_implicitly_enable_control(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    async def install(_settings):
-        return _status(tmp_path, enabled=False, ready=True)
-
-    monkeypatch.setattr("ricky.interfaces.cli.browser.install_chromium", install)
-
+def test_browser_install_command_is_removed() -> None:
     result = runner.invoke(app, ["browser", "install"])
-
-    assert result.exit_code == 0
-    assert "Chromium is installed and ready" in result.stdout
-    assert "browser control remains disabled" in result.stdout
+    assert result.exit_code == 2
+    assert "No such command" in result.output
 
 
 def test_browser_resources_lists_safe_metadata_without_local_details(monkeypatch) -> None:
@@ -129,72 +121,27 @@ def test_browser_check_uses_exact_qualified_resource(monkeypatch) -> None:
     assert "personal/main is available" in result.stdout
 
 
-def test_browser_setup_opens_a_blank_headed_resource_without_snapshot(monkeypatch) -> None:
-    session_id = "browser_session_" + "a" * 32
-    page_id = "browser_page_" + "b" * 32
+def test_browser_setup_uses_manual_owner_without_snapshot(monkeypatch) -> None:
+    calls = []
+    settings = Mock()
+    monkeypatch.setattr("ricky.interfaces.cli.browser.load_settings", lambda: settings)
 
-    class SetupService:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, object]] = []
+    class Process:
+        async def wait(self):
+            return 0
 
-        def resource(self, resource: str) -> BrowserResource:
-            self.calls.append(("resource", resource))
-            return BrowserResource(
-                resource=ProfileResourceRef.from_qualified(resource),
-                kind="persistent",
-                description="Personal browser",
-                availability="available",
-                headless=False,
-                process_owned=True,
-            )
+    @asynccontextmanager
+    async def manual(_settings, *, scope, resource):
+        calls.append(("open", resource.qualified))
+        try:
+            yield Process()
+        finally:
+            calls.append(("close", resource.qualified))
 
-        async def open_resource(
-            self,
-            resource: str,
-            *,
-            headless: bool,
-            start_blank: bool,
-        ) -> BrowserSession:
-            self.calls.append(("open", (resource, headless, start_blank)))
-            page = BrowserPage(
-                session_id=session_id,
-                page_id=page_id,
-                selected=True,
-                url="about:blank",
-                title="",
-                navigation_generation=0,
-            )
-            return BrowserSession(
-                session_id=session_id,
-                resource=ProfileResourceRef.from_qualified(resource),
-                mode="owned_persistent",
-                headless=False,
-                selected_page_id=page_id,
-                pages=(page,),
-            )
-
-        async def close_session(self, selected_session_id: str) -> BrowserSessionClosed:
-            self.calls.append(("close", selected_session_id))
-            return BrowserSessionClosed(session_id=selected_session_id)
-
-        async def aclose(self) -> None:
-            self.calls.append(("aclose", None))
-
-    service = SetupService()
-
-    async def resource_service(_resource: str):
-        return service
-
-    monkeypatch.setattr("ricky.interfaces.cli.browser._resource_service", resource_service)
+    monkeypatch.setattr("ricky.interfaces.cli.browser.manual_browser_setup", manual)
     result = runner.invoke(app, ["browser", "setup", "personal/main"], input="\n")
-
     assert result.exit_code == 0
-    assert service.calls == [
-        ("resource", "personal/main"),
-        ("open", ("personal/main", False, True)),
-        ("close", session_id),
-        ("aclose", None),
-    ]
+    assert calls == [("open", "personal/main"), ("close", "personal/main")]
     assert "snapshot" not in result.stdout.casefold()
 
 
@@ -223,77 +170,37 @@ def test_browser_resource_commands_reject_unqualified_identity() -> None:
     assert "profile/name" in result.stdout
 
 
-async def test_browser_setup_input_is_cancellable_and_closes_owned_resources(
-    monkeypatch,
-) -> None:
-    session_id = "browser_session_" + "a" * 32
-    page_id = "browser_page_" + "b" * 32
+async def test_browser_setup_wait_is_cancellable_and_closes_owned_resources(monkeypatch) -> None:
+    closed = asyncio.Event()
+    entered = asyncio.Event()
+    settings = Mock()
+    monkeypatch.setattr("ricky.interfaces.cli.browser.load_settings", lambda: settings)
 
-    class SetupService:
-        closed = asyncio.Event()
-
-        def resource(self, resource: str) -> BrowserResource:
-            return BrowserResource(
-                resource=ProfileResourceRef.from_qualified(resource),
-                kind="persistent",
-                description="Personal browser",
-                availability="available",
-                headless=False,
-                process_owned=True,
-            )
-
-        async def open_resource(self, *_args, **_kwargs) -> BrowserSession:
-            page = BrowserPage(
-                session_id=session_id,
-                page_id=page_id,
-                selected=True,
-                url="about:blank",
-                navigation_generation=0,
-            )
-            return BrowserSession(
-                session_id=session_id,
-                resource=ProfileResourceRef(profile="personal", name="main"),
-                mode="owned_persistent",
-                headless=False,
-                selected_page_id=page_id,
-                pages=(page,),
-            )
-
-        async def close_session(self, _session_id: str) -> BrowserSessionClosed:
-            raise AssertionError("cancelled setup should close through service ownership")
-
-        async def aclose(self) -> None:
-            self.closed.set()
-
-    class BlockingRenderer:
-        entered = asyncio.Event()
-
-        def render_status(self, *_args, **_kwargs) -> None:
-            return None
-
-        async def read_line(self, _prompt: str) -> str:
-            self.entered.set()
+    class Process:
+        async def wait(self):
+            entered.set()
             await asyncio.Future()
-            raise AssertionError("cancelled input unexpectedly resumed")
 
-    service = SetupService()
-    renderer = BlockingRenderer()
+    @asynccontextmanager
+    async def manual(*_args, **_kwargs):
+        try:
+            yield Process()
+        finally:
+            closed.set()
 
-    async def resource_service(_resource: str) -> SetupService:
-        return service
+    class Renderer:
+        def render_status(self, *_args, **_kwargs):
+            pass
 
-    monkeypatch.setattr("ricky.interfaces.cli.browser._resource_service", resource_service)
-    setup = asyncio.create_task(
-        _setup_resource("personal/main", renderer)  # type: ignore[arg-type]
-    )
-    await asyncio.wait_for(renderer.entered.wait(), timeout=1)
-
-    setup.cancel()
+    monkeypatch.setattr("ricky.interfaces.cli.browser.manual_browser_setup", manual)
+    renderer = Renderer()
+    task = asyncio.create_task(_setup_resource("personal/main", renderer))  # type: ignore[arg-type]
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
     try:
-        await asyncio.wait_for(setup, timeout=1)
+        await asyncio.wait_for(task, timeout=1)
     except asyncio.CancelledError:
         pass
     else:
         raise AssertionError("cancelled setup did not propagate cancellation")
-
-    assert service.closed.is_set()
+    assert closed.is_set()

@@ -115,7 +115,7 @@ Model requests can include your prompt, prior chat history, active skill instruc
 indexes, workflow inputs, and tool results from the issued scope. Use `/context` to inspect
 categories and estimated size. `/debug` can show non-secret user content in your terminal or logs.
 
-Browser snapshots can include personal data rendered by signed-in pages. Persistent Chromium
+Browser snapshots can include personal data rendered by signed-in pages. Persistent Chrome
 profiles retain cookies, local storage, cache, and account sessions below their owning Ricky
 profile. Ricky does not export those stores or add application-level encryption at rest. Opening a
 configured browser resource requires fresh local permission because bounded page observations may

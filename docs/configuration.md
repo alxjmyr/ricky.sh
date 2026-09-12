@@ -158,7 +158,7 @@ the entries you need into the owning profile, and enter credentials locally. Com
 | `[agents.*]` | Standing capability eligibility for foreground and background agents |
 | `[executions]` | Durable background request limits and worker settings |
 | `[authority]` | Task-scoped delegation ceilings; disabled by default |
-| `[browser]` | Explicit Chromium installation, runtime limits, and destination policy |
+| `[browser]` | Installed Chrome discovery, runtime limits, and destination policy |
 | `[protected_values]` | Encrypted profile-vault mechanics, limits, and prompt timeout |
 
 Follow the relevant feature guide before you change an advanced section. Ricky validates
@@ -169,9 +169,9 @@ supported settings at startup. Some installation sections ignore unknown keys, s
 seconds of inbox-claim headroom. `gateway.service.unit_dir` defaults to the XDG systemd user-unit
 directory and can be set to an absolute or `~` home-relative path.
 
-Browser mechanics and limits are installation-owned. Profiles cannot redirect the Chromium binary
-directory, browser-state directories, download directory, or relax runtime limits.
-`browser.binary_dir` is relative to `user_data_dir`; `browser.ephemeral_dir`,
+Browser mechanics and limits are installation-owned. Profiles cannot override the Chrome executable, browser-state directories, download directory, or relax runtime limits.
+`browser.executable_path` optionally selects an absolute Google Chrome Stable executable.
+`browser.ephemeral_dir`,
 `browser.persistent_dir`, `browser.lease_dir`, and `browser.download_dir` resolve below the profile
 that owns each session or configured resource.
 

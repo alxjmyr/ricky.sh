@@ -31,7 +31,6 @@ from ricky.browser.lease import BrowserResourceLease
 from ricky.browser.playwright_backend import (
     PlaywrightBrowserBackend,
     _PlaywrightSession,
-    _replace_owned_pages_with_blank,
 )
 from ricky.browser.resources import persistent_browser_path
 from ricky.browser.service import BrowserService
@@ -43,6 +42,34 @@ from ricky.browser.types import (
 )
 from ricky.config import RickySettings
 from ricky.profiles import ProfileResourceRef
+
+
+class _FakeNavigationCDP:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, dict[str, object] | None]] = []
+
+    async def send(self, method: str, params: dict[str, object] | None = None) -> dict[str, object]:
+        self.commands.append((method, params))
+        if method == "Page.getFrameTree":
+            return {"frameTree": {"frame": {"id": "frame"}}}
+        if method == "Target.getTargetInfo":
+            return {"targetInfo": {"type": "page"}}
+        return {}
+
+    def on(self, event: str, handler: object) -> None:
+        pass
+
+    async def detach(self) -> None:
+        pass
+
+    def remove_listener(self, event: str, handler: object) -> None:
+        pass
+
+    async def new_browser_cdp_session(self) -> _FakeNavigationCDP:
+        return self
+
+    async def new_cdp_session(self, page: object) -> _FakeNavigationCDP:
+        return self
 
 
 async def _allow_destination(_url: str) -> None:
@@ -142,46 +169,6 @@ def _service(
     )
 
 
-async def test_start_blank_creates_replacement_before_closing_last_restored_page() -> None:
-    class LastTabContext:
-        def __init__(self) -> None:
-            self.closed = False
-            self.operations: list[str] = []
-            self.pages = [LastTabPage(self, "restored")]
-
-        async def new_page(self) -> LastTabPage:
-            if self.closed:
-                raise RuntimeError("persistent context closed with its last tab")
-            self.operations.append("new:blank")
-            page = LastTabPage(self, "blank")
-            self.pages.append(page)
-            return page
-
-    class LastTabPage:
-        def __init__(self, context: LastTabContext, name: str) -> None:
-            self.context = context
-            self.name = name
-            self.closed = False
-
-        async def close(self, *, run_before_unload: bool) -> None:
-            assert run_before_unload is False
-            self.context.operations.append(f"close:{self.name}")
-            self.closed = True
-            if not any(page is not self and not page.closed for page in self.context.pages):
-                self.context.closed = True
-
-    context = LastTabContext()
-    [restored] = context.pages
-
-    await _replace_owned_pages_with_blank(cast(Any, context))
-
-    assert context.operations == ["new:blank", "close:restored"]
-    assert restored.closed is True
-    assert context.closed is False
-    assert len(context.pages) == 2
-    assert context.pages[1].closed is False
-
-
 async def test_cdp_connection_timeout_is_bounded_and_hides_endpoint() -> None:
     endpoint = "http://127.0.0.1:9222"
 
@@ -230,8 +217,10 @@ async def test_cdp_contexts_receive_configured_operation_timeouts() -> None:
         def set_default_timeout(self, timeout: float) -> None:
             self.operation_timeout = timeout
 
-        async def route(self, _pattern: str, _handler: object) -> None:
-            return None
+        browser = _FakeNavigationCDP()
+
+        async def new_cdp_session(self, _page: object) -> _FakeNavigationCDP:
+            return _FakeNavigationCDP()
 
         def on(self, _event: str, _handler: object) -> None:
             return None
@@ -285,34 +274,6 @@ async def test_cdp_contexts_receive_configured_operation_timeouts() -> None:
 
 
 async def test_omitted_external_page_navigation_bypasses_ricky_routing() -> None:
-    class FakePage:
-        def __init__(self) -> None:
-            self.main_frame: object | None = None
-
-        def is_closed(self) -> bool:
-            return False
-
-    class FakeFrame:
-        def __init__(self, page: FakePage) -> None:
-            self.page = page
-
-    class FakeRequest:
-        def __init__(self, frame: FakeFrame) -> None:
-            self.frame = frame
-            self.url = "http://10.0.0.1/manual"
-
-        def is_navigation_request(self) -> bool:
-            return True
-
-    class FakeRoute:
-        continued = False
-
-        async def continue_(self) -> None:
-            self.continued = True
-
-        async def fetch(self, **_kwargs: object) -> None:
-            raise AssertionError("an omitted external page must not be routed by Ricky")
-
     guarded: list[str] = []
 
     async def guard(url: str) -> None:
@@ -330,19 +291,23 @@ async def test_omitted_external_page_navigation_bypasses_ricky_routing() -> None
         operation_timeout_ms=1_000,
         page_discovery_limit=1,
     )
-    page = FakePage()
-    frame = FakeFrame(page)
-    page.main_frame = frame
-    route = FakeRoute()
-
-    await session._route(cast(Any, route), cast(Any, FakeRequest(frame)))
-
-    assert route.continued
+    cdp = _FakeNavigationCDP()
+    session._navigation_cdp = cast(Any, cdp)
+    await session._native_navigation(
+        {
+            "requestId": "request",
+            "frameId": "omitted",
+            "request": {"url": "http://10.0.0.1/manual"},
+        }
+    )
+    assert cdp.commands[-1] == ("Fetch.continueRequest", {"requestId": "request"})
     assert guarded == []
 
 
 async def test_every_post_saturation_external_popup_reports_overflow() -> None:
     class FakePage:
+        context = _FakeNavigationCDP()
+
         def is_closed(self) -> bool:
             return False
 
@@ -354,8 +319,10 @@ async def test_every_post_saturation_external_popup_reports_overflow() -> None:
             self.pages = [FakePage()]
             self.page_handler: Any = None
 
-        async def route(self, _pattern: str, _handler: object) -> None:
-            return None
+        browser = _FakeNavigationCDP()
+
+        async def new_cdp_session(self, _page: object) -> _FakeNavigationCDP:
+            return _FakeNavigationCDP()
 
         def on(self, event: str, handler: object) -> None:
             assert event == "page"
@@ -407,6 +374,9 @@ async def test_playwright_session_close_failure_remains_retryable() -> None:
     with pytest.raises(RuntimeError, match="close failed"):
         await session.close()
     assert session.connected
+    with pytest.raises(BrowserError) as closing:
+        await session.pages()
+    assert closing.value.failure.code == "session_closed"
 
     await session.close()
     assert not session.connected
@@ -443,13 +413,11 @@ async def test_persistent_resource_state_survives_close_and_can_be_reset(
     opened = await service.open_resource(
         "personal/main",
         headless=False,
-        start_blank=True,
     )
     [options] = backend.options
     assert isinstance(options, BrowserLaunchOptions)
     assert options.mode == "owned_persistent"
     assert options.headless is False
-    assert options.start_blank is True
     assert options.page_discovery_limit == settings.browser.max_pages + 50
     expected = persistent_browser_path(
         settings,
@@ -741,7 +709,7 @@ async def test_failed_owned_close_keeps_resource_lease_until_retry_succeeds(
         async def close(self) -> None:
             if self.fail_close:
                 self.close_calls += 1
-                raise RuntimeError("owned Chromium close was ambiguous")
+                raise RuntimeError("owned Chrome close was ambiguous")
             await super().close()
 
     settings = _settings(tmp_path)

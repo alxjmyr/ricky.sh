@@ -56,7 +56,7 @@ A browser belongs to the runtime that performs the browser work:
   without closing the browser process or user-owned tabs.
 
 The implementation does not add a browser daemon. A Ricky-owned browser process does not survive
-its owning runtime. A configured persistent resource keeps only its dedicated Chromium profile
+its owning runtime. A configured persistent resource keeps only its dedicated Chrome profile
 state between runtimes. An attached browser process remains externally owned and outlives Ricky's
 connection. Durable run recovery belongs to unattended browser execution.
 
@@ -73,9 +73,11 @@ Browser resources use the canonical `ProfileResourceRef` identity. A runtime may
 resource whose owning profile is in its issued scope; model arguments cannot widen that scope.
 Ordinary new browser state defaults to the primary profile.
 
-Installation-owned browser binaries live below a configured `user_data_dir` subpath. Ricky never
-downloads them implicitly during startup or tool dispatch. An explicit CLI installation operation
-installs the approved Chromium build for the locked Playwright version.
+The host installs and updates Google Chrome Stable outside Ricky's data root. Ricky discovers
+known Linux Stable locations or an installation-owned absolute `browser.executable_path`, checks
+a bounded product/version result, and never downloads or updates a browser. Version strings are
+diagnostics, not authentication of an external process. Missing Chrome does not prevent disabled
+browser support from starting normally.
 
 Installation-owned browser mechanics and limits live in root configuration. A sparse resource
 catalog may live in each owning profile's `ricky.toml`. Resource identities are always qualified as
@@ -85,7 +87,7 @@ resource contains an exact loopback HTTP endpoint with an explicit port. Endpoin
 local configuration and never model arguments or provider-facing output.
 
 Ephemeral browser data lives below the primary profile's generated browser directory and is
-removed when its runtime closes. Persistent Chromium profiles live below their owning profile in a
+removed when its runtime closes. Persistent Chrome profiles live below their owning profile in a
 directory derived from a digest of the qualified resource identity. They retain cookies, storage,
 cache, and account sessions, use owner-only filesystem permissions on POSIX, and are sensitive but
 not additionally encrypted by Ricky. Browser state never lives in project `.ricky/`. Tests use
@@ -101,7 +103,7 @@ download because Ricky does not own their download preferences or filesystem eff
 Session media artifacts use the generic `ricky.media` store below user data. Browser screenshots
 have runtime retention: their private files and records are removed when the owning resident
 runtime closes or the session is cleared. Canonical message history contains only immutable media
-references. Browser screenshots and downloads never live in a Chromium profile or project
+references. Browser screenshots and downloads never live in a Chrome profile or project
 `.ricky/` tree.
 
 Every configured resource requires one non-blocking host-local POSIX advisory lease held from
@@ -111,14 +113,14 @@ it. The lock file contains only bounded safe owner metadata.
 The kernel releases the lease after process death; an inert lock file does not keep a resource
 busy. Non-POSIX configured-resource use fails closed until an approved portable contract exists.
 Multiple agents may later share one profile only through one coordinator that owns and serializes a
-single browser session, never by competing Chromium processes.
+single browser session, never by competing Chrome processes.
 
 An attached browser records process and page ownership separately from connection ownership so
 cleanup cannot infer that it may terminate an external process. Whole-browser CDP attachment is
 limited to exact configured loopback endpoints and is intended for a dedicated debugging browser.
 Ricky disconnects its Playwright connection but never closes external contexts, pages, profile
 state, or the browser process. Unsupported or overflow external pages are omitted from Ricky's
-control and left open. Ricky's context-wide navigation routing bypasses every omitted page. The
+control and left open. Ricky's browser-wide navigation interception bypasses every omitted page. The
 complete connection, page discovery, page-state, and destination-policy handshake is bounded by
 the attachment timeout, including cancellable bounded hostname resolution. Initial attachment
 fails if it cannot establish a bounded eligible page set; post-action overflow produces explicit
@@ -432,21 +434,63 @@ Web content never grants authority. Prompt text from a page cannot enable capabi
 issued profile scope, approve an effect, widen a destination policy, or override an execution
 contract. Deterministic enforcement remains outside the model.
 
+## Chrome transport and native navigation
+
+Owned agent sessions use Playwright's public persistent-context launch with the discovered Stable
+executable and no viewport override. This preserves explicit process/context ownership and file,
+observation, and action support without introducing a daemon or external browser lifecycle.
+Ordinary setup runs separately without attachment. Explicit external Chrome uses public CDP
+attachment and retains external process and page ownership.
+
+Destination enforcement uses a public browser CDP session with Fetch interception for Document
+requests and responses. Chrome sends the native request bytes and processes native responses;
+Ricky does not replay navigation through Playwright's separate HTTP client or fulfill fetched
+responses. Request-stage checks include redirected destinations and popup first navigation;
+response-stage checks reject unsolicited downloads. There is no Playwright context routing and
+thus no routing-induced cache disable. Service workers remain blocked because allowing another
+request owner requires evidence that destination and download controls cannot be bypassed.
+
+A bounded local comparison with Chrome 153.0.8010.36 and Playwright 1.62.0 confirmed the public
+Chrome channel can navigate and inspect DOM content. Integration fixtures exercise the selected
+explicit-executable persistent-context path in headed and headless modes and external CDP
+attachment with disconnect ownership. These establish local transport compatibility, not live
+website or CAPTCHA acceptance; account login reuse across sites still needs operator trials.
+
+## Manual setup and recovery scope
+
+Setup owns an ordinary headed Chrome process and dedicated profile lease without a Playwright
+connection, remote-debugging switches, snapshots, model input, or Ricky network interception.
+Successful setup waits for normal Chrome window closure so authentication state is flushed.
+Cancellation stops and joins owned processes before releasing the lease, but does not promise
+that recent sign-ins were saved. Controlled launch retains Chrome's native credential-store
+selection rather than Playwright's basic-password-store or mock-keychain overrides.
+Subsequent controlled opening reuses the profile but starts at a blank page and applies normal
+page-admission and destination checks; manual setup grants no automation authority.
+
+Owned controlled sessions support headed terminal use and headless background execution.
+Local handoff invalidates prior observations and prepared approvals before fresh observation and
+normal permission checks. CDP visibility is not inferred. Autonomous obstacle recovery, remote
+takeover, automation detachment during verification, virtual desktops, and headed background
+admission remain deferred. Chrome branding is not a guarantee of CAPTCHA acceptance.
+
 ## Installation and compatibility
 
-The production package depends on `playwright`; the lockfile pins the resolved package. Ricky
-installs only Chromium initially. Browser installation is explicit and targets Ricky's configured
-installation-owned browser-binary directory. Runtime startup never downloads or upgrades a
-browser.
+The production package depends on `playwright`; the lockfile pins the resolved package. Installed
+Google Chrome Stable is the only supported browser. There is no bundled Chromium, Chrome for
+Testing, alternate-brand fallback, or Ricky-owned browser installer. Chrome updates independently
+of Ricky. Readiness reports the Chrome and Playwright versions without claiming that executable
+discovery proves display, sandbox, enterprise-policy, or site compatibility.
 
-CDP attachment is Chromium-only and lower fidelity than a native Playwright connection. It is an
-advanced explicit resource, not the final daily-driver attachment contract. The official
+CDP attachment is Chrome-only and lower fidelity than a native Playwright connection. It is an
+operator-configured compatibility boundary: protocol metadata does not attest the external
+executable's brand. It is an advanced explicit resource, not the final daily-driver attachment
+contract. The official
 Playwright extension currently exposes selected existing tabs through Node Playwright MCP/CLI and
 a private relay protocol, not through the public Python API. Ricky does not expose that upstream
-tool surface or depend on private relay internals. Selected-tab attachment remains deferred until
-Phase 8, when an approved stable transport must sit beneath `BrowserBackend` while preserving local
+tool surface or depend on private relay internals. Selected-tab attachment remains deferred. An approved stable transport must sit beneath
+`BrowserBackend` while preserving local
 destination guards, snapshot-bound targets, permissions, protected-value controls, and effect
-evidence. If no suitable upstream transport exists then, a Ricky-owned extension and authenticated
+evidence. If no suitable upstream transport exists, a Ricky-owned extension and authenticated
 local relay require a separate reviewed architecture and dependency decision.
 
 ## Change checklist

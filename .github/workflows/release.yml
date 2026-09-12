@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,6 +28,25 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           project_version="$(uv version --short)"
           test "$version" = "$project_version"
+
+      - name: Prepare Chrome test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Google Chrome Stable is supplied by the hosted runner image.
+          # Never substitute its separately installed Chromium browser.
+          command -v google-chrome-stable
+          google-chrome-stable --version
+          sudo apt-get update
+          sudo apt-get install --yes xvfb
+          uv sync
+
+      - name: Verify release with real Chrome
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run python scripts/bundle_docs.py
+          uv run pytest && uv run ruff check . && uv run pyright
 
       - name: Build exact release assets
         shell: bash

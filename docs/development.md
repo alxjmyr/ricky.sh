@@ -81,7 +81,9 @@ or exception handling can encode different recovery guarantees.
 
 Use the focused test command from AGENTS.md while iterating. Complete changes
 with `uv run pytest && uv run ruff check . && uv run pyright`; the full suite
-includes real Chromium integration. A source move should preserve command
+includes real Chrome integration. Install Google Chrome Stable and Xvfb on the test host;
+Ricky does not provision either. The browser integration fixture fails when Chrome is missing,
+and headed profile coverage runs in an isolated Xvfb display. A source move should preserve command
 options, output, exit codes, and test assertions, as well as resource cleanup.
 
 ## Maintain the bundled user docs

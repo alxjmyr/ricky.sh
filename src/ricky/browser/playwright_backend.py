@@ -19,6 +19,7 @@ from weakref import WeakSet
 from playwright.async_api import (
     Browser,
     BrowserContext,
+    CDPSession,
     Dialog,
     Download,
     FilePayload,
@@ -26,8 +27,6 @@ from playwright.async_api import (
     Locator,
     Page,
     Playwright,
-    Request,
-    Route,
     async_playwright,
 )
 from playwright.async_api import (
@@ -61,6 +60,8 @@ from ricky.browser.backend import (
     BrowserSessionHandle,
     DestinationGuard,
 )
+from ricky.browser.chrome import chrome_environment
+from ricky.browser.navigation import NavigationPause
 from ricky.browser.policy import canonical_origin
 from ricky.browser.types import (
     BrowserActionRequest,
@@ -163,7 +164,8 @@ class PlaywrightBrowserBackend:
                 BrowserFailure(
                     code="not_installed",
                     message=(
-                        "Playwright Chromium is not installed; run uv run ricky browser install"
+                        "Google Chrome Stable is unavailable; "
+                        "install Chrome and run ricky browser status"
                     ),
                 )
             )
@@ -185,15 +187,20 @@ class PlaywrightBrowserBackend:
                 str(options.user_data_dir),
                 executable_path=str(options.executable_path),
                 headless=options.headless,
+                no_viewport=True,
+                env={key: value for key, value in chrome_environment().items()},
+                chromium_sandbox=True,
+                # Share the host's credential store with ordinary manual Chrome setup.
+                ignore_default_args=["--password-store=basic", "--use-mock-keychain"],
                 accept_downloads=True,
                 downloads_path=str(options.download_temp_dir),
                 service_workers="block",
             )
         except PlaywrightError as exc:
-            raise _backend_error("Chromium could not be started", exc) from exc
+            raise _backend_error(
+                "Chrome could not be started; check display and host browser policy", exc
+            ) from exc
         try:
-            if options.start_blank:
-                await _replace_owned_pages_with_blank(context)
             context.set_default_navigation_timeout(options.navigation_timeout_ms)
             context.set_default_timeout(options.operation_timeout_ms)
             session = _PlaywrightSession(
@@ -357,15 +364,26 @@ class _PlaywrightSession:
         self._active_actions: set[Page] = set()
         self._action_destinations: dict[Page, tuple[str, ...]] = {}
         self._closed = False
+        self._navigation_cdp: CDPSession | None = None
+        self._frame_pages: dict[str, Page] = {}
+        self._navigation_tasks: set[asyncio.Task[None]] = set()
+        self._redirect_counts: dict[str, int] = {}
+        self._navigation_closing = False
 
     @property
     def connected(self) -> bool:
         return not self._closed and self._is_connected()
 
     async def initialize(self) -> None:
+        try:
+            await self._initialize_navigation()
+        except BaseException:
+            await self._stop_navigation()
+            raise
+
+    async def _initialize_navigation(self) -> None:
         remaining = self._page_discovery_limit
         for context in self._contexts:
-            await context.route("**/*", self._route)
             context.on("page", self._register_page)
             pages = context.pages
             inspected = min(len(pages), remaining)
@@ -376,6 +394,72 @@ class _PlaywrightSession:
             remaining -= inspected
         if not self._pages and self.pages_owned:
             self._register_page(await self._contexts[0].new_page())
+        browser = self._contexts[0].browser
+        if browser is None:
+            raise BrowserError(
+                BrowserFailure(
+                    code="backend_error", message="Chrome protocol control is unavailable"
+                )
+            )
+        self._navigation_cdp = await browser.new_browser_cdp_session()
+        for page in self._pages:
+            await self._bind_navigation_page(page)
+        self._navigation_cdp.on("Fetch.requestPaused", self._observe_navigation_pause)
+        await self._navigation_cdp.send(
+            "Fetch.enable",
+            {
+                "patterns": [
+                    {"resourceType": "Document", "requestStage": "Request"},
+                    {"resourceType": "Document", "requestStage": "Response"},
+                ]
+            },
+        )
+
+    async def _bind_navigation_page(self, page: Page) -> None:
+        for frame_id, bound_page in tuple(self._frame_pages.items()):
+            if bound_page.is_closed():
+                self._frame_pages.pop(frame_id, None)
+                self._redirect_counts.pop(frame_id, None)
+        if page in self._frame_pages.values() or page.is_closed():
+            return
+        cdp = await page.context.new_cdp_session(page)
+        try:
+            tree = await cdp.send("Page.getFrameTree")
+            self._frame_pages[tree["frameTree"]["frame"]["id"]] = page
+        finally:
+            await cdp.detach()
+
+    def _observe_navigation_pause(self, payload: dict[str, object]) -> None:
+        task = asyncio.create_task(
+            self._abort_navigation_pause(payload)
+            if self._navigation_closing
+            else self._native_navigation(payload)
+        )
+        self._navigation_tasks.add(task)
+        task.add_done_callback(self._navigation_finished)
+
+    async def _abort_navigation_pause(self, payload: dict[str, object]) -> None:
+        cdp = self._navigation_cdp
+        request_id = payload.get("requestId")
+        if cdp is not None and isinstance(request_id, str):
+            with suppress(PlaywrightError):
+                await cdp.send(
+                    "Fetch.failRequest", {"requestId": request_id, "errorReason": "Aborted"}
+                )
+
+    def _navigation_finished(self, task: asyncio.Task[None]) -> None:
+        self._navigation_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            self._record_blocked(
+                None,
+                BrowserError(
+                    BrowserFailure(
+                        code="backend_error",
+                        message="Chrome navigation control failed",
+                        outcome_uncertain=True,
+                    )
+                ),
+            )
 
     def _register_page(self, page: Page, *, report_overflow: bool = True) -> None:
         if page in self._pages or page in self._quarantined:
@@ -414,103 +498,143 @@ class _PlaywrightSession:
         self._explicit_download_pages.discard(page)
         return tuple(self._explicit_downloads.pop(page, []))
 
-    async def _route(self, route: Route, request: Request) -> None:
-        if not request.is_navigation_request():
-            await route.continue_()
-            return
+    async def _native_navigation(self, payload: dict[str, object]) -> None:
+        cdp = self._navigation_cdp
+        assert cdp is not None
+        # Project the protocol event; headers and URL remain local and are never logged.
         page: Page | None = None
         try:
-            frame = request.frame
-            page = frame.page
-            if frame != page.main_frame:
-                await route.continue_()
-                return
-        except PlaywrightError:
-            # A popup's initial navigation can arrive before Chromium exposes its
-            # Frame. It is still a top-level navigation and must pass the same
-            # destination, redirect, and download checks.
-            pass
-        if page is not None and not self.controls(page):
-            await route.continue_()
-            return
-        if page is None and not self._active_actions:
-            await route.continue_()
+            pause = NavigationPause.from_protocol(payload)
+        except (ValueError, KeyError, TypeError):
+            self._record_blocked(
+                None,
+                BrowserError(
+                    BrowserFailure(
+                        code="backend_error",
+                        message="Chrome returned an invalid navigation event",
+                        outcome_uncertain=True,
+                    )
+                ),
+            )
+            request_id = payload.get("requestId")
+            if isinstance(request_id, str):
+                with suppress(PlaywrightError):
+                    await cdp.send(
+                        "Fetch.failRequest", {"requestId": request_id, "errorReason": "Failed"}
+                    )
             return
         try:
-            redirected = request.redirected_from
-            redirect_count = 0
-            while redirected is not None:
-                redirect_count += 1
-                redirected = redirected.redirected_from
-            if redirect_count > self._max_redirects:
-                raise BrowserError(
-                    BrowserFailure(
-                        code="destination_blocked",
-                        message="navigation exceeded the redirect limit",
-                    )
-                )
-            if redirected is None:
-                reviewed = await self._reviewed_action_destinations(page)
-                if reviewed and not any(
-                    _matches_reviewed_destination(request.url, destination)
-                    for destination in reviewed
-                ):
-                    raise BrowserError(
-                        BrowserFailure(
-                            code="destination_blocked",
-                            message=(
-                                "browser action navigation differed from the reviewed destination"
-                            ),
-                            outcome_uncertain=True,
+            async with asyncio.timeout(self._navigation_timeout_ms / 1_000):
+                for candidate in tuple(self._pages):
+                    await self._bind_navigation_page(candidate)
+                page = self._frame_pages.get(pause.frame_id)
+                controlled = page is not None and self.controls(page)
+                if page is None:
+                    # Chrome main-frame ids identify page targets. Child-frame ids either
+                    # have no target or identify iframe targets, which are not top-level.
+                    try:
+                        result = await cdp.send(
+                            "Target.getTargetInfo", {"targetId": pause.frame_id}
                         )
+                    except PlaywrightError as exc:
+                        # Chrome main-frame ids are page-target ids. Only this exact
+                        # protocol response proves there is no live main target;
+                        # transport errors must not bypass destination enforcement.
+                        if not str(exc).endswith("No target with given id found"):
+                            raise BrowserError(
+                                BrowserFailure(
+                                    code="destination_blocked",
+                                    message="Chrome navigation target could not be identified",
+                                    outcome_uncertain=True,
+                                )
+                            ) from None
+                        result = {}
+                    info = result.get("targetInfo", {})
+                    if info.get("type") == "page":
+                        opener = self._frame_pages.get(info.get("openerId", ""))
+                        controlled = self.pages_owned or opener in self._active_actions
+                if not controlled:
+                    await cdp.send("Fetch.continueRequest", {"requestId": pause.request_id})
+                    return
+                if not pause.is_response:
+                    if pause.redirected_request_id is None:
+                        self._redirect_counts[pause.frame_id] = 0
+                        reviewed = await self._reviewed_action_destinations(page)
+                        if reviewed and not any(
+                            _matches_reviewed_destination(pause.url, destination)
+                            for destination in reviewed
+                        ):
+                            raise BrowserError(
+                                BrowserFailure(
+                                    code="destination_blocked",
+                                    message=(
+                                        "browser action navigation differed "
+                                        "from the reviewed destination"
+                                    ),
+                                    outcome_uncertain=True,
+                                )
+                            )
+                    await self._destination_guard(pause.url)
+                else:
+                    disposition = pause.header("content-disposition").lower()
+                    explicit_download = (
+                        page in self._explicit_download_pages
+                        if page is not None
+                        else bool(self._explicit_download_pages)
                     )
-            await self._destination_guard(request.url)
-            response = await route.fetch(
-                max_redirects=0,
-                max_retries=0,
-                timeout=self._navigation_timeout_ms,
-            )
-            try:
-                disposition = response.headers.get("content-disposition", "").lower()
-                explicit_download = (
-                    page in self._explicit_download_pages
-                    if page is not None
-                    else (bool(self._explicit_download_pages))
-                )
-                if disposition.startswith("attachment") and not explicit_download:
-                    raise BrowserError(
-                        BrowserFailure(code="download_blocked", message="downloads are disabled")
-                    )
-                content_length = response.headers.get("content-length")
-                if (
-                    explicit_download
-                    and disposition.startswith("attachment")
-                    and self._download_file_byte_limit is not None
-                    and content_length is not None
-                    and content_length.isascii()
-                    and content_length.isdigit()
-                    and int(content_length) > self._download_file_byte_limit
-                ):
-                    raise BrowserError(
-                        BrowserFailure(
-                            code="download_too_large",
-                            message="browser download exceeds the configured byte limit",
+                    if disposition.startswith("attachment") and not explicit_download:
+                        raise BrowserError(
+                            BrowserFailure(
+                                code="download_blocked", message="downloads are disabled"
+                            )
                         )
-                    )
-                location = response.headers.get("location")
-                if 300 <= response.status < 400 and location:
-                    await self._destination_guard(urljoin(request.url, location))
-                await route.fulfill(response=response)
-            finally:
-                with suppress(PlaywrightError):
-                    await response.dispose()
+                    content_length = pause.header("content-length")
+                    if (
+                        explicit_download
+                        and disposition.startswith("attachment")
+                        and self._download_file_byte_limit is not None
+                        and content_length.isascii()
+                        and content_length.isdigit()
+                        and int(content_length) > self._download_file_byte_limit
+                    ):
+                        raise BrowserError(
+                            BrowserFailure(
+                                code="download_too_large",
+                                message="browser download exceeds the configured byte limit",
+                            )
+                        )
+                    location = pause.header("location")
+                    if pause.status is not None and 300 <= pause.status < 400 and location:
+                        count = self._redirect_counts.get(pause.frame_id, 0) + 1
+                        self._redirect_counts[pause.frame_id] = count
+                        if count > self._max_redirects:
+                            raise BrowserError(
+                                BrowserFailure(
+                                    code="destination_blocked",
+                                    message="navigation exceeded the redirect limit",
+                                )
+                            )
+                        await self._destination_guard(urljoin(pause.url, location))
+                    else:
+                        self._redirect_counts.pop(pause.frame_id, None)
+                # Continuing a paused response leaves the bytes in Chrome's own network
+                # stack. No APIRequestContext fetch, body buffering, or fulfillment.
+                await cdp.send("Fetch.continueRequest", {"requestId": pause.request_id})
+        except asyncio.CancelledError:
+            with suppress(PlaywrightError):
+                await cdp.send(
+                    "Fetch.failRequest", {"requestId": pause.request_id, "errorReason": "Aborted"}
+                )
+            raise
         except BrowserError as exc:
             self._record_blocked(page, exc)
-            await route.abort("blockedbyclient")
-            return
-        except PlaywrightTimeoutError:
-            self._record_blocked(
-                page,
+            with suppress(PlaywrightError):
+                await cdp.send(
+                    "Fetch.failRequest",
+                    {"requestId": pause.request_id, "errorReason": "BlockedByClient"},
+                )
+        except (TimeoutError, PlaywrightError) as exc:
+            error = (
                 BrowserError(
                     BrowserFailure(
                         code="navigation_timeout",
@@ -518,19 +642,15 @@ class _PlaywrightSession:
                         retryable=True,
                         outcome_uncertain=True,
                     )
-                ),
+                )
+                if isinstance(exc, TimeoutError)
+                else _backend_error("browser navigation failed; it was not retried", exc)
             )
-            await route.abort("timedout")
-            return
-        except PlaywrightError as exc:
-            self._record_blocked(
-                page,
-                _backend_error(
-                    "browser navigation failed; it was not retried",
-                    exc,
-                ),
-            )
-            await route.abort("failed")
+            self._record_blocked(page, error)
+            with suppress(PlaywrightError):
+                await cdp.send(
+                    "Fetch.failRequest", {"requestId": pause.request_id, "errorReason": "Failed"}
+                )
 
     def take_blocked_error(self, page: Page) -> BrowserError | None:
         blocked = self._blocked.pop(page, None)
@@ -622,7 +742,7 @@ class _PlaywrightSession:
         return page in self._pages and page not in self._quarantined
 
     def ensure_connected(self) -> None:
-        if self._closed:
+        if self._closed or self._navigation_closing:
             raise BrowserError(
                 BrowserFailure(code="session_closed", message="browser session is closed")
             )
@@ -641,8 +761,31 @@ class _PlaywrightSession:
             await asyncio.gather(*tuple(self._background_page_closes), return_exceptions=True)
         if self._background_download_cancels:
             await asyncio.gather(*tuple(self._background_download_cancels), return_exceptions=True)
+        await self._stop_navigation()
         await self._close_owner()
+        self._frame_pages.clear()
+        self._redirect_counts.clear()
         self._closed = True
+
+    async def _stop_navigation(self) -> None:
+        """Join interception work on both partial startup and normal teardown."""
+        self._navigation_closing = True
+        for task in tuple(self._navigation_tasks):
+            task.cancel()
+        if self._navigation_tasks:
+            await asyncio.gather(*tuple(self._navigation_tasks), return_exceptions=True)
+        if self._navigation_cdp is not None:
+            while self._navigation_tasks:
+                await asyncio.gather(*tuple(self._navigation_tasks), return_exceptions=True)
+            with suppress(PlaywrightError):
+                await self._navigation_cdp.send("Fetch.disable")
+                self._navigation_cdp.remove_listener(
+                    "Fetch.requestPaused", self._observe_navigation_pause
+                )
+                while self._navigation_tasks:
+                    await asyncio.gather(*tuple(self._navigation_tasks), return_exceptions=True)
+                await self._navigation_cdp.detach()
+            self._navigation_cdp = None
 
 
 class _PlaywrightPage:
@@ -2315,18 +2458,6 @@ async def _disconnect_browser(browser: Browser) -> None:
     """Dispose a connected Playwright client without owning the external process."""
 
     await browser.close()
-
-
-async def _replace_owned_pages_with_blank(context: BrowserContext) -> None:
-    """Replace restored tabs without ever closing Chromium's last live page."""
-
-    restored_pages = tuple(context.pages)
-    blank_page = await context.new_page()
-    for page in restored_pages:
-        if page is blank_page:
-            continue
-        with suppress(PlaywrightError):
-            await page.close(run_before_unload=False)
 
 
 async def _best_effort_disconnect(browser: Browser) -> None:

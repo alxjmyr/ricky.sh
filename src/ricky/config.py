@@ -1197,14 +1197,14 @@ class _BrowserResourceSettings(BaseModel):
 
 
 class PersistentBrowserResourceSettings(_BrowserResourceSettings):
-    """One Ricky-owned persistent Chromium profile."""
+    """One Ricky-owned persistent Chrome profile."""
 
     kind: Literal["persistent"] = "persistent"
     headless: bool = False
 
 
 class CdpBrowserResourceSettings(_BrowserResourceSettings):
-    """One explicit loopback Chromium CDP attachment."""
+    """One explicit loopback Chrome CDP attachment."""
 
     kind: Literal["cdp"] = "cdp"
     endpoint: str
@@ -1352,9 +1352,8 @@ class BrowserSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
-    browser_kind: Literal["chromium"] = "chromium"
     headless: bool = False
-    binary_dir: str = "browser/browsers"
+    executable_path: Path | None = None
     ephemeral_dir: str = "browser/ephemeral"
     persistent_dir: str = "browser/persistent"
     lease_dir: str = "browser/leases"
@@ -1379,7 +1378,14 @@ class BrowserSettings(BaseModel):
     allowed_private_origins: list[str] = Field(default_factory=list, max_length=100)
     background: BackgroundBrowserSettings = Field(default_factory=BackgroundBrowserSettings)
 
-    @field_validator("binary_dir", "ephemeral_dir", "persistent_dir", "lease_dir", "download_dir")
+    @field_validator("executable_path")
+    @classmethod
+    def _absolute_executable(cls, value: Path | None) -> Path | None:
+        if value is not None and not value.is_absolute():
+            raise ValueError("browser.executable_path must be an absolute path")
+        return value
+
+    @field_validator("ephemeral_dir", "persistent_dir", "lease_dir", "download_dir")
     @classmethod
     def _confined_data_dir(cls, value: str, info: Any) -> str:
         return _user_data_relative_path(value, setting=f"browser.{info.field_name}")

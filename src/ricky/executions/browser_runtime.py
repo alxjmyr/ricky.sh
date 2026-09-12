@@ -511,7 +511,7 @@ def _logical_transaction_identity(
 
     The sequence is local to one execution occurrence. Explicit execution retries
     start at one again, so the same task and pinned contract cannot manufacture a
-    fresh identity merely by reopening Chromium. A second intentional commit in
+    fresh identity merely by reopening Chrome. A second intentional commit in
     the same live execution receives the next sequence value.
     """
 
