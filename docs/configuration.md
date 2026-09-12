@@ -233,9 +233,13 @@ repeatable `--unlock-vault PROFILE` option with `gateway run`, `gateway service 
 variable. Omitting the option starts the gateway locked, and an automatic service restart does not
 retain prior unlocked state.
 
-`[context.media]` is the provider-neutral session-media policy. Its defaults allow 25,000,000
-stored bytes per session and project at most two images, 10,000,000 source bytes, and 8,000,000
-pixels into one request. Each projected image reserves 8,192 estimated tokens by default. Set
+`[context.media]` controls session media. Defaults allow 25,000,000 stored bytes per session,
+10 uploaded images per message, and 20,000,000 bytes or 40,000,000 pixels per source image.
+A request can contain at most 20 images, 10,000,000 normalized bytes, and 8,000,000 pixels.
+Uploaded images remain in active context until clearing or compaction; exceeding a request
+ceiling produces an error instead of silently omitting uploads. Browser snapshots use at most
+the latest two images that fit the remaining ceilings (`request_browser_image_limit`).
+Each projected image reserves 8,192 estimated tokens by default. Set
 `image_token_estimate` on an exact `[[context.models]]` provider/model record when a different
-deterministic reserve is appropriate. These ceilings apply to future media producers as well as
-browser screenshots.
+deterministic reserve is appropriate. Static PNG, JPEG, and WebP uploads are oriented, stripped
+of metadata, and normalized to PNG. Resizing to fit individual request ceilings is reported.

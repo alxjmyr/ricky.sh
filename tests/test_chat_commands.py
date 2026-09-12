@@ -267,3 +267,95 @@ async def test_cancelled_clear_joins_media_reset_and_finishes_session_transition
     assert controller.session.media == []
     assert media.root.parent.name == controller.session.id
     assert "Started a fresh session." in rendered.getvalue()
+
+
+@pytest.mark.parametrize("text", ["", "compare these"])
+async def test_chat_sends_image_draft_as_complete_user_content(tmp_path: Path, text: str) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ricky.llm.types import ImagePart, UserContent
+    from ricky.media import normalize_image_upload
+
+    settings = RickySettings(
+        user_data_dir=str(tmp_path / "user"), project_data_dir=str(tmp_path / "project")
+    )
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    media = SessionMediaStore.create(settings, session.id)
+    controller, _ = _controller(session, settings=settings, session_media=media)
+    controller.agent_loop = SimpleNamespace(validate_image_input=AsyncMock())  # type: ignore[assignment]
+    controller._run_turn = AsyncMock()  # type: ignore[method-assign]
+    data = BytesIO()
+    Image.new("RGB", (2, 2)).save(data, format="PNG")
+    controller.renderer.input_session.staged_images.append(
+        normalize_image_upload("one.png", data.getvalue(), settings)
+    )
+
+    await controller._send_draft(text)
+
+    content = controller._run_turn.call_args.args[0]
+    assert isinstance(content, UserContent)
+    assert isinstance(content.parts[-1], ImagePart)
+    assert content.display_text() == (f"{text}\n[1 image]" if text else "[1 image]")
+    assert len(session.media) == 1
+    assert controller.renderer.input_session.staged_images == []
+    assert not (tmp_path / "project").exists()
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_chat_image_preflight_failure_preserves_draft_and_removes_admission(
+    tmp_path: Path, interrupted: bool
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ricky.llm.types import UnsupportedInputModalityError
+    from ricky.media import normalize_image_upload
+
+    settings = RickySettings(
+        user_data_dir=str(tmp_path / "user"), project_data_dir=str(tmp_path / "project")
+    )
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    media = SessionMediaStore.create(settings, session.id)
+    controller, output = _controller(session, settings=settings, session_media=media)
+    error = asyncio.CancelledError() if interrupted else UnsupportedInputModalityError("text only")
+    controller.agent_loop = SimpleNamespace(  # type: ignore[assignment]
+        validate_image_input=AsyncMock(side_effect=error)
+    )
+    controller._run_turn = AsyncMock()  # type: ignore[method-assign]
+    data = BytesIO()
+    Image.new("RGB", (2, 2)).save(data, format="PNG")
+    controller.renderer.input_session.staged_images.append(
+        normalize_image_upload("one.png", data.getvalue(), settings)
+    )
+
+    await controller._send_draft("describe")
+
+    controller._run_turn.assert_not_called()
+    assert controller.renderer.input_session._draft == "describe"
+    assert len(controller.renderer.input_session.staged_images) == 1
+    assert session.media == []
+    assert not list(media.root.glob("*.png"))
+    assert ("cancelled" if interrupted else "text only") in output.getvalue()
+    assert not (tmp_path / "project").exists()
+
+
+async def test_chat_text_followup_preserves_draft_when_image_preflight_fails() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from ricky.llm.types import UnsupportedInputModalityError
+
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    controller, output = _controller(session, settings=settings)
+    preflight = AsyncMock(side_effect=UnsupportedInputModalityError("retained images"))
+    controller.agent_loop = SimpleNamespace(validate_image_input=preflight)  # type: ignore[assignment]
+    controller._run_turn = AsyncMock()  # type: ignore[method-assign]
+
+    await controller._send_draft("What color was it?")
+
+    controller._run_turn.assert_not_called()
+    preflight.assert_awaited_once()
+    assert controller.renderer.input_session._draft == "What color was it?"
+    assert "retained images" in output.getvalue()

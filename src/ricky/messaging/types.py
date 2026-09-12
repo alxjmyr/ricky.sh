@@ -19,6 +19,16 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ReceivedImage(BaseModel):
+    """Transient downloaded bytes; inbox persistence replaces these with snapshots."""
+
+    model_config = ConfigDict(
+        extra="forbid", frozen=True, strict=True, ser_json_bytes="base64", val_json_bytes="base64"
+    )
+    filename: str = Field(min_length=1, max_length=255)
+    content: bytes
+
+
 class InboundMessage(_StrictModel):
     """One normalized inbound text message or bounded rejected update."""
 
@@ -31,7 +41,14 @@ class InboundMessage(_StrictModel):
     sender_id: str = Field(min_length=1, max_length=500)
     platform_message_id: str = Field(min_length=1, max_length=500)
     reply_to_platform_message_id: str | None = Field(default=None, min_length=1, max_length=500)
-    text: str = Field(min_length=1, max_length=20_000)
+    text: str = Field(default="", max_length=20_000)
+    images: list[StoredAttachment] = Field(default_factory=list, max_length=10)
+    image_error: str | None = Field(default=None, max_length=500)
+    images_resized: bool = False
+    media_group_id: str | None = Field(default=None, max_length=100)
+    album_parent_id: str | None = None
+    album_updated_at: datetime | None = None
+    image_message_ids: list[str] = Field(default_factory=list, max_length=10)
     received_at: datetime
     status: InboundStatus
 
@@ -92,6 +109,7 @@ class ReceivedUpdate(_StrictModel):
     update_id: str = Field(min_length=1, max_length=100)
     message: InboundMessage
     rejection_reason: str | None = Field(default=None, max_length=500)
+    images: list[ReceivedImage] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
     def _validate_result(self) -> ReceivedUpdate:

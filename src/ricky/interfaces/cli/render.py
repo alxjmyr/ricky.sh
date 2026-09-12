@@ -812,6 +812,8 @@ class CliRenderer:
                 Markdown(
                     """
 `/help` show commands
+`/img [paths ...]` attach images or open the picker; quote paths with spaces
+`/img /remove N` remove a staged image
 `/debug` toggle verbose event rendering
 `/tasks` show the current task list
 `/context` inspect stored context without a model call
@@ -829,6 +831,7 @@ class CliRenderer:
 `/quit` exit
 
 **Editing:** `Enter` sends; `Ctrl+J` inserts a newline; `Tab` completes commands and skills;
+`Ctrl+X Ctrl+I` opens the image picker; `Ctrl+C` clears text and attachments.
 `Ctrl+R` searches this chat's input history; `Ctrl+X Ctrl+E` edits the draft externally.
 """.strip()
                 ),

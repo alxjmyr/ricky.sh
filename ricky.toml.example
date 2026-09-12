@@ -59,11 +59,15 @@ chars_per_token = 4.0
 response_reserve_tokens = 8192
 safety_margin_tokens = 1024
 
-# Session media remains reference-only in conversation state. The latest two
-# images that fit all request ceilings are projected into provider requests.
+# Uploaded images stay in active context until clearing or compaction. Browser
+# snapshots use the latest two that fit the remaining request ceilings.
 [context.media]
 session_byte_limit = 25000000
-request_image_limit = 2
+upload_image_limit = 10
+upload_image_byte_limit = 20000000
+upload_image_pixel_limit = 40000000
+request_image_limit = 20
+request_browser_image_limit = 2
 request_image_byte_limit = 10000000
 request_image_pixel_limit = 8000000
 default_image_token_estimate = 8192
@@ -282,6 +286,7 @@ agent_routes = []
 #   [messaging.telegram_accounts.bot]
 #   api_base_url = "https://api.telegram.org"
 #   long_poll_timeout_seconds = 30
+#   media_group_wait_seconds = 2.0
 #   allowed_sender_ids = ["8926054105"]
 #   allowed_destination_ids = ["8926054105"]
 #   max_inbound_text_length = 8000

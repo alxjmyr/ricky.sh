@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ricky.agent.events import SkillActivatedEvent, TurnFinishedEvent
@@ -15,6 +16,8 @@ from ricky.agent.workflow import WorkflowService
 from ricky.config import RickySettings
 from ricky.durable_tasks.store import TaskStoreError
 from ricky.interfaces.cli.render import CliRenderer
+from ricky.llm.types import ImagePart, ProviderError, TextPart, UserContent, UserContentPart
+from ricky.media import ImageUpload, SessionMediaError, normalize_image_upload
 from ricky.skills.registry import SkillRegistry
 from ricky.workflows.registry import WorkflowRegistry
 
@@ -57,6 +60,9 @@ class ChatController:
     async def run(self) -> None:
         """Run the REPL until the user exits."""
         self.renderer.configure_chat_input(self.skill_registry)
+        self.renderer.input_session.configure_images(
+            self._load_image, max_images=self.settings.context.media.upload_image_limit
+        )
         self.renderer.render_welcome(self.session)
         self.renderer.render_skill_load_errors(self.skill_registry.errors)
         if self.workflow_registry is not None:
@@ -81,7 +87,7 @@ class ChatController:
                 continue
 
             user_input = user_input.strip()
-            if not user_input:
+            if not user_input and not self.renderer.input_session.staged_images:
                 continue
             idle_interrupt_seen = False
 
@@ -92,9 +98,51 @@ class ChatController:
                     return
                 continue
 
-            await self._run_turn(user_input)
+            await self._send_draft(user_input)
 
-    async def _run_turn(self, user_input: str) -> None:
+    def _load_image(self, path: Path) -> ImageUpload:
+        if not path.is_file():
+            raise ValueError(f"{path.name}: select an image file")
+        with path.open("rb") as source:
+            content = source.read(self.settings.context.media.upload_image_byte_limit + 1)
+        return normalize_image_upload(path.name, content, self.settings)
+
+    async def _send_draft(self, text: str) -> None:
+        composer = self.renderer.input_session
+        records = []
+        try:
+            if composer.staged_images:
+                if self.session_media is None:
+                    raise SessionMediaError("Image attachments are unavailable in this session.")
+                records = await self.session_media.admit_images(
+                    self.session, images=list(composer.staged_images)
+                )
+            parts: list[UserContentPart] = [TextPart(text=text)] if text or not records else []
+            parts.extend(ImagePart(artifact=record.reference()) for record in records)
+            content = UserContent(parts=parts)
+            await self.agent_loop.validate_image_input(self.session, content)
+        except (SessionMediaError, ValueError, ProviderError) as exc:
+            if records and self.session_media is not None:
+                await self.session_media.remove_records(
+                    self.session, {record.id for record in records}
+                )
+            composer.restore_draft(text)
+            self.renderer.render_status(str(exc), style="yellow")
+            return
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            if records and self.session_media is not None:
+                await self.session_media.remove_records(
+                    self.session, {record.id for record in records}
+                )
+            composer.restore_draft(text)
+            self.renderer.render_status(
+                "Image admission cancelled; draft preserved.", style="yellow"
+            )
+            return
+        composer.clear_images()
+        await self._run_turn(content if records else text)
+
+    async def _run_turn(self, user_input: str | UserContent) -> None:
         task = asyncio.create_task(self._consume_turn(user_input))
         try:
             await task
@@ -105,7 +153,7 @@ class ChatController:
             self._discard_queued_workflow()
             self.renderer.render_status("Turn cancelled.", style="yellow")
 
-    async def _consume_turn(self, user_input: str) -> None:
+    async def _consume_turn(self, user_input: str | UserContent) -> None:
         finished: TurnFinishedEvent | None = None
         async for event in self.agent_loop.run_turn(self.session, user_input):
             self.renderer.render_event(event)
@@ -247,6 +295,8 @@ class ChatController:
     async def _clear_session(self) -> None:
         """Complete one resident session generation transition."""
 
+        self.renderer.input_session.clear_images()
+        self.renderer.input_session.restore_draft("")
         current = self.session
         fresh = AgentSession.create(
             self.settings,

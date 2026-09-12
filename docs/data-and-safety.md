@@ -130,6 +130,13 @@ provider-bound resolver rechecks profile scope, disclosure policy, dimensions, s
 immediately before wire encoding. Session screenshot files are removed when the resident runtime
 closes or `/clear` starts a fresh session. Coordinate clicks remain separately reviewed effects.
 
+Images you explicitly attach in CLI or Telegram are supplied to the pinned conversation provider
+under the session's primary profile. Ricky accepts static PNG, JPEG, and WebP, corrects orientation,
+removes metadata, and stores immutable normalized image copies below user data. Original files are
+unchanged. Uploaded images remain in active context across turns until clearing or compaction;
+Ricky rejects requests that cannot include the complete active image set. CLI copies are removed
+on exit or `/clear`; Telegram copies survive restarts and follow archived-conversation retention.
+
 Recognized protected browser controls expose only a safe category. The dedicated protected-fill
 tool receives an alias and field name, derives current origins locally, and sends the raw value
 only to the exact browser control after policy and permission review. Filling never includes

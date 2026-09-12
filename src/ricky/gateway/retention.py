@@ -26,6 +26,7 @@ from ricky.gateway.store import GatewayStore
 from ricky.messaging.store import MessagingStore
 from ricky.notifications.store import NotificationStore
 from ricky.profiles import ProfileScope
+from ricky.sessions import SessionNotFoundError, SessionStore
 
 
 class _FrozenModel(BaseModel):
@@ -164,10 +165,7 @@ class GatewayRetention:
                 conversation_ids,
                 protected_conversations,
                 apply_changes,
-                lambda ids: self.gateway.prune_conversations(
-                    ids,
-                    scope=self.profile_scope,
-                ),
+                self._prune_archived_conversations,
             )
         )
 
@@ -217,6 +215,24 @@ class GatewayRetention:
             enabled=self.config.enabled,
             groups=tuple(groups),
         )
+
+    async def _prune_archived_conversations(self, ids: Sequence[str]) -> int:
+        sessions = SessionStore(self.settings)
+        await sessions.initialize()
+        eligible: list[str] = []
+        for conversation_id in ids:
+            conversation = await self.gateway.get(conversation_id, scope=self.profile_scope)
+            if conversation.status != "archived":
+                continue
+            try:
+                expired = await sessions.prune_archived_media(
+                    conversation.session_id, scope=self.profile_scope
+                )
+            except SessionNotFoundError:
+                expired = True
+            if expired:
+                eligible.append(conversation_id)
+        return await self.gateway.prune_conversations(eligible, scope=self.profile_scope)
 
     async def _initialize(self) -> None:
         await self.messaging.initialize()

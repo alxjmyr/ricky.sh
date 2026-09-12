@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import sqlite3
 from collections.abc import Callable, Iterator, Sequence
@@ -14,7 +15,13 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from ricky.attachments import (
+    LoadedAttachment,
+    delete_attachment_snapshots,
+    snapshot_attachment_batch,
+)
 from ricky.config import RickySettings, user_data_subpath
+from ricky.media import normalize_image_upload
 from ricky.messaging.leases import PollerLease
 from ricky.messaging.types import (
     DeliveryPart,
@@ -60,6 +67,7 @@ class MessagingStore:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        self._ricky_settings = settings
         self.settings = settings.messaging
         self.db_path = user_data_subpath(settings, self.settings.store_path)
         self.root: Path = self.db_path.parent
@@ -349,71 +357,126 @@ class MessagingStore:
     def _ingest(self, batch: ReceiveBatch) -> list[InboundMessage]:
         now = self._now()
         stored: list[InboundMessage] = []
-        with self._connect() as connection, self._transaction(connection):
-            for update in batch.updates:
-                existing = connection.execute(
-                    """SELECT id FROM inbox_messages
-                    WHERE transport = ? AND account = ? AND update_id = ?""",
-                    (batch.transport, batch.account, update.update_id),
-                ).fetchone()
-                outcome: Literal["accepted", "rejected", "duplicate"]
-                if existing is None:
-                    message = update.message
+        created_paths: list[str] = []
+        discarded_paths: list[str] = []
+        try:
+            with self._connect() as connection, self._transaction(connection):
+                for update in batch.updates:
+                    existing = connection.execute(
+                        """SELECT id FROM inbox_messages
+                        WHERE transport = ? AND account = ? AND update_id = ?""",
+                        (batch.transport, batch.account, update.update_id),
+                    ).fetchone()
+                    outcome: Literal["accepted", "rejected", "duplicate"]
+                    if existing is None:
+                        message = update.message
+                        if update.images:
+                            try:
+                                normalized = [
+                                    normalize_image_upload(
+                                        filename=image.filename,
+                                        content=image.content,
+                                        settings=self._ricky_settings,
+                                    )
+                                    for image in update.images
+                                ]
+                                loaded = [
+                                    LoadedAttachment(
+                                        filename=image.filename,
+                                        media_type="image/png",
+                                        content=image.content,
+                                        sha256=hashlib.sha256(image.content).hexdigest(),
+                                        source_path=Path(image.filename),
+                                    )
+                                    for image in normalized
+                                ]
+                                snapshot = snapshot_attachment_batch(
+                                    loaded,
+                                    settings=self._ricky_settings,
+                                    notification_id=message.id,
+                                )
+                                created_paths.extend(snapshot.created_storage_paths)
+                                message = message.model_copy(
+                                    update={
+                                        "images": list(snapshot.attachments),
+                                        "image_message_ids": [message.platform_message_id]
+                                        * len(snapshot.attachments),
+                                        "images_resized": any(
+                                            image.resized for image in normalized
+                                        ),
+                                    }
+                                )
+                            except (ValueError, RuntimeError, OSError):
+                                message = message.model_copy(
+                                    update={
+                                        "image_error": (
+                                            "Image is unreadable or exceeds the configured limits. "
+                                            "Resend the complete message with static "
+                                            "PNG, JPEG, or WebP images."
+                                        )
+                                    }
+                                )
+                        if message.media_group_id:
+                            message = self._merge_album(connection, message, now, discarded_paths)
+                        connection.execute(
+                            """INSERT INTO inbox_messages(
+                                id, transport, account, update_id, message_json, status,
+                                received_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (
+                                message.id,
+                                message.transport,
+                                message.account,
+                                message.update_id,
+                                message.model_dump_json(),
+                                message.status,
+                                _iso(message.received_at),
+                                _iso(now),
+                            ),
+                        )
+                        stored.append(message)
+                        outcome = "rejected" if message.status == "rejected" else "accepted"
+                        message_id: str | None = message.id
+                    else:
+                        outcome = "duplicate"
+                        message_id = existing["id"]
+                    attempt = InboundAttempt(
+                        id=f"inbound_attempt_{uuid4().hex}",
+                        transport=batch.transport,
+                        account=batch.account,
+                        update_id=update.update_id,
+                        message_id=message_id,
+                        outcome=outcome,
+                        reason=update.rejection_reason
+                        if outcome != "duplicate"
+                        else "duplicate update",
+                        created_at=now,
+                    )
                     connection.execute(
-                        """INSERT INTO inbox_messages(
-                            id, transport, account, update_id, message_json, status,
-                            received_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO inbound_attempts(
+                            id, transport, account, update_id, activity_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?)""",
                         (
-                            message.id,
-                            message.transport,
-                            message.account,
-                            message.update_id,
-                            message.model_dump_json(),
-                            message.status,
-                            _iso(message.received_at),
+                            attempt.id,
+                            attempt.transport,
+                            attempt.account,
+                            attempt.update_id,
+                            attempt.model_dump_json(),
                             _iso(now),
                         ),
                     )
-                    stored.append(message)
-                    outcome = "rejected" if message.status == "rejected" else "accepted"
-                    message_id: str | None = message.id
-                else:
-                    outcome = "duplicate"
-                    message_id = existing["id"]
-                attempt = InboundAttempt(
-                    id=f"inbound_attempt_{uuid4().hex}",
-                    transport=batch.transport,
-                    account=batch.account,
-                    update_id=update.update_id,
-                    message_id=message_id,
-                    outcome=outcome,
-                    reason=update.rejection_reason
-                    if outcome != "duplicate"
-                    else "duplicate update",
-                    created_at=now,
-                )
-                connection.execute(
-                    """INSERT INTO inbound_attempts(
-                        id, transport, account, update_id, activity_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        attempt.id,
-                        attempt.transport,
-                        attempt.account,
-                        attempt.update_id,
-                        attempt.model_dump_json(),
-                        _iso(now),
-                    ),
-                )
-            if batch.next_cursor is not None:
-                connection.execute(
-                    """INSERT INTO transport_cursors(transport, account, value, updated_at)
-                    VALUES (?, ?, ?, ?)
-                    ON CONFLICT(transport, account) DO UPDATE
-                    SET value = excluded.value, updated_at = excluded.updated_at""",
-                    (batch.transport, batch.account, batch.next_cursor.value, _iso(now)),
-                )
+                if batch.next_cursor is not None:
+                    connection.execute(
+                        """INSERT INTO transport_cursors(transport, account, value, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(transport, account) DO UPDATE
+                        SET value = excluded.value, updated_at = excluded.updated_at""",
+                        (batch.transport, batch.account, batch.next_cursor.value, _iso(now)),
+                    )
+        except BaseException:
+            delete_attachment_snapshots(self._ricky_settings, created_paths)
+            raise
+        delete_attachment_snapshots(self._ricky_settings, discarded_paths)
         return stored
 
     def _list_inbox(self, status: str | None, limit: int) -> list[InboundMessage]:
@@ -428,14 +491,115 @@ class MessagingStore:
                 params = (status, limit)
             return [self._message_from_row(row) for row in connection.execute(query, params)]
 
+    def _album_ready(self, message: InboundMessage, now: datetime) -> bool:
+        if message.media_group_id is None:
+            return True
+        account = self.settings.telegram_accounts.get(message.account)
+        delay = account.media_group_wait_seconds if account is not None else 2.0
+        return (now - (message.album_updated_at or message.received_at)).total_seconds() >= delay
+
+    def _merge_album(
+        self,
+        connection: sqlite3.Connection,
+        message: InboundMessage,
+        now: datetime,
+        discarded_paths: list[str],
+    ) -> InboundMessage:
+        rows = connection.execute(
+            "SELECT * FROM inbox_messages WHERE transport = ? AND account = ?",
+            (message.transport, message.account),
+        )
+        parent = next(
+            (
+                self._message_from_row(row)
+                for row in rows
+                if (candidate := self._message_from_row(row)).media_group_id
+                == message.media_group_id
+                and candidate.destination_id == message.destination_id
+                and candidate.thread_id == message.thread_id
+                and candidate.sender_id == message.sender_id
+                and candidate.album_parent_id is None
+            ),
+            None,
+        )
+        if parent is None:
+            return message.model_copy(update={"album_updated_at": now})
+        if parent.status != "pending":
+            return message.model_copy(
+                update={
+                    "media_group_id": None,
+                    "image_error": (
+                        "An album image arrived after its turn started. "
+                        "Resend the complete album with its caption."
+                    ),
+                }
+            )
+        ordered = sorted(
+            zip(
+                parent.image_message_ids + message.image_message_ids,
+                parent.images + message.images,
+                strict=True,
+            ),
+            key=lambda pair: (0, int(pair[0])) if pair[0].lstrip("-").isdigit() else (1, pair[0]),
+        )
+        images = [image for _, image in ordered]
+        identifiers = [identifier for identifier, _ in ordered]
+        error = parent.image_error or message.image_error
+        if len(images) > 10:
+            discarded_paths.extend(image.storage_path for image in images[10:])
+            error = "At most 10 images are allowed. Resend the complete message."
+        text = "\n".join(filter(None, (parent.text, message.text)))
+        if len(text) > 20_000:
+            error = (
+                "Album captions exceed the text limit. "
+                "Resend the complete album with a shorter caption."
+            )
+        merged = parent.model_copy(
+            update={
+                "images": images[:10],
+                "image_message_ids": identifiers[:10],
+                "image_error": error,
+                "text": text[:20_000],
+                "images_resized": parent.images_resized or message.images_resized,
+                "album_updated_at": now,
+            }
+        )
+        connection.execute(
+            "UPDATE inbox_messages SET message_json = ?, received_at = ?, updated_at = ? "
+            "WHERE id = ?",
+            (merged.model_dump_json(), _iso(parent.received_at), _iso(now), parent.id),
+        )
+        return message.model_copy(
+            update={
+                "album_parent_id": parent.id,
+                "status": "processed",
+                "images": [],
+                "image_message_ids": [],
+            }
+        )
+
     def _list_pending_oldest(self, limit: int) -> list[InboundMessage]:
         with self._connect() as connection:
             rows = connection.execute(
                 """SELECT * FROM inbox_messages WHERE status = 'pending'
-                ORDER BY received_at ASC, id ASC LIMIT ?""",
+                ORDER BY received_at ASC, CAST(update_id AS INTEGER) ASC, id ASC LIMIT ?""",
                 (limit,),
             )
-            return [self._message_from_row(row) for row in rows]
+            messages = [self._message_from_row(row) for row in rows]
+            ready: list[InboundMessage] = []
+            blocked: set[tuple[str, str, str, str | None]] = set()
+            for message in messages:
+                key = (
+                    message.transport,
+                    message.account,
+                    message.destination_id,
+                    message.thread_id,
+                )
+                if not self._album_ready(message, self._now()):
+                    blocked.add(key)
+                elif key not in blocked:
+                    ready.append(message)
+            return ready
 
     def _get_inbox(self, message_id: str) -> InboundMessage:
         with self._connect() as connection:
@@ -473,6 +637,9 @@ class MessagingStore:
                 raise InboxLeaseError("expired inbox claim became uncertain")
             if row["status"] != "pending":
                 raise MessagingStateError(f"cannot claim inbox message in {row['status']} state")
+            message = self._message_from_row(row)
+            if not self._album_ready(message, now):
+                raise InboxLeaseError("album is still collecting images")
             fence = int(row["fence"]) + 1
             token = uuid4().hex
             expires_at = now + timedelta(seconds=duration)
@@ -746,7 +913,7 @@ class MessagingStore:
         with self._connect() as connection, self._transaction(connection):
             for message_id in message_ids:
                 row = connection.execute(
-                    "SELECT status, transport, account, update_id FROM inbox_messages WHERE id = ?",
+                    "SELECT * FROM inbox_messages WHERE id = ?",
                     (message_id,),
                 ).fetchone()
                 if row is None or row["status"] not in {"processed", "rejected"}:
@@ -755,6 +922,10 @@ class MessagingStore:
                     """DELETE FROM inbound_attempts
                        WHERE transport = ? AND account = ? AND update_id = ?""",
                     (row["transport"], row["account"], row["update_id"]),
+                )
+                message = self._message_from_row(row)
+                delete_attachment_snapshots(
+                    self._ricky_settings, [image.storage_path for image in message.images]
                 )
                 connection.execute("DELETE FROM inbox_messages WHERE id = ?", (message_id,))
                 removed += 1

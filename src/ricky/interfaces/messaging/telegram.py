@@ -28,6 +28,7 @@ from ricky.messaging.types import (
     DeliveryReceipt,
     InboundMessage,
     ReceiveBatch,
+    ReceivedImage,
     ReceivedUpdate,
     TransportCursor,
     TransportMessage,
@@ -136,7 +137,10 @@ class TelegramTransport:
                 update_id = f"malformed-{digest}"
             else:
                 numeric_ids.append(int(update_id))
-            updates.append(self._normalize(raw, update_id, received_at))
+            update = self._normalize(raw, update_id, received_at)
+            if update.message.status != "rejected" and update.message.image_error is None:
+                update = await self._receive_images(raw, update)
+            updates.append(update)
         next_cursor = None
         if numeric_ids:
             next_cursor = TransportCursor(
@@ -287,7 +291,7 @@ class TelegramTransport:
             reply = message.get("reply_to_message")
             if isinstance(reply, dict):
                 reply_id = _platform_id(reply.get("message_id"))
-            candidate_text = message.get("text")
+            candidate_text = message.get("text", message.get("caption", ""))
             text = candidate_text if isinstance(candidate_text, str) else None
             if (
                 sender_id is None
@@ -301,12 +305,36 @@ class TelegramTransport:
                 reason = "sender is not authorized"
             elif destination_id not in self.settings.allowed_destination_ids:
                 reason = "destination is not authorized"
-            elif text is None:
+            elif text is None or (
+                not text
+                and not (
+                    message.get("photo") or message.get("document") or message.get("media_group_id")
+                )
+            ):
                 reason = "unsupported message content"
-            elif not text.strip():
+            elif not text.strip() and not (
+                message.get("photo") or message.get("document") or message.get("media_group_id")
+            ):
                 reason = "message text is empty"
             elif len(text) > self.settings.max_inbound_text_length:
                 reason = "message text exceeds the configured limit"
+        image_error = None
+        if (
+            isinstance(message, dict)
+            and message.get("media_group_id")
+            and reason
+            in {
+                "message text exceeds the configured limit",
+                "message text is empty",
+                "unsupported message content",
+            }
+        ):
+            image_error = (
+                "An album member is invalid. Resend the complete album with a shorter "
+                "caption and static PNG, JPEG, or WebP images."
+            )
+            reason = None
+            text = ""
         rejected = reason is not None
         normalized = InboundMessage(
             id=_inbound_id(self.account, update_id),
@@ -319,6 +347,12 @@ class TelegramTransport:
             platform_message_id=platform_message_id or "unknown",
             reply_to_platform_message_id=reply_id,
             text="[rejected update]" if rejected else (text or "").strip(),
+            image_error=image_error,
+            media_group_id=(
+                str(message["media_group_id"])[:100]
+                if isinstance(message, dict) and message.get("media_group_id") and not rejected
+                else None
+            ),
             received_at=received_at,
             status="rejected" if rejected else "pending",
         )
@@ -327,6 +361,87 @@ class TelegramTransport:
             message=normalized,
             rejection_reason=reason,
         )
+
+    async def _receive_images(self, raw: dict[str, Any], update: ReceivedUpdate) -> ReceivedUpdate:
+        message = raw["message"]
+        photo = message.get("photo")
+        document = message.get("document")
+        if not photo and not document:
+            if message.get("media_group_id"):
+                return update.model_copy(
+                    update={
+                        "message": update.message.model_copy(
+                            update={
+                                "image_error": (
+                                    "The album contains unsupported content. "
+                                    "Resend the complete album using static "
+                                    "PNG, JPEG, or WebP images."
+                                )
+                            }
+                        )
+                    }
+                )
+            return update
+        try:
+            item = photo[-1] if isinstance(photo, list) and photo else document
+            if not isinstance(item, dict) or not isinstance(item.get("file_id"), str):
+                raise ValueError("Image attachment metadata is invalid.")
+            filename = "photo.jpg" if photo else item.get("file_name", "image")
+            if (
+                not isinstance(filename, str)
+                or Path(filename).name != filename
+                or len(filename) > 255
+            ):
+                raise ValueError("Image attachment filename is invalid.")
+            if not photo and Path(filename).suffix.lower() not in {
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".webp",
+            }:
+                raise ValueError("Attach a static PNG, JPEG, or WebP image.")
+            limit = 20 * 1024 * 1024
+            if isinstance(item.get("file_size"), int) and item["file_size"] > limit:
+                raise ValueError("Image exceeds the 20 MiB Telegram download limit.")
+            payload = await self._request("getFile", {"file_id": item["file_id"]})
+            result = payload.get("result")
+            path = result.get("file_path") if isinstance(result, dict) else None
+            if (
+                not isinstance(path, str)
+                or path.startswith("/")
+                or ".." in path.split("/")
+                or "?" in path
+                or "#" in path
+            ):
+                raise ValueError("Telegram returned an invalid image location.")
+            content = bytearray()
+            token = self.settings.bot_token.get_secret_value()
+            url = f"{self.settings.api_base_url}/file/bot{token}/{path}"
+            async with self._client.stream("GET", url, follow_redirects=False) as response:
+                if response.status_code != 200:
+                    raise ValueError("Telegram image download failed. Resend the complete message.")
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > limit:
+                        raise ValueError("Image exceeds the 20 MiB Telegram download limit.")
+            return update.model_copy(
+                update={"images": [ReceivedImage(filename=filename, content=bytes(content))]}
+            )
+        except (ValueError, TelegramTransportError, httpx.HTTPError):
+            # Never include HTTP exceptions: request URLs contain the bot credential.
+            return update.model_copy(
+                update={
+                    "message": update.message.model_copy(
+                        update={
+                            "image_error": (
+                                "Image could not be downloaded or is unsupported. "
+                                "Resend the complete message with static PNG, JPEG, or WebP images "
+                                "(20 MiB maximum each)."
+                            )
+                        }
+                    )
+                }
+            )
 
     async def _request(
         self,

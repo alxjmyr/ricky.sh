@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from ricky.agent.session import AgentSession
 from ricky.config import RickySettings, user_data_subpath
+from ricky.media import SessionMediaStore
 from ricky.profiles import ProfileLabel, ProfileScope
 from ricky.sessions.types import (
     SessionLease,
@@ -62,6 +63,7 @@ class SessionStore:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        self._ricky_settings = settings
         self.settings = settings.sessions
         self.db_path = user_data_subpath(settings, self.settings.store_path)
         self.root = self.db_path.parent
@@ -188,6 +190,33 @@ class SessionStore:
         scope: ProfileScope,
     ) -> StoredSession:
         return await self._run(self._archive, _session_id(session_id), scope, expected_revision)
+
+    async def prune_archived_media(self, session_id: str, *, scope: ProfileScope) -> bool:
+        """Expire media only after an immutable archived session reaches retention.
+
+        File removal precedes manifest clearing so interruption can safely retry.
+        Archived sessions cannot acquire a new turn lease or become active again.
+        """
+        stored = await self.get(session_id, scope=scope)
+        if stored.status != "archived":
+            return False
+        await SessionMediaStore.create(self._ricky_settings, session_id).remove_all(stored.session)
+        await self._run(self._clear_archived_media, session_id, scope)
+        return True
+
+    def _clear_archived_media(self, session_id: str, scope: ProfileScope) -> None:
+        with self._transaction() as connection:
+            row = self._required_session(connection, session_id)
+            stored = self._stored_session(row)
+            if not scope.permits(stored.profile_label):
+                raise SessionStateError("session profile is outside the active scope")
+            if stored.status != "archived":
+                raise SessionStateError("only archived session media can expire")
+            stored.session.media = []
+            connection.execute(
+                "UPDATE sessions SET session_json = ? WHERE id = ?",
+                (_dump_session(stored.session), session_id),
+            )
 
     async def turns(
         self,
@@ -775,7 +804,7 @@ def _load_session(payload: str) -> AgentSession:
         raw = json.loads(payload)
         if not isinstance(raw, dict):
             raise ValueError("session JSON must be an object")
-        session = AgentSession.model_validate(raw)
+        session = AgentSession.model_validate_json(payload)
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError) as exc:
         raise SessionSchemaError("stored AgentSession JSON is malformed") from exc
     if session.model_dump(mode="json") != raw:

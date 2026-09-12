@@ -62,10 +62,12 @@ keeps the complete paste in the composer and sends it only when you press `Enter
 | `Ctrl+Z` or `Ctrl+Y` | Undo or redo an edit. |
 | `Ctrl+R` | Search input history from this chat. |
 | `Ctrl+X Ctrl+E` | Edit the draft with `$VISUAL` or `$EDITOR`, then return to the composer. |
+| `Ctrl+X Ctrl+I` | Add or remove images while preserving the draft. |
 | `Tab` | Complete a slash command or a skill name after `/skill`. |
 | `Ctrl+C` | Clear a non-empty draft. At an empty prompt, interrupt as described below. |
 
-Input history exists only for the current process and is discarded when chat exits. Ricky does not
+Input history recalls text only; it never restores image attachments. History exists only for
+the current process and is discarded when chat exits. Ricky does not
 write prompt history to disk. Answers to permission, approval, and selection prompts are kept out
 of chat history. Enhanced editing is disabled when input or output is redirected so scripts and
 captured output retain ordinary stream behavior.
@@ -82,7 +84,7 @@ and labels it as a partial response. Redirected output omits transient indicator
 
 ## Work with project and host files
 
-The terminal chat has no separate file-attachment command. Ask Ricky to read a file by its
+For text files, ask Ricky to read a file by its
 workspace-relative path, a `~` home-relative path, or an absolute path:
 
 ```text
@@ -104,10 +106,38 @@ session artifact and sends the model a bounded excerpt plus an opaque artifact I
 through the stored result with its artifact reader. Ask it to continue reading if the excerpt omits
 needed content.
 
-The terminal composer remains text-only; it has no general image-upload command. A permitted
-browser visual snapshot can add an opaque image reference as Ricky-authored follow-up content in
-the same chat. At most the latest two images that fit the configured media and context ceilings are
-projected into a provider request. `/clear` and runtime shutdown remove browser screenshot media;
+## Attach images
+
+Enter `/img` to open the terminal image picker. Type a path and use `Tab` to complete directories
+and image filenames. Select additional files from any directory, then enter `/done` to return to
+the composer. `/remove N` removes a selected image. `Esc` or `/cancel` discards picker changes.
+Use `Ctrl+X Ctrl+I` to open the same picker while preserving text you have already written.
+
+You can also stage paths directly:
+
+```text
+/img ./before.png "./screenshots/after version.png"
+```
+
+Relative paths, `~/` paths, and absolute paths work. The composer shows the selected filenames
+in order. Write your request and press `Enter` to send text and images together, or press `Enter`
+with no text to request a response to the images alone. Selecting files never sends a message.
+`Ctrl+C` clears both draft text and attachments. With redirected input, use the direct path form;
+`/img /remove N` removes a staged image.
+
+Attach up to 10 static PNG, JPEG, or WebP images, subject to the configured model and media
+limits. Selection snapshots the file contents. Ricky corrects orientation, removes metadata,
+and reports resizing required to fit an individual image. If the complete set cannot be accepted,
+Ricky explains the error and preserves the draft for correction.
+
+Images remain available across turns until `/clear` or compaction removes their historical turn
+from active context. If active images exceed a request limit, compact the conversation or start
+fresh; Ricky does not silently omit uploaded images. Exiting removes the chat's image copies.
+The pinned model must support image input; Ricky never switches providers automatically.
+
+A permitted browser visual snapshot can also add an image reference in the same chat.
+At most the latest two browser snapshots that fit the remaining context ceilings are projected.
+`/clear` and runtime shutdown remove browser screenshot media;
 durable browser downloads are separate and remain under their owning profile. The browser resource
 owner must allow the chat's pinned provider, and the pinned model must accept image input. See
 [Browser control](browser-control.md#use-visual-fallback) for the disclosure and model-selection
@@ -143,6 +173,7 @@ Enter these commands at the `ricky>` prompt:
 | `/context` | Inspect the assembled context without calling the model. |
 | `/compact [focus]` | Summarize older context while keeping a recent verbatim tail. |
 | `/model` | Show the provider and model pinned to this chat. |
+| `/img [paths...]` | Select images for the next message. |
 | `/clear` | Discard the current chat state and start a fresh session with the same model. |
 | `/permissions` | List active session permission grants. |
 | `/permissions clear` | Revoke all active session permission grants. |

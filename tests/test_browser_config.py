@@ -52,7 +52,8 @@ def test_browser_defaults_are_conservative() -> None:
     assert browser.background.budget.parked_browsers == 1
     media = RickySettings().context.media
     assert media.session_byte_limit == 25_000_000
-    assert media.request_image_limit == 2
+    assert media.request_image_limit == 20
+    assert media.request_browser_image_limit == 2
     assert media.request_image_byte_limit == 10_000_000
     assert media.request_image_pixel_limit == 8_000_000
     assert media.default_image_token_estimate == 8_192

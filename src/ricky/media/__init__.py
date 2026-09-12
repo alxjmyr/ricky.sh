@@ -6,10 +6,14 @@ from ricky.media.store import (
     SessionMediaLimitError,
     SessionMediaStore,
 )
+from ricky.media.uploads import ImageUpload, normalize_image_upload, restore_image_upload
 
 __all__ = [
     "BoundMediaResolver",
     "SessionMediaError",
     "SessionMediaLimitError",
     "SessionMediaStore",
+    "ImageUpload",
+    "normalize_image_upload",
+    "restore_image_upload",
 ]

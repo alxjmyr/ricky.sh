@@ -250,3 +250,119 @@ async def test_secure_input_has_no_echo_and_does_not_enter_chat_history() -> Non
         pipe_input.send_text("\x1b[A\r")
         assert await asyncio.wait_for(recalled, timeout=1) == "safe history"
     assert "unique-secret-sentinel" not in output.getvalue()
+
+
+def _upload_loader(path: Any) -> Any:
+    from ricky.media import ImageUpload
+
+    return ImageUpload(filename=path.name, content=path.read_bytes(), width=1, height=1)
+
+
+async def test_image_paths_stage_snapshots_and_allow_image_only_input(tmp_path: Any) -> None:
+    path = tmp_path / "space image.png"
+    path.write_bytes(b"snapshot")
+    console, _ = _console()
+    session = CliInputSession(console, stdin=StringIO(f'/img "{path}"\n\n'), interactive=False)
+    session.configure_images(_upload_loader)
+    assert await session.read_chat() == ""
+    path.write_bytes(b"changed")
+    assert session.staged_images[0].content == b"snapshot"
+    assert session.staged_images[0].filename == "space image.png"
+
+
+async def test_invalid_image_batch_preserves_existing_selection(tmp_path: Any) -> None:
+    good = tmp_path / "good.png"
+    good.write_bytes(b"good")
+    console, output = _console()
+    session = CliInputSession(console, interactive=False)
+    session.configure_images(_upload_loader)
+    await session._select_images(str(good))
+    await session._select_images(f"{good} {tmp_path / 'missing.png'}")
+    assert len(session.staged_images) == 1
+    assert "missing.png" in output.getvalue()
+    await session._select_images("/remove 1")
+    assert session.staged_images == []
+
+
+async def test_image_shortcut_preserves_draft_and_escape_rolls_back(tmp_path: Any) -> None:
+    path = tmp_path / "image.png"
+    path.write_bytes(b"snapshot")
+    console, _ = _console()
+    with create_pipe_input() as pipe:
+        session = CliInputSession(
+            console, interactive=True, prompt_input=pipe, prompt_output=DummyOutput()
+        )
+        session.configure_images(_upload_loader)
+        task = asyncio.create_task(session.read_chat())
+        pipe.send_text("compare these\x18\x09")
+        await asyncio.sleep(0.05)
+        pipe.send_text(f"{path}\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text("\x1b")
+        await asyncio.sleep(0.1)
+        pipe.send_text("\r")
+        assert await asyncio.wait_for(task, 2) == "compare these"
+        assert session.staged_images == []
+
+
+async def test_picker_done_selects_images_across_directories(tmp_path: Any) -> None:
+    first = tmp_path / "one.png"
+    directory = tmp_path / "other"
+    directory.mkdir()
+    second = directory / "two image.png"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    console, _ = _console()
+    with create_pipe_input() as pipe:
+        session = CliInputSession(
+            console, interactive=True, prompt_input=pipe, prompt_output=DummyOutput()
+        )
+        session.configure_images(_upload_loader)
+        task = asyncio.create_task(session.read_chat())
+        pipe.send_text("/img\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text(f"{first}\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text(f"{second}\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text("/done\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text("\r")
+        assert await asyncio.wait_for(task, 2) == ""
+        assert [item.filename for item in session.staged_images] == ["one.png", "two image.png"]
+        assert session._prompt_session is not None
+        assert "/img" not in session._prompt_session.history.get_strings()
+
+
+async def test_ctrl_c_clears_image_only_draft(tmp_path: Any) -> None:
+    path = tmp_path / "image.png"
+    path.write_bytes(b"snapshot")
+    console, _ = _console()
+    with create_pipe_input() as pipe:
+        session = CliInputSession(
+            console, interactive=True, prompt_input=pipe, prompt_output=DummyOutput()
+        )
+        session.configure_images(_upload_loader)
+        await session._select_images(str(path))
+        task = asyncio.create_task(session.read_chat())
+        pipe.send_text("\x03continue\r")
+        assert await asyncio.wait_for(task, 1) == "continue"
+        assert session.staged_images == []
+
+
+async def test_restored_text_is_editable_and_uppercase_img_is_not_recalled() -> None:
+    from ricky.interfaces.cli.image_picker import ChatHistory
+
+    history = ChatHistory()
+    history.append_string('/IMG "private image.png"')
+    history.append_string("actual question")
+    assert history.get_strings() == ["actual question"]
+    console, _ = _console()
+    with create_pipe_input() as pipe:
+        session = CliInputSession(
+            console, interactive=True, prompt_input=pipe, prompt_output=DummyOutput()
+        )
+        session.restore_draft("original")
+        task = asyncio.create_task(session.read_chat())
+        pipe.send_text(" revised\r")
+        assert await asyncio.wait_for(task, 1) == "original revised"

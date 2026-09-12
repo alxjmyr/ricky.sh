@@ -21,7 +21,10 @@ from ricky.agent.events import (
     TurnFinishedEvent,
     UserInteractionRequiredEvent,
 )
-from ricky.config import RickySettings
+from ricky.attachments import StoredAttachment, read_stored_attachment
+from ricky.config import RickySettings, user_data_path
+from ricky.llm import ImagePart, SupportsMediaResolver, TextPart, UserContent
+from ricky.media import SessionMediaStore, restore_image_upload
 from ricky.owned_operation import run_with_lease_heartbeat
 from ricky.profiles import ProfileScope
 from ricky.sessions.store import SessionStore
@@ -71,9 +74,10 @@ class PersistentTurnService:
     async def run_turn(
         self,
         session_id: str,
-        user_input: str,
+        user_input: str | UserContent,
         *,
         owner: str,
+        images: list[StoredAttachment] | None = None,
         inbound_ref: str | None = None,
         event_sink: EventSink | None = None,
         extra_system_sections: Mapping[str, str] | None = None,
@@ -89,6 +93,8 @@ class PersistentTurnService:
         turn: StoredTurn | None = None
         turn_started = False
         observable = False
+        admitted_ids: set[str] = set()
+        session = None
         try:
             stored = await self.store.get(session_id, scope=self.profile_scope)
             if stored.session.active_workflow is not None:
@@ -132,12 +138,53 @@ class PersistentTurnService:
                         # authoritative. Release them before exposing the session to the loop.
                         await runtime.durable_tasks.release_session_leases(session.id)
                         session.active_task_leases.clear()
+                        turn_input = user_input
+                        if images:
+                            uploads = []
+                            for image in images:
+                                content = await asyncio.to_thread(
+                                    read_stored_attachment,
+                                    image,
+                                    user_root=user_data_path(self.settings),
+                                )
+                                uploads.append(
+                                    await asyncio.to_thread(
+                                        restore_image_upload,
+                                        filename=image.filename,
+                                        content=content,
+                                    )
+                                )
+                            records = await runtime.capabilities.session_media.admit_images(
+                                session, images=uploads, retention="conversation"
+                            )
+                            admitted_ids.update(record.id for record in records)
+                            parts = (
+                                [TextPart(text=user_input)]
+                                if isinstance(user_input, str) and user_input
+                                else list(user_input.parts)
+                                if isinstance(user_input, UserContent)
+                                else []
+                            )
+                            turn_input = UserContent(
+                                parts=[
+                                    *parts,
+                                    *(ImagePart(artifact=record.reference()) for record in records),
+                                ]
+                            )
+                        if session.media and isinstance(runtime.provider, SupportsMediaResolver):
+                            runtime.provider.bind_media_resolver(
+                                runtime.capabilities.session_media.resolver(
+                                    session,
+                                    provider=session.provider,
+                                    profile_scope=session.profile_scope,
+                                )
+                            )
                         if extra_system_sections is None:
-                            events = runtime.agent_loop.run_turn(session, user_input)
+                            events = runtime.agent_loop.run_turn(session, turn_input)
                         else:
                             events = runtime.agent_loop.run_turn(
                                 session,
-                                user_input,
+                                turn_input,
                                 extra_system_sections=extra_system_sections,
                             )
                         async for event in events:
@@ -174,6 +221,13 @@ class PersistentTurnService:
         except BaseException as exc:
             if turn_started and turn is not None:
                 await self._finalize_failed_turn(lease, turn, exc, observable)
+            if admitted_ids and session is not None:
+                with suppress(Exception):
+                    current = await self.store.get(session_id, scope=self.profile_scope)
+                    uncommitted = admitted_ids - {record.id for record in current.session.media}
+                    await SessionMediaStore.create(self.settings, session_id).remove_records(
+                        session, uncommitted
+                    )
             raise
         finally:
             with suppress(Exception):

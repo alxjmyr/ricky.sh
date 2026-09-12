@@ -3,26 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.formatted_text import HTML, AnyFormattedText
-from prompt_toolkit.history import DummyHistory, InMemoryHistory
+from prompt_toolkit.history import DummyHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from rich.text import Text
+
+from ricky.interfaces.cli.image_picker import ChatHistory, OpenImagePicker, pick_images
+from ricky.media import SessionMediaError
 
 if TYPE_CHECKING:
     from prompt_toolkit.input import Input
     from prompt_toolkit.output import Output
     from rich.console import Console
 
+    from ricky.media import ImageUpload
+
 
 CHAT_COMMANDS: tuple[str, ...] = (
     "/help",
+    "/img",
     "/debug",
     "/tasks",
     "/context",
@@ -40,6 +48,7 @@ CHAT_COMMANDS: tuple[str, ...] = (
 
 _COMMAND_DESCRIPTIONS = {
     "/help": "show commands",
+    "/img": "attach or manage images",
     "/debug": "toggle verbose event rendering",
     "/tasks": "show temporary tasks",
     "/context": "inspect assembled context",
@@ -54,7 +63,9 @@ _COMMAND_DESCRIPTIONS = {
     "/exit": "exit chat",
     "/q": "exit chat",
 }
-_CHAT_TOOLBAR = " Enter send · Ctrl+J newline · Ctrl+R history · Ctrl+X Ctrl+E editor "
+_CHAT_TOOLBAR = (
+    " Enter send · Ctrl+J newline · Ctrl+R history · Ctrl+X Ctrl+E editor · Ctrl+X Ctrl+I images "
+)
 
 
 class ChatCompleter(Completer):
@@ -94,7 +105,7 @@ class ChatCompleter(Completer):
                     yield Completion(skill, start_position=-len(fragment), display_meta="skill")
 
 
-def chat_key_bindings() -> KeyBindings:
+def chat_key_bindings(clear_images: Callable[[], bool] | None = None) -> KeyBindings:
     """Return Ricky's portable multiline editing bindings."""
     bindings = KeyBindings()
 
@@ -141,10 +152,15 @@ def chat_key_bindings() -> KeyBindings:
     @bindings.add("c-c")
     def clear_or_interrupt(event: object) -> None:
         buffer = event.current_buffer  # type: ignore[attr-defined]
-        if buffer.text:
+        had_images = clear_images() if clear_images is not None else False
+        if buffer.text or had_images:
             buffer.reset()
         else:
             event.app.exit(exception=KeyboardInterrupt())  # type: ignore[attr-defined]
+
+    @bindings.add("c-x", "c-i")
+    def open_images(event: object) -> None:
+        event.app.exit(exception=OpenImagePicker(event.current_buffer.text))  # type: ignore[attr-defined]
 
     @bindings.add("c-x", "c-e")
     def edit_in_external_editor(event: object) -> None:
@@ -181,12 +197,18 @@ class CliInputSession:
             self._stdin.isatty() and console.is_terminal if interactive is None else interactive
         )
         self._completer = ChatCompleter()
+        self.staged_images: list[ImageUpload] = []
+        self._image_loader: Callable[[Path], ImageUpload] | None = None
+        self._max_images = 10
+        self._draft = ""
+        self._prompt_input = prompt_input
+        self._prompt_output = prompt_output
         self._prompt_session: PromptSession[str] | None = None
         self._line_prompt_session: PromptSession[str] | None = None
         self._secret_prompt_session: PromptSession[str] | None = None
         if self._interactive:
             self._prompt_session = PromptSession(
-                history=InMemoryHistory(),
+                history=ChatHistory(),
                 multiline=True,
                 wrap_lines=True,
                 enable_history_search=True,
@@ -195,7 +217,7 @@ class CliInputSession:
                 completer=self._completer,
                 complete_while_typing=False,
                 reserve_space_for_menu=6,
-                key_bindings=chat_key_bindings(),
+                key_bindings=chat_key_bindings(self.clear_images),
                 input=prompt_input,
                 output=prompt_output,
             )
@@ -224,16 +246,98 @@ class CliInputSession:
         """Configure completion candidates for the current CLI surface."""
         self._completer.configure(commands=commands, skills=skills)
 
+    def configure_images(
+        self, loader: Callable[[Path], ImageUpload], *, max_images: int = 10
+    ) -> None:
+        """Bind admission policy without making terminal input own session storage."""
+        self._image_loader = loader
+        self._max_images = max_images
+
+    def clear_images(self) -> bool:
+        """Clear the draft attachment set, reporting whether anything was discarded."""
+        had_images = bool(self.staged_images)
+        self.staged_images.clear()
+        return had_images
+
+    def restore_draft(self, text: str) -> None:
+        """Restore editable text after request admission fails."""
+        self._draft = text
+
+    def _toolbar(self) -> str:
+        images = "  ".join(f"[{i}] {item.filename}" for i, item in enumerate(self.staged_images, 1))
+        return (f" Images: {images}\n" if images else "") + _CHAT_TOOLBAR
+
     async def read_chat(self) -> str:
-        """Read one possibly multiline chat prompt."""
-        if self._prompt_session is None:
-            return await self._read_plain_line("[bold cyan]ricky>[/bold cyan] ")
-        return await self._prompt_session.prompt_async(
-            HTML("<b><ansicyan>ricky&gt;</ansicyan></b> "),
-            multiline=True,
-            completer=self._completer,
-            bottom_toolbar=_CHAT_TOOLBAR,
-        )
+        """Read a draft, staging attachment commands without submitting or recalling them."""
+        while True:
+            draft, self._draft = self._draft, ""
+            try:
+                if self._prompt_session is None:
+                    if self.staged_images:
+                        self._console.print(self._toolbar(), markup=False)
+                    if draft:
+                        self._console.print(f"Unsent text: {draft}", markup=False)
+                    text = await self._read_plain_line("[bold cyan]ricky>[/bold cyan] ")
+                else:
+                    text = await self._prompt_session.prompt_async(
+                        HTML("<b><ansicyan>ricky&gt;</ansicyan></b> "),
+                        default=draft,
+                        multiline=True,
+                        completer=self._completer,
+                        bottom_toolbar=self._toolbar,
+                    )
+            except OpenImagePicker as request:
+                self._draft = request.draft
+                await self._select_images("")
+                continue
+            command, _, paths = text.strip().partition(" ")
+            if command.lower() != "/img":
+                return text
+            await self._select_images(paths)
+
+    async def _select_images(self, paths: str) -> None:
+        loader = self._image_loader
+        if loader is None:
+            self._console.print("Image attachments are unavailable in this input.")
+            return
+        try:
+            if paths:
+                if paths.startswith("/remove "):
+                    index = int(paths.removeprefix("/remove ")) - 1
+                    if index < 0 or index >= len(self.staged_images):
+                        raise ValueError("Select an existing image number.")
+                    self.staged_images.pop(index)
+                    return
+                names = shlex.split(paths)
+                if len(self.staged_images) + len(names) > self._max_images:
+                    raise ValueError(f"Attach at most {self._max_images} images per message.")
+                selected = await asyncio.to_thread(
+                    lambda: [loader(Path(name).expanduser()) for name in names]
+                )
+                self.staged_images.extend(selected)
+            elif not self.interactive:
+                self._console.print(
+                    "Use /img PATH [PATH ...]; quote paths with spaces. "
+                    "/img /remove N removes an image."
+                )
+            else:
+                self.staged_images = await pick_images(
+                    self.staged_images,
+                    loader=loader,
+                    max_images=self._max_images,
+                    console=self._console,
+                    prompt_input=self._prompt_input,
+                    prompt_output=self._prompt_output,
+                )
+            for item in self.staged_images:
+                if item.resized:
+                    self._console.print(
+                        f"Resized {item.filename} to {item.width} × {item.height} "
+                        "to fit image limits.",
+                        markup=False,
+                    )
+        except (OSError, ValueError, SessionMediaError) as exc:
+            self._console.print(str(exc), markup=False, style="yellow")
 
     async def read_line(self, prompt: str) -> str:
         """Read one single-line answer for a permission or selection prompt."""

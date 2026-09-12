@@ -256,7 +256,11 @@ class ContextMediaSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_byte_limit: int = Field(default=25_000_000, ge=1, le=1_000_000_000)
-    request_image_limit: int = Field(default=2, ge=1, le=20)
+    upload_image_limit: int = Field(default=10, ge=1, le=10)
+    upload_image_byte_limit: int = Field(default=20_000_000, ge=1, le=100_000_000)
+    upload_image_pixel_limit: int = Field(default=40_000_000, ge=1, le=80_000_000)
+    request_image_limit: int = Field(default=20, ge=1, le=20)
+    request_browser_image_limit: int = Field(default=2, ge=1, le=20)
     request_image_byte_limit: int = Field(default=10_000_000, ge=1, le=100_000_000)
     request_image_pixel_limit: int = Field(default=8_000_000, ge=1, le=100_000_000)
     default_image_token_estimate: int = Field(default=8_192, ge=1, le=1_000_000)
@@ -626,6 +630,7 @@ class TelegramAccountSettings(BaseModel):
 
     bot_token: SecretStr
     api_base_url: str = Field(default="https://api.telegram.org", min_length=1, max_length=500)
+    media_group_wait_seconds: float = Field(default=2.0, ge=0.1, le=10.0)
     long_poll_timeout_seconds: int = Field(default=30, ge=0, le=50)
     allowed_sender_ids: list[str] = Field(default_factory=list)
     allowed_destination_ids: list[str] = Field(default_factory=list)

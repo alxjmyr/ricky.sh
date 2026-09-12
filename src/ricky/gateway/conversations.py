@@ -577,10 +577,13 @@ class ConversationCoordinator:
                 ),
             ),
         )
+        inbound = await self.messaging.get_inbox(inbound.id)
         conversation: Conversation | None = None
         base_revision: int | None = None
         try:
-            rotates = inbound.text.strip() == "/new"
+            rotates = (
+                inbound.text.strip() == "/new" and not inbound.images and not inbound.image_error
+            )
             conversation = (
                 await self._resolve_rotation(key, inbound.id)
                 if rotates
@@ -726,7 +729,12 @@ class ConversationCoordinator:
         inbound: InboundMessage,
         conversation: Conversation,
     ) -> tuple[str, int]:
-        command = inbound.text.strip()
+        if inbound.image_error:
+            current = await self.sessions.get(
+                conversation.session_id, scope=conversation.profile_scope
+            )
+            return inbound.image_error, current.revision
+        command = inbound.text.strip() if not inbound.images else ""
         command_name = command.split(maxsplit=1)[0] if command else ""
         if command == "/help":
             return (
@@ -854,6 +862,7 @@ class ConversationCoordinator:
                 inbound.text,
                 owner=f"gateway-turn:{inbound.id}",
                 inbound_ref=inbound.id,
+                **({"images": inbound.images} if inbound.images else {}),
                 extra_system_sections={
                     "gateway": gateway_instructions(
                         conversation,
@@ -871,6 +880,8 @@ class ConversationCoordinator:
         response = _final_message(stored.session)
         if response is None:
             raise GatewayConversationError("foreground turn produced no assistant response")
+        if inbound.images_resized:
+            response = "Images were resized to fit the configured limits.\n\n" + response
         return response, stored.revision
 
     async def _has_pending_browser_approval(self, conversation: Conversation) -> bool:

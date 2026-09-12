@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ricky.agent.compaction import ContextCompactor
-from ricky.agent.context import assemble_context
+from ricky.agent.context import assemble_context, validate_user_images
 from ricky.agent.context import inspect_context as build_context_report
 from ricky.agent.context_types import ContextReport
 from ricky.agent.events import (
@@ -43,15 +43,18 @@ from ricky.agent.tool_dispatch import (
 )
 from ricky.config import RickySettings
 from ricky.llm import (
+    ImagePart,
     Message,
     MessageDone,
     Provider,
+    SupportsModelListing,
     TextDelta,
     TextPart,
     ThinkingDelta,
     ThinkingPart,
     ToolCallPart,
     ToolResultPart,
+    UnsupportedInputModalityError,
     Usage,
     UserContent,
 )
@@ -135,6 +138,53 @@ class AgentLoop:
             workflow_registry=self._workflow_registry,
             extra_system_sections=extra_system_sections,
         )
+
+    async def validate_image_input(
+        self,
+        session: AgentSession,
+        user_input: UserContent,
+        *,
+        extra_system_sections: Mapping[str, str] | None = None,
+        max_completion_tokens: int | None = None,
+    ) -> None:
+        """Preflight complete image context before an interface commits its draft."""
+        validate_user_images(session, user_input)
+        checkpoint = session.active_checkpoint()
+        boundary = checkpoint.retained_from_message if checkpoint is not None else 0
+        has_images = any(isinstance(part, ImagePart) for part in user_input.parts) or any(
+            isinstance(part, ImagePart)
+            for message in session.history[boundary:]
+            for part in message.content
+        )
+        if not has_images:
+            return
+        assembly = assemble_context(
+            session,
+            self._registry_for(session),
+            turn_id="image_preflight",
+            iteration=1,
+            user_input=user_input,
+            cwd=self._cwd,
+            skill_registry=self._skill_registry,
+            memory=self._memory,
+            workflow_registry=self._workflow_registry,
+            extra_system_sections=extra_system_sections,
+            max_completion_tokens=max_completion_tokens,
+        )
+        hard_input = assembly.report.budget.hard_input_tokens
+        if hard_input is not None and assembly.report.estimated_input_tokens > hard_input:
+            raise ValueError(
+                "Image context exceeds the model's available input budget. "
+                "Remove draft attachments, compact or clear context (/new in Telegram)."
+            )
+        if isinstance(self._provider, SupportsModelListing):
+            models = await self._provider.list_models()
+            model = next((item for item in models if item.id == session.model), None)
+            if model is not None and "image" not in model.input_modalities:
+                raise UnsupportedInputModalityError(
+                    f"Model {session.model} does not support image input. "
+                    "Choose an image-capable model or remove attachments and clear image context."
+                )
 
     async def run_turn(
         self,
@@ -231,6 +281,12 @@ class AgentLoop:
 
         last_response_was_empty = False
         try:
+            await self.validate_image_input(
+                session,
+                user_input,
+                extra_system_sections=extra_system_sections,
+                max_completion_tokens=max_completion_tokens_per_request,
+            )
             while iterations < iteration_bound:
                 iterations += 1
                 iteration_registry = self._registry_for(session)

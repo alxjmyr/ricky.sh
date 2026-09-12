@@ -161,6 +161,13 @@ materialization. That switch governs browser screenshots only. Other present or
 future media producers own their own explicit admission policy without changing
 canonical media identity.
 
+Images explicitly selected in CLI chat or sent by an authenticated messaging sender
+use the session's primary profile label and its pinned provider. Selection or sending
+supplies disclosure authority within the existing scope and provider policy. This
+does not grant a tool permission to read additional host files. Normalization removes
+metadata before session admission; storage uses immutable PNG bodies and canonical
+history contains references only.
+
 The `src/ricky/builtins/` tree remains commit-safe, distributed capability
 data. It carries the reserved `bundled` owner, which is never an enabled profile
 and never names a data compartment. Profile-owned capabilities are visible only

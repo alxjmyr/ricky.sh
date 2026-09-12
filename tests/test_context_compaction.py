@@ -907,3 +907,43 @@ def test_boundary_refuses_when_first_uncompacted_turn_is_incomplete() -> None:
 
     with pytest.raises(CompactionRefusedError, match="No useful old prefix"):
         select_compaction_boundary(session, keep_recent_tokens=1)
+
+
+async def test_compaction_recovers_over_limit_upload_context_without_losing_evidence(
+    tmp_path: Path,
+) -> None:
+    from ricky.agent.session import MediaAdmissionEvidence, SessionMediaRecord
+
+    settings = _settings()
+    settings.context.media.request_image_limit = 1
+    session = _long_history(settings)
+    for index, message_index in enumerate((0, 2), start=1):
+        reference = _image().artifact.model_copy(update={"id": f"media_{index:032x}"})
+        session.media.append(
+            SessionMediaRecord(
+                **reference.model_dump(),
+                relative_path=f"{reference.id}.png",
+                provenance="user_upload",
+                retention="conversation",
+                admission=MediaAdmissionEvidence(
+                    disclosure_class="explicit_provider",
+                    admitted_provider=session.provider,
+                    source_owner="personal",
+                ),
+            )
+        )
+        session.history[message_index].content.append(ImagePart(artifact=reference))
+    history_before = session.model_dump_json(include={"history", "media"})
+    provider = ScriptedProvider([_summary_done()])
+    loop = _loop(provider, settings, tmp_path)
+    with pytest.raises(ValueError, match="request image count limit"):
+        loop.inspect_context(session)
+    events = await _compact(loop, session)
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    assert loop.inspect_context(session).projected_image_count == 0
+    assert session.model_dump_json(include={"history", "media"}) == history_before
+    assert not any(
+        isinstance(part, ImagePart)
+        for message in provider.requests[0].messages
+        for part in message.content
+    )

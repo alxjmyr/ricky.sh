@@ -208,7 +208,11 @@ pending input—enter agent requests through `agent.context`. Lossless tool-resu
 offloading uses session-owned artifact references. Semantic compaction replaces
 only the active projection of a complete historical prefix; canonical history
 and prior checkpoints remain evidence. Context projection independently bounds
-image count, bytes, pixels, and estimated image tokens. Compaction uses fixed
+image count, bytes, pixels, and estimated image tokens. Explicit user uploads remain
+in the active projection until clearing or compaction. A complete pending attachment
+set and retained active uploads must fit the request; exceeding a ceiling is an
+actionable rejection, never permission to silently omit uploads. Browser observations
+use a bounded recent projection within the remaining budget. Compaction uses fixed
 metadata-only omission markers and never materializes pixels.
 
 Workflow model and agent steps do not inherit ordinary chat context. They
@@ -302,6 +306,11 @@ durable evidence shows nothing observable; otherwise it becomes `uncertain` or
 - `ricky.messaging` owns the durable inbox, transport cursors and leases, exact
   outbound parts, and delivery orchestration. Concrete adapters cannot invoke
   providers, tools, jobs, executions, or the agent loop.
+- Authenticated inbound image sets are snapshotted before their transport cursor
+  commits. Messaging owns durable album collection and ordering; an invalid member
+  rejects the complete logical message. Persistent session turns admit copies under
+  their own media ownership, so inbox pruning cannot invalidate conversation context.
+  Archived-conversation retention invokes the session owner's media cleanup.
 - The gateway coordinates persistent conversations and bounded foreground
   turns. It also composes recovery, health, audit, and retention through each
   subsystem's public API. The external supervisor restarts the process; Ricky's

@@ -12,7 +12,7 @@ import struct
 import tempfile
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from ricky.agent.session import (
@@ -23,6 +23,9 @@ from ricky.agent.session import (
 from ricky.config import RickySettings, user_data_path
 from ricky.llm import MediaArtifactRef, MediaResolver, ResolvedMedia
 from ricky.profiles import ProfileLabel, ProfileName, ProfileScope
+
+if TYPE_CHECKING:
+    from ricky.media.uploads import ImageUpload
 
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 _MEDIA_ID = re.compile(r"^media_[0-9a-f]{32}$")
@@ -149,6 +152,97 @@ class SessionMediaStore:
                     self._remove_file(relative_path)
                 raise
             return record
+
+    async def admit_images(
+        self,
+        session: AgentSession,
+        *,
+        images: list[ImageUpload],
+        retention: Literal["runtime", "session", "conversation"] = "runtime",
+    ) -> list[SessionMediaRecord]:
+        """Admit a complete explicitly supplied image set or leave no records."""
+        self._require_session(session)
+        limits = self._media_settings
+        if not images or len(images) > limits.upload_image_limit:
+            raise SessionMediaLimitError(
+                f"attach between 1 and {limits.upload_image_limit} images per message"
+            )
+        if len(images) > limits.request_image_limit:
+            raise SessionMediaLimitError("the complete image set exceeds the request image limit")
+        if sum(len(image.content) for image in images) > limits.request_image_byte_limit:
+            raise SessionMediaLimitError("the complete image set exceeds the request byte limit")
+        if sum(image.width * image.height for image in images) > limits.request_image_pixel_limit:
+            raise SessionMediaLimitError("the complete image set exceeds the request pixel limit")
+        records: list[SessionMediaRecord] = []
+        for image in images:
+            if _png_dimensions(image.content) != (image.width, image.height):
+                raise SessionMediaError(f"{image.filename}: normalized image dimensions mismatch")
+            media_id = f"media_{uuid4().hex}"
+            records.append(
+                SessionMediaRecord(
+                    id=media_id,
+                    byte_count=len(image.content),
+                    sha256=hashlib.sha256(image.content).hexdigest(),
+                    width=image.width,
+                    height=image.height,
+                    source_label=ProfileLabel.owned_by(session.profile_scope.primary),
+                    relative_path=f"{media_id}.png",
+                    provenance="user_upload",
+                    retention=retention,
+                    admission=MediaAdmissionEvidence(
+                        disclosure_class="explicit_provider",
+                        admitted_provider=session.provider,
+                        source_owner=session.profile_scope.primary,
+                    ),
+                )
+            )
+
+        def write_batch() -> None:
+            try:
+                for image, record in zip(images, records, strict=True):
+                    self._write_atomic(record.relative_path, image.content)
+            except BaseException:
+                for record in records:
+                    self._remove_file(record.relative_path)
+                self._remove_empty_namespace()
+                raise
+
+        async with self._lock:
+            if (
+                sum(record.byte_count for record in session.media + records)
+                > limits.session_byte_limit
+            ):
+                raise SessionMediaLimitError(
+                    "images exceed the session byte limit; start a new chat"
+                )
+            if len(session.media) + len(records) > 1_000:
+                raise SessionMediaLimitError("session media manifest is full; start a new chat")
+            operation = asyncio.create_task(asyncio.to_thread(write_batch))
+            interrupted = await _join_namespace_deletion(operation)
+            if interrupted:
+                for record in records:
+                    self._remove_file(record.relative_path)
+                self._remove_empty_namespace()
+                raise asyncio.CancelledError
+            session.media.extend(records)
+        return records
+
+    async def remove_records(self, session: AgentSession, ids: set[str]) -> None:
+        """Roll back a caller's admitted images after a rejected draft."""
+        self._require_session(session)
+        async with self._lock:
+            removed = [record for record in session.media if record.id in ids]
+
+            def remove() -> None:
+                for record in removed:
+                    self._remove_file(record.relative_path)
+                self._remove_empty_namespace()
+
+            operation = asyncio.create_task(asyncio.to_thread(remove))
+            interrupted = await _join_namespace_deletion(operation)
+            session.media = [record for record in session.media if record.id not in ids]
+            if interrupted:
+                raise asyncio.CancelledError
 
     def resolver(
         self,

@@ -198,7 +198,7 @@ persistent profiles. CDP attachment and user handoff are unavailable in the back
 
 The guarded transaction surface supports semantic interactions, protected fills when the gateway
 was locally started with the required vault unlocked, task-artifact uploads, downloads, and
-semantic-first coordinate fallback. Gateway inbound messages are text-only. To
+semantic-first coordinate fallback. Gateway messages can include user-uploaded images. To
 upload a file, first store it as an in-scope durable-task artifact and authorize its exact id in
 the form `task/<profile>/<task-id>/<artifact-path>`. Compilation pins its size and SHA-256 digest;
 the worker rereads it within the browser byte budgets and rejects it if it changed. Arbitrary host
@@ -346,7 +346,7 @@ interaction authority and cannot activate a target classified as consequential. 
 provider allowlist does not approve browser effects.
 
 Masked screenshots remain in private session storage until the resident runtime closes or `/clear`
-starts a fresh session. At most the latest two retained images are projected into one model
+starts a fresh session. At most the latest two retained browser images are projected into one model
 request, subject to byte, pixel, token, and session-storage ceilings.
 
 ## Hand control to the user

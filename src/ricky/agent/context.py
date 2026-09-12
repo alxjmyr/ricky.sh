@@ -146,6 +146,41 @@ def inspect_context(
     return report
 
 
+def validate_user_images(session: AgentSession, user_input: UserContent) -> None:
+    """Reject a draft whose complete upload context cannot fit the request."""
+    settings = ContextSettings.model_validate(session.settings_snapshot.get("context", {})).media
+    pending = [part for part in user_input.parts if isinstance(part, ImagePart)]
+    if len(pending) > settings.upload_image_limit:
+        raise ValueError(f"Attach at most {settings.upload_image_limit} images per message.")
+    checkpoint = session.active_checkpoint()
+    boundary = checkpoint.retained_from_message if checkpoint is not None else 0
+    upload_ids = {record.id for record in session.media if record.provenance == "user_upload"}
+    images = [
+        part
+        for message in session.history[boundary:]
+        for part in message.content
+        if isinstance(part, ImagePart) and part.artifact.id in upload_ids
+    ] + pending
+    for value, limit, label in (
+        (len(images), settings.request_image_limit, "count"),
+        (
+            sum(part.artifact.byte_count for part in images),
+            settings.request_image_byte_limit,
+            "byte",
+        ),
+        (
+            sum(part.artifact.width * part.artifact.height for part in images),
+            settings.request_image_pixel_limit,
+            "pixel",
+        ),
+    ):
+        if value > limit:
+            raise ValueError(
+                f"Image context exceeds the request image {label} limit. "
+                "Remove draft attachments, compact or clear context (/new in Telegram)."
+            )
+
+
 def source_history_digest(messages: list[Message]) -> str:
     """Return a stable digest for an exact canonical history prefix."""
     payload = json.dumps(
@@ -227,6 +262,7 @@ def _build_context(
         request,
         projected.contributions,
         projected.pending_user_input_included,
+        enforce_image_limits=enforce_char_limit,
     )
     limit = int(session.settings_snapshot.get("context_char_limit", DEFAULT_CONTEXT_CHAR_LIMIT))
     if enforce_char_limit and report.serialized_chars > limit:
@@ -288,7 +324,7 @@ def _collect_context(
         session.settings_snapshot.get("context", {})
     ).media
     image_limit = media_settings.request_image_limit
-    if pending_image_count > image_limit:
+    if pending_image_count > min(media_settings.upload_image_limit, image_limit):
         raise ValueError("pending user input exceeds the request image limit")
     if pending_image_bytes > media_settings.request_image_byte_limit:
         raise ValueError("pending user input exceeds the request image byte limit")
@@ -457,10 +493,18 @@ def _project_history(
     image_byte_budget: int,
     image_pixel_budget: int,
 ) -> tuple[list[Message], list[tuple[str, int, int]]]:
+    required_image_ids = {
+        record.id for record in session.media if record.provenance == "user_upload"
+    }
+    browser_image_limit = ContextSettings.model_validate(
+        session.settings_snapshot.get("context", {})
+    ).media.request_browser_image_limit
     checkpoint = session.active_checkpoint()
     if checkpoint is None:
         projected = _project_image_parts(
             session.history,
+            required_image_ids=required_image_ids,
+            browser_image_limit=browser_image_limit,
             image_slots=image_slots,
             image_byte_budget=image_byte_budget,
             image_pixel_budget=image_pixel_budget,
@@ -506,6 +550,8 @@ def _project_history(
     ]
     tail = _project_image_parts(
         session.history[boundary:],
+        required_image_ids=required_image_ids,
+        browser_image_limit=browser_image_limit,
         image_slots=image_slots,
         image_byte_budget=image_byte_budget,
         image_pixel_budget=image_pixel_budget,
@@ -539,21 +585,31 @@ def _history_contributions(messages: list[Message]) -> list[tuple[str, int, int]
 def _project_image_parts(
     messages: list[Message],
     *,
+    required_image_ids: set[str],
+    browser_image_limit: int,
     image_slots: int,
     image_byte_budget: int,
     image_pixel_budget: int,
 ) -> list[Message]:
-    """Keep the newest history suffix that fits every request image ceiling."""
+    """Retain uploads and bound the newest tool-produced image suffix."""
     remaining_slots = image_slots
     remaining_bytes = image_byte_budget
     remaining_pixels = image_pixel_budget
     keep: set[tuple[int, int]] = set()
+    for message_index, message in enumerate(messages):
+        for part_index, part in enumerate(message.content):
+            if isinstance(part, ImagePart) and part.artifact.id in required_image_ids:
+                keep.add((message_index, part_index))
+                remaining_slots -= 1
+                remaining_bytes -= part.artifact.byte_count
+                remaining_pixels -= part.artifact.width * part.artifact.height
+    remaining_slots = min(remaining_slots, browser_image_limit)
     exhausted = False
     for message_index in range(len(messages) - 1, -1, -1):
         message = messages[message_index]
         for part_index in range(len(message.content) - 1, -1, -1):
             part = message.content[part_index]
-            if not isinstance(part, ImagePart):
+            if not isinstance(part, ImagePart) or (message_index, part_index) in keep:
                 continue
             pixels = part.artifact.width * part.artifact.height
             if (
@@ -596,6 +652,8 @@ def _account_request(
     request: CompletionRequest,
     contributions: list[tuple[str, int, int]],
     pending_user_input_included: bool,
+    *,
+    enforce_image_limits: bool = True,
 ) -> ContextReport:
     settings = ContextSettings.model_validate(session.settings_snapshot.get("context", {}))
     serialized_chars = len(serialize_canonical_request(request))
@@ -607,12 +665,21 @@ def _account_request(
     ]
     projected_image_bytes = sum(part.artifact.byte_count for part in image_parts)
     projected_image_pixels = sum(part.artifact.width * part.artifact.height for part in image_parts)
-    if len(image_parts) > settings.media.request_image_limit:
-        raise ValueError("context exceeds the request image count limit")
-    if projected_image_bytes > settings.media.request_image_byte_limit:
-        raise ValueError("context exceeds the request image byte limit")
-    if projected_image_pixels > settings.media.request_image_pixel_limit:
-        raise ValueError("context exceeds the request image pixel limit")
+    if enforce_image_limits and len(image_parts) > settings.media.request_image_limit:
+        raise ValueError(
+            "context exceeds the request image count limit; "
+            "compact or clear context (/new in Telegram)"
+        )
+    if enforce_image_limits and projected_image_bytes > settings.media.request_image_byte_limit:
+        raise ValueError(
+            "context exceeds the request image byte limit; "
+            "compact or clear context (/new in Telegram)"
+        )
+    if enforce_image_limits and projected_image_pixels > settings.media.request_image_pixel_limit:
+        raise ValueError(
+            "context exceeds the request image pixel limit; "
+            "compact or clear context (/new in Telegram)"
+        )
     estimated_image_tokens = len(image_parts) * session.model_context.image_token_estimate
     totals: dict[str, tuple[int, int]] = {name: (0, 0) for name in _BASE_SECTIONS}
     extra_order: list[str] = []

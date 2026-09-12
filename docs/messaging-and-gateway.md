@@ -141,9 +141,26 @@ passphrase prevents startup and leaves the complete requested set locked. The op
 vault availability; route scope and capability policy remain authoritative. See
 [Protected values](protected-values.md).
 
-Send your bot a plain-text message. Trusted messages enter a persistent conversation and retain
-context across gateway restarts. Telegram inbound supports text only; unsupported or untrusted
-content is rejected before it can reach a provider or agent runtime.
+Send your bot a message. Trusted messages enter a persistent conversation and retain context
+across gateway restarts. Untrusted content is rejected before it can reach an agent runtime.
+
+## Send images
+
+Attach a photo or an album and put your request in the caption. Ricky processes the caption and
+images as one message and preserves image order. You can also send static PNG, JPEG, or WebP
+images as files. An image without a caption is a complete message and generates a response;
+separately sent text is a separate turn.
+
+Attach up to 10 images per message, subject to model, upload, and context limits. Ricky briefly
+collects album members before responding. If a member arrives after processing has started,
+Ricky asks you to resend the complete album. An invalid or oversized image rejects the complete
+request; Ricky explains the problem instead of answering from a partial set.
+
+Ricky corrects orientation, strips metadata, and reports resizing. Images remain in active
+conversation context across turns and gateway restarts, until compaction removes their turn
+from active context or `/new` starts a fresh conversation. Archived images follow conversation
+retention. The route's pinned model must support image input; Ricky does not switch providers
+automatically. Sending an image explicitly supplies it to that provider within profile policy.
 
 ## Use conversation commands
 
