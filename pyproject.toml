@@ -1,6 +1,6 @@
 [project]
 name = "ricky"
-version = "0.8.0"
+version = "0.8.1"
 description = "A personal agentic assistant and agent harness."
 readme = "README.md"
 requires-python = ">=3.12"
