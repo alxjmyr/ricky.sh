@@ -2022,6 +2022,9 @@ async def chrome_display(monkeypatch: pytest.MonkeyPatch) -> Any:
         assert display_number.strip().isdigit(), "Xvfb did not report a display"
         monkeypatch.setenv("DISPLAY", f":{display_number.decode().strip()}")
         monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+        # Chrome can discover the host's default Wayland socket even without
+        # WAYLAND_DISPLAY. Select X11 so its windows stay on our Xvfb display.
+        monkeypatch.setenv("XDG_SESSION_TYPE", "x11")
         yield
     finally:
         if process.returncode is None:
