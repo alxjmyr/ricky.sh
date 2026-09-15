@@ -109,7 +109,23 @@ def test_gateway_instructions_expose_exact_guardrail_intake_before_delegation() 
     assert "Do not emit raw HTML" in instructions
 
 
-def test_gateway_instructions_require_complete_background_capability_set() -> None:
+@pytest.mark.parametrize(
+    "request_text, capability_names",
+    [
+        (
+            "Decline my conflicting calendar events in the background.",
+            ["builtin.calendar.read", "builtin.calendar.mutate"],
+        ),
+        (
+            "Remember that I prefer concise answers.",
+            ["builtin.memory.read", "builtin.memory.mutate"],
+        ),
+        ("Remember that I prefer concise answers.", []),
+    ],
+)
+def test_gateway_instructions_require_complete_background_capability_set(
+    request_text: str, capability_names: list[str]
+) -> None:
     conversation = Conversation(
         id="conversation_" + "a" * 32,
         key=ConversationKey(
@@ -136,20 +152,13 @@ def test_gateway_instructions_require_complete_background_capability_set() -> No
         destination_id="200",
         sender_id="100",
         platform_message_id="300",
-        text="Decline my conflicting calendar events in the background.",
+        text=request_text,
         received_at=NOW,
         status="pending",
     )
     catalog = GatewayCapabilityCatalog(
         ad_hoc_capabilities=[
-            GatewayCapabilityItem(
-                name="builtin.calendar.read",
-                description="Read calendar events.",
-            ),
-            GatewayCapabilityItem(
-                name="builtin.calendar.mutate",
-                description="Respond to calendar invitations.",
-            ),
+            GatewayCapabilityItem(name=name, description=name) for name in capability_names
         ]
     )
 
@@ -163,6 +172,18 @@ def test_gateway_instructions_require_complete_background_capability_set() -> No
     assert "complete the task end-to-end from persisted task context" in instructions
     assert "Include prerequisite read or discovery capabilities" in instructions
     assert "never assume mutation implies read access" in instructions
+    assert "when the user asks to remember, save, or commit facts" in instructions
+    assert "use the background delegation path in this turn" in instructions
+    assert "Do not ask them to repeat the request" in instructions
+    assert "Persist a concise, self-contained summary" in instructions
+    assert "the worker does not inherit this conversation" in instructions
+    assert "builtin.memory.read and builtin.memory.mutate only when both are listed" in instructions
+    assert "recall and merge any existing note" in instructions
+    assert "verify the saved note before completing the task" in instructions
+    assert "Follow delegate_task's configured confirmation flow" in instructions
+    assert "queued, not remembered" in instructions
+    assert "If the required capabilities are unavailable, explain that limitation" in instructions
+    assert "Questions about existing memories remain read-only recall requests" in instructions
 
 
 def _settings(tmp_path: Path) -> RickySettings:

@@ -334,6 +334,40 @@ async def test_picker_done_selects_images_across_directories(tmp_path: Any) -> N
         assert "/img" not in session._prompt_session.history.get_strings()
 
 
+@pytest.mark.parametrize("start", ["~/", "./", "absolute"])
+async def test_picker_completes_directories_before_images(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, start: str
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    directory = tmp_path / "photos" / "summer trip"
+    directory.mkdir(parents=True)
+    (tmp_path / "notes.txt").write_text("not an image")
+    (directory / "notes.txt").write_text("not an image")
+    (directory / "picture.PNG").write_bytes(b"snapshot")
+    console, output = _console()
+    with create_pipe_input() as pipe:
+        session = CliInputSession(
+            console, interactive=True, prompt_input=pipe, prompt_output=DummyOutput()
+        )
+        session.configure_images(_upload_loader)
+        task = asyncio.create_task(session.read_chat())
+        pipe.send_text("/img\r")
+        await asyncio.sleep(0.05)
+        pipe.send_text(f"{tmp_path}/" if start == "absolute" else start)
+        # Each parent contains only directories or unsupported files. Tab must
+        # complete each directory before it can reach the image, including spaces.
+        for keys in ("\t", "/", "\t", "/", "\t", "\r", "/done\r", "\r"):
+            await asyncio.sleep(0.05)
+            pipe.send_text(keys)
+        assert await asyncio.wait_for(task, 2) == ""
+        assert [item.filename for item in session.staged_images] == [
+            "picture.PNG"
+        ], output.getvalue()
+        assert session.staged_images[0].content == b"snapshot"
+        assert "Is a directory" not in output.getvalue()
+
+
 async def test_ctrl_c_clears_image_only_draft(tmp_path: Any) -> None:
     path = tmp_path / "image.png"
     path.write_bytes(b"snapshot")

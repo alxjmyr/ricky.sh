@@ -19,6 +19,13 @@ Review the destination profile, title, summary, and body. You can also ask natur
 Remember in my work profile that Northwind's renewal owner is Dana Chen.
 ```
 
+In gateway conversations, a natural-language request to save a fact is handed to a
+background task. You do not need to specify “in the background.” Ricky summarizes
+the relevant conversation context for the worker, which recalls and merges existing
+notes before saving. This requires the `builtin.memory.read` and
+`builtin.memory.mutate` background capabilities and follows the configured delegation
+confirmation rules. A queued task does not mean the fact has been saved yet.
+
 Run `/remember` without text to review the conversation for useful facts. Ricky proposes notes but
 does not save them during that turn. Reply with the items you approve or the edits you want.
 

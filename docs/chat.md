@@ -108,8 +108,10 @@ needed content.
 
 ## Attach images
 
-Enter `/img` to open the terminal image picker. Type a path and use `Tab` to complete directories
-and image filenames. Select additional files from any directory, then enter `/done` to return to
+Enter `/img` to open the terminal image picker. Start with `~/`, a relative path, or an absolute
+path and use `Tab` to complete directories, including those without images. Add `/` to continue
+into a selected directory and complete image filenames. Select additional files from any
+directory, then enter `/done` to return to
 the composer. `/remove N` removes a selected image. `Esc` or `/cancel` discards picker changes.
 Use `Ctrl+X Ctrl+I` to open the same picker while preserving text you have already written.
 

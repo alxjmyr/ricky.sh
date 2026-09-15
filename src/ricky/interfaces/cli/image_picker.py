@@ -61,7 +61,8 @@ async def pick_images(
         completer=PathCompleter(
             expanduser=True,
             file_filter=lambda filename: (
-                Path(filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+                Path(filename).is_dir()
+                or Path(filename).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
             ),
         ),
         complete_while_typing=True,
