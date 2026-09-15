@@ -6,8 +6,8 @@
 [] - PERMISSIONS | AUTH : properly fix internal task tracker permissions. update to better delineate between risk, effect class, authorization (i.e. read_only, none, ambient vs mutating, ricky_state, explicit.)
 [] - GENERAL: Tasks, and similar things need "human readable name" + the task ID
 [] - STATE STORES: session / task database purging (i.e. clear out or archive completed, processes, finished tansactions after set times)
-[] - MODELS / AGENT: Make Ricky Multi Modal (i.e. image / video / audio inputs)
-	* Partly complete for browser... need to integrate w/ gateway, cli, jobs, etc
+[] - MODELS / AGENT: Multi modal (image response)
+	* Confirm images as input for jobs / background work
 [] - DOCUMENTATION: Create interactive architecture diagram & audit / explore current state architecture
 [] - GATEWAY: Redesign gateway configuration around profiles
 	* Profile specific job message / notification routing
