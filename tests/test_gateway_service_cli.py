@@ -5,10 +5,57 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import typer
 
 from gateway_ops_support import FakeRunner, settings
+from ricky.gateway.errors import GatewayConfigurationError
 from ricky.gateway.service_unit import MARKER, GatewayServiceUnit, ServiceUnitError
+from ricky.gateway.vault_bootstrap import GatewayVaultBootstrapError
 from ricky.interfaces.cli import gateway as gateway_cli
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_exit"),
+    [
+        (GatewayConfigurationError("capability builtin.browser.read is unavailable"), 78),
+        (GatewayVaultBootstrapError("requested gateway vault unlock failed"), 78),
+        (ValueError("runtime failure"), 1),
+        (OSError("temporary I/O failure"), 1),
+    ],
+)
+def test_gateway_exit_classification_preserves_runtime_restarts(
+    tmp_path: Path, failure: Exception, expected_exit: int, capsys
+) -> None:
+    async def fail(_renderer) -> None:
+        raise failure
+
+    with pytest.raises(typer.Exit) as caught:
+        gateway_cli._run_gateway_command(fail)
+
+    assert caught.value.exit_code == expected_exit
+    assert str(failure) in capsys.readouterr().out
+    unit = GatewayServiceUnit(
+        settings(tmp_path), project_root=tmp_path, executable="/usr/bin/ricky"
+    )
+    assert "RestartPreventExitStatus=78" in unit.render()
+    assert "Restart=always" in unit.render()
+
+
+def test_invalid_gateway_settings_exit_without_retry_or_configuration_input(
+    monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    def invalid_settings():
+        raise ValueError("sensitive-invalid-configuration-input")
+
+    monkeypatch.setattr(gateway_cli, "load_settings", invalid_settings)
+
+    with pytest.raises(typer.Exit) as caught:
+        gateway_cli._run_gateway_command(lambda renderer: gateway_cli._run_service((), renderer))
+
+    assert caught.value.exit_code == 78
+    output = capsys.readouterr().out
+    assert "gateway configuration could not be loaded" in output
+    assert "sensitive-invalid-configuration-input" not in output
 
 
 class RecordingRenderer:

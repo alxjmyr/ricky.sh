@@ -17,6 +17,7 @@ from ricky.gateway.conversations import (
     ConversationCoordinator,
     GatewayNotificationService,
 )
+from ricky.gateway.errors import GatewayConfigurationError
 from ricky.gateway.health import GatewayHealth
 from ricky.gateway.lock import GatewayLock, GatewayLockError
 from ricky.gateway.recovery import GatewayRecovery
@@ -115,7 +116,9 @@ class GatewayService:
         """
 
         if not self.settings.gateway.enabled:
-            raise ValueError("gateway.enabled must be true to run the gateway service")
+            raise GatewayConfigurationError(
+                "gateway.enabled must be true to run the gateway service"
+            )
         stop_event = stop or asyncio.Event()
         try:
             owner = self.lock.acquire()
@@ -125,12 +128,14 @@ class GatewayService:
             raise ValueError(str(exc)) from exc
         run_id = f"gateway_run_{uuid4().hex}"
         primary_error: BaseException | None = None
+        started = False
         try:
             if self.startup_hook is not None:
                 await self.startup_hook()
             await self._emit("start", "service", f"gateway locked by pid {owner.pid}")
             await self._startup_recovery()
             accounts = await self._prepare_loops()
+            started = True
             await self._publish_lifecycle(run_id, "started")
             await self._run_loops(stop_event, accounts)
         except BaseException as exc:
@@ -139,7 +144,7 @@ class GatewayService:
             cleanup_errors: list[BaseException] = []
             try:
                 for cleanup in (
-                    self._publish_lifecycle(run_id, "stopping"),
+                    *((self._publish_lifecycle(run_id, "stopping"),) if started else ()),
                     self._emit("shutdown", "service", "gateway stopped and released its lock"),
                     self.messaging.aclose(),
                     *(
@@ -193,19 +198,23 @@ class GatewayService:
         await self.conversations.initialize()
         capability_failures = [
             check
-            for check in await GatewayHealth(self.settings).capability_checks()
+            for check in await GatewayHealth(
+                self.settings, protected_values=self.protected_values
+            ).capability_checks()
             if check.status == "fail"
         ]
         if capability_failures:
-            details = "; ".join(check.detail for check in capability_failures)
-            raise ValueError(f"gateway capability validation failed: {details}")
+            details = "; ".join(f"{check.name}: {check.detail}" for check in capability_failures)
+            raise GatewayConfigurationError(f"gateway capability validation failed: {details}")
         accounts = [
             name
             for name, config in self.settings.messaging.telegram_accounts.items()
             if config.enabled
         ]
         if not accounts:
-            raise ValueError("gateway service requires at least one enabled messaging account")
+            raise GatewayConfigurationError(
+                "gateway service requires at least one enabled messaging account"
+            )
         return accounts
 
     async def _run_loops(self, stop_event: asyncio.Event, accounts: list[str]) -> None:

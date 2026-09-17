@@ -47,6 +47,7 @@ from ricky.notifications.routes import RouteError, RoutePolicy
 from ricky.notifications.store import NotificationStore
 from ricky.profiles import ProfileLabel
 from ricky.project_scope import ProjectScope
+from ricky.protected_values import ResidentProtectedValueRegistry
 from ricky.runtime.composition import CAPABILITY_SPECS, build_capability_runtime
 from ricky.sessions.store import SessionStore
 from ricky.tools import StateGuardRegistry
@@ -143,6 +144,7 @@ class GatewayHealth:
         jobs: JobRunStore | None = None,
         authority: AuthorityStore | None = None,
         unit: GatewayServiceUnit | None = None,
+        protected_values: ResidentProtectedValueRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.profile_scope = settings.resolve_profile_scope(
@@ -158,6 +160,7 @@ class GatewayHealth:
         self.jobs = jobs or JobRunStore(settings)
         self.authority = authority or AuthorityStore(settings)
         self.unit = unit or GatewayServiceUnit(settings, project_root=project_root)
+        self.protected_values = protected_values
 
     async def status(self, *, now: datetime | None = None) -> GatewayStatus:
         """Build one bounded operational snapshot from durable state only."""
@@ -420,6 +423,7 @@ class GatewayHealth:
                     session=session,
                     project_root=scope.root,
                     project_scope=scope,
+                    protected_value_registry=self.protected_values,
                 ) as runtime:
                     registry = build_capability_registry(
                         gateway_capability_inventory_tools(
@@ -433,6 +437,11 @@ class GatewayHealth:
                             [DurableTaskStateGuard(runtime.durable_tasks)]
                         ),
                     )
+                    # Preserve background descriptors without making them callable
+                    # by the foreground gateway or starting a browser for doctor.
+                    for definition in runtime.capability_registry.definitions():
+                        if registry.get(definition.id) is None:
+                            registry.register(definition)
                     diagnostics = [
                         *validate_capability_inventory(
                             registry,

@@ -167,6 +167,10 @@ ricky capability validate
 
 These commands show installed resource mappings, provenance, risk, unattended eligibility,
 confirmation requirements, guardrails, and resolved standing policy.
+Browser inventory follows the background browser switches, without opening an interactive
+browser. Listing, showing, validating, and gateway health checks preserve the same background
+browser descriptors. A separate CLI command cannot borrow the running gateway's vault unlock;
+its inventory omits `builtin.protected_value.use`.
 
 Configure `agents.gateway_foreground` and `agents.ad_hoc_background` independently
 in `ricky.toml`. `exclude_capabilities` removes a capability from eligibility;

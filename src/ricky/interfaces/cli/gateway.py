@@ -14,6 +14,7 @@ from ricky.agent.events import AgentEvent
 from ricky.config import RickySettings, load_settings, user_data_path
 from ricky.gateway import ConversationCoordinator, GatewayService, GatewayStore
 from ricky.gateway.audit import AuditChain, GatewayAudit
+from ricky.gateway.errors import STARTUP_CONFIGURATION_EXIT_CODE, GatewayConfigurationError
 from ricky.gateway.health import DoctorReport, GatewayHealth, GatewayStatus
 from ricky.gateway.lock import GatewayLock, GatewayLockError
 from ricky.gateway.recovery import GatewayRecovery, RecoveryPlan
@@ -21,7 +22,6 @@ from ricky.gateway.retention import GatewayRetention, RetentionPlan
 from ricky.gateway.service import ServiceEvent
 from ricky.gateway.service_unit import MARKER, GatewayServiceUnit, ServiceUnitError
 from ricky.gateway.vault_bootstrap import (
-    STARTUP_UNLOCK_FAILURE_EXIT_CODE,
     GatewayVaultBootstrapError,
     GatewayVaultBootstrapServer,
     consume_gateway_vault_bootstrap,
@@ -251,7 +251,13 @@ def register_gateway_commands(gateway_app: typer.Typer) -> None:
 
 
 async def _run_service(unlock_vault: tuple[str, ...], renderer: CliRenderer) -> None:
-    bootstrap_settings = load_settings()
+    try:
+        bootstrap_settings = load_settings()
+    except ValueError as exc:
+        # Validation errors can contain the original configuration input.
+        raise GatewayConfigurationError(
+            "gateway configuration could not be loaded; run `ricky config` to diagnose"
+        ) from exc
     profiles = _normalize_unlock_profiles(bootstrap_settings, unlock_vault)
     protected_values = ResidentProtectedValueRegistry(bootstrap_settings)
 
@@ -787,9 +793,9 @@ def _run_gateway_command(
     renderer = CliRenderer()
     try:
         asyncio.run(factory(renderer))
-    except GatewayVaultBootstrapError as exc:
+    except (GatewayConfigurationError, GatewayVaultBootstrapError) as exc:
         renderer.render_error(f"Gateway error: {exc}")
-        raise typer.Exit(STARTUP_UNLOCK_FAILURE_EXIT_CODE) from exc
+        raise typer.Exit(STARTUP_CONFIGURATION_EXIT_CODE) from exc
     except (
         GatewayLockError,
         MessagingRuntimeError,

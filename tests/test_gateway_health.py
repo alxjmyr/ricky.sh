@@ -39,6 +39,45 @@ pytestmark = pytest.mark.asyncio
 SECRET = "test-token"
 
 
+async def test_capability_health_preserves_enabled_background_browser_inventory(tmp_path) -> None:
+    config = settings(tmp_path)
+    config = config.model_copy(
+        update={
+            "browser": config.browser.model_copy(
+                update={
+                    "enabled": True,
+                    "background": config.browser.background.model_copy(
+                        update={
+                            "enabled": True,
+                            "read_enabled": True,
+                            "interaction_enabled": True,
+                            "commit_enabled": True,
+                        }
+                    ),
+                }
+            ),
+            "agents": config.agents.model_copy(
+                update={
+                    "ad_hoc_background": config.agents.ad_hoc_background.model_copy(
+                        update={
+                            "guardrail_required_capabilities": [
+                                "builtin.browser.read",
+                                "builtin.browser.interact",
+                                "builtin.browser.commit",
+                            ]
+                        }
+                    )
+                }
+            ),
+        }
+    )
+
+    checks = await GatewayHealth(config).capability_checks()
+
+    assert checks
+    assert all(check.status == "ok" for check in checks), checks
+
+
 def _unit(config, tmp_path: Path) -> GatewayServiceUnit:  # type: ignore[no-untyped-def]
     return GatewayServiceUnit(
         config,

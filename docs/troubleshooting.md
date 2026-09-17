@@ -154,6 +154,26 @@ owning profile's `downloads/browser` directory before trying again. A missing or
 media or download reference must be reacquired from its producing operation rather than replaced
 with a guessed path or ID.
 
+## Gateway startup reports missing browser capabilities
+
+Run `ricky capability list` and `ricky gateway doctor`. Background browser capabilities require
+both `[browser] enabled = true` and the applicable `[browser.background] switches. Enabling an
+interactive browser alone does not enable Telegram background browser work.
+
+If startup fails, the error names the capability that failed validation. Ricky sends its
+stopping notification only after startup validation succeeds. Configuration and requested vault
+unlock failures exit with code 78; the managed service does not retry them. Correct the settings,
+then run `ricky gateway service start`, adding `--unlock-vault PROFILE` if needed. Other runtime
+failures retain the service's automatic restart policy. To stop an older supervised restart
+loop while correcting configuration, run `ricky gateway service stop`.
+
+`builtin.protected_value.use` additionally requires a locally unlocked gateway vault. For
+ordinary browser work that does not fill stored secrets, omit this capability from required
+confirmation and guardrail lists. Browser read, interaction, and commit policies still apply.
+Adding a capability to a guardrail list constrains it; it does not install or enable it.
+Startup checks borrow the gateway's resident unlock only for profiles accessible to each route.
+A separate `ricky gateway doctor` or `ricky capability validate` command runs with locked vaults.
+
 ## A protected value is unavailable
 
 Confirm that `[protected_values] enabled = true` is in the installation `ricky.toml`, then inspect

@@ -22,7 +22,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from ricky.config import RickySettings, find_project_root, user_data_subpath
-from ricky.gateway.vault_bootstrap import STARTUP_UNLOCK_FAILURE_EXIT_CODE
+from ricky.gateway.errors import STARTUP_CONFIGURATION_EXIT_CODE
 
 MARKER = "# Managed by Ricky. Do not edit; run `ricky gateway service install`."
 """Ricky only ever replaces or removes a unit whose first line is this marker."""
@@ -135,7 +135,7 @@ class GatewayServiceUnit:
                 f"WorkingDirectory={root}",
                 f"ExecStart={executable} gateway run",
                 "Restart=always",
-                f"RestartPreventExitStatus={STARTUP_UNLOCK_FAILURE_EXIT_CODE}",
+                f"RestartPreventExitStatus={STARTUP_CONFIGURATION_EXIT_CODE}",
                 f"RestartSec={restart}",
                 f"TimeoutStartSec={start}",
                 f"TimeoutStopSec={stop}",

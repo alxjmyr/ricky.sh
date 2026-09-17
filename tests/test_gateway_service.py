@@ -18,6 +18,7 @@ from ricky.config import (
     RickySettings,
     TelegramAccountSettings,
 )
+from ricky.gateway.errors import GatewayConfigurationError
 from ricky.gateway.health import DoctorCheck, GatewayHealth
 from ricky.gateway.service import GatewayService
 from ricky.profiles import ProfileScope
@@ -377,7 +378,7 @@ async def test_startup_refuses_capability_health_failure_before_loops(
         dispatcher=cast_any(BlockingDispatcher()),
     )
 
-    with pytest.raises(ValueError, match="broken_effect.*effect_kind"):
+    with pytest.raises(GatewayConfigurationError, match="broken_effect.*effect_kind"):
         await service._prepare_loops()
 
     assert conversations.initialized
@@ -613,3 +614,74 @@ async def test_gateway_run_enqueues_and_attempts_delivery_for_each_lifecycle(
     assert run_ids[0] == run_ids[1]
     assert run_ids[2] == run_ids[3]
     assert run_ids[0] != run_ids[2]
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_failed_startup_does_not_send_stopping_or_skip_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cancelled: bool
+) -> None:
+    async def fail_capabilities(self: GatewayHealth) -> tuple[DoctorCheck, ...]:
+        if cancelled:
+            raise asyncio.CancelledError
+        return (
+            DoctorCheck(
+                name="capability builtin.browser.read",
+                status="fail",
+                detail="configured capability is not installed",
+            ),
+        )
+
+    monkeypatch.setattr(GatewayHealth, "capability_checks", fail_capabilities)
+    messaging = LifecycleMessaging()
+    lifecycle = LifecycleNotifications(asyncio.Event())
+    lock = ReacquirableLock()
+    service = GatewayService(
+        _lifecycle_settings(tmp_path),
+        messaging=cast_any(messaging),
+        conversations=cast_any(LifecycleConversations()),
+        dispatcher=cast_any(LifecycleDispatcher()),
+        lifecycle_notifications=cast_any(lifecycle),
+        lock=cast_any(lock),
+    )
+
+    with pytest.raises(
+        asyncio.CancelledError if cancelled else GatewayConfigurationError
+    ) as caught:
+        await service.run()
+
+    if not cancelled:
+        assert "builtin.browser.read" in str(caught.value)
+    assert lifecycle.requests == []
+    assert messaging.delivery_attempts == 0
+    assert messaging.closed
+    assert lock.release_calls == 1
+    assert not lock.held
+
+
+async def test_startup_health_receives_the_owned_vault_registry(tmp_path, monkeypatch) -> None:
+    from ricky.protected_values import ResidentProtectedValueRegistry
+
+    config = _lifecycle_settings(tmp_path)
+    registry = ResidentProtectedValueRegistry(config)
+    checked = False
+
+    async def check_capabilities(self: GatewayHealth) -> tuple[DoctorCheck, ...]:
+        nonlocal checked
+        assert self.protected_values is registry
+        checked = True
+        return ()
+
+    monkeypatch.setattr(GatewayHealth, "capability_checks", check_capabilities)
+    stop = asyncio.Event()
+    service = GatewayService(
+        config,
+        messaging=cast_any(LifecycleMessaging()),
+        conversations=cast_any(LifecycleConversations()),
+        dispatcher=cast_any(LifecycleDispatcher()),
+        lifecycle_notifications=cast_any(LifecycleNotifications(stop)),
+        protected_values=registry,
+    )
+
+    await service.run(stop=stop)
+
+    assert checked

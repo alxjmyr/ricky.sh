@@ -14,8 +14,17 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
+from gateway_ops_support import settings as gateway_settings
 from ricky.agent import AgentSession
-from ricky.config import GatewaySettings, ProtectedValuesSettings, RickySettings, user_data_path
+from ricky.config import (
+    AgentClassSettings,
+    BrowserSettings,
+    GatewaySettings,
+    ProtectedValuesSettings,
+    RickySettings,
+    user_data_path,
+)
+from ricky.gateway.health import GatewayHealth
 from ricky.gateway.lock import GatewayLock
 from ricky.gateway.service_unit import CommandResult
 from ricky.gateway.vault_bootstrap import (
@@ -125,6 +134,71 @@ async def test_capability_runtime_borrows_resident_unlock_without_owning_it(
 
     assert registry.unlocked_profiles == ("personal",)
     await registry.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unlocked_profile", [None, "work", "personal"])
+async def test_gateway_health_borrows_only_route_scoped_resident_unlock(
+    tmp_path: Path, unlocked_profile: str | None
+) -> None:
+    settings = gateway_settings(tmp_path).model_copy(
+        update={
+            "protected_values": _settings(tmp_path).protected_values,
+            "browser": BrowserSettings.model_validate(
+                {
+                    "enabled": True,
+                    "background": {
+                        "enabled": True,
+                        "read_enabled": True,
+                        "interaction_enabled": True,
+                        "protected_values_enabled": True,
+                    },
+                }
+            ),
+            "agents": AgentClassSettings.model_validate(
+                {
+                    "ad_hoc_background": {
+                        "guardrail_required_capabilities": ["builtin.protected_value.use"]
+                    }
+                }
+            ),
+        }
+    )
+    await _initialize_vaults(settings)
+    registry = ResidentProtectedValueRegistry(settings)
+    try:
+        if unlocked_profile is not None:
+            passphrase = (
+                _PERSONAL_PASSPHRASE if unlocked_profile == "personal" else _WORK_PASSPHRASE
+            )
+            await registry.unlock(unlocked_profile, SecretStr(passphrase))
+        before = registry.unlocked_profiles
+        health = GatewayHealth(settings, protected_values=registry)
+
+        checks = await health.capability_checks()
+
+        assert registry.unlocked_profiles == before
+        if unlocked_profile == "personal":
+            assert all(check.status == "ok" for check in checks), checks
+            lease = registry.lease(scope=ProfileScope.create("personal"))
+            try:
+                assert (await lease.status("personal")).unlocked
+            finally:
+                await lease.aclose()
+        else:
+            assert any(
+                check.name == "capability builtin.protected_value.use" and check.status == "fail"
+                for check in checks
+            )
+
+        # A standalone doctor cannot borrow an unlock from another process.
+        standalone = await GatewayHealth(settings).capability_checks()
+        assert any(
+            check.name == "capability builtin.protected_value.use" and check.status == "fail"
+            for check in standalone
+        )
+    finally:
+        await registry.aclose()
 
 
 @pytest.mark.skipif(

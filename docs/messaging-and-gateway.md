@@ -305,6 +305,9 @@ files.
 Vault unlock is process-local. `service restart` without the option deliberately starts locked,
 as does an automatic restart after a crash. Run a local `restart --unlock-vault PROFILE` again when
 you want the replacement process unlocked.
+Startup health checks use that resident unlock within each route's profile scope. Configuration
+validation and requested unlock failures exit with code 78, which the managed service does not
+automatically restart. After correcting the problem, start the service explicitly.
 
 The unit directory defaults to `$XDG_CONFIG_HOME/systemd/user`, or
 `~/.config/systemd/user` when `XDG_CONFIG_HOME` is unset. Override it with a path that resolves to

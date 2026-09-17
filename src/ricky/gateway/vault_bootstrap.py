@@ -17,11 +17,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
 from ricky.config import RickySettings, ensure_private_user_data_root, user_data_path
+from ricky.gateway.errors import STARTUP_CONFIGURATION_EXIT_CODE
 from ricky.gateway.lock import GatewayLock, lock_path
 from ricky.profiles import ProfileName
 from ricky.protected_values import ResidentProtectedValueRegistry
 
-STARTUP_UNLOCK_FAILURE_EXIT_CODE = 78
+STARTUP_UNLOCK_FAILURE_EXIT_CODE = STARTUP_CONFIGURATION_EXIT_CODE
 _PROTOCOL_VERSION = 1
 _MAX_FRAME_BYTES = 262_144
 _MAX_PROFILES = 64

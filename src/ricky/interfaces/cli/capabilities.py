@@ -10,7 +10,6 @@ from typing import Any, Literal
 import typer
 
 from ricky.agent.session import AgentSession
-from ricky.browser import BrowserService
 from ricky.capabilities import (
     CapabilityDiagnostic,
     CapabilityRegistry,
@@ -205,12 +204,10 @@ async def _show(
 
 async def _validate(project: Path | None, renderer: CliRenderer) -> None:
     settings, root, session = _with_inventory(project)
-    browser_factory = BrowserService.create if settings.browser.enabled else None
     async with build_capability_runtime(
         settings,
         session=session,
         project_root=root,
-        browser_factory=browser_factory,
     ) as runtime:
         registry = _complete_registry(runtime)
         diagnostics: list[CapabilityDiagnostic] = []
@@ -259,7 +256,7 @@ def _agent_policy(settings: RickySettings, agent: CapabilityAgent):
 def _complete_registry(runtime: CapabilityRuntime) -> CapabilityRegistry:
     """Add code-constructed gateway controls without opening stores or a provider."""
 
-    return build_capability_registry(
+    registry = build_capability_registry(
         gateway_capability_inventory_tools(
             runtime.tools,
             gateway_control_descriptors(),
@@ -269,3 +266,8 @@ def _complete_registry(runtime: CapabilityRuntime) -> CapabilityRegistry:
         skill_owners=registered_skill_owners(runtime.capability_registry),
         state_guards=StateGuardRegistry([DurableTaskStateGuard(runtime.durable_tasks)]),
     )
+    # Background-only descriptors are deliberately absent from callable tools.
+    for definition in runtime.capability_registry.definitions():
+        if registry.get(definition.id) is None:
+            registry.register(definition)
+    return registry
