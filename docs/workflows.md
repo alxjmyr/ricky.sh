@@ -30,6 +30,18 @@ credentials](integrations.md#connect-google-accounts) in an accessible profile. 
 retry `ricky workflow list` with `--profile` or `--access-profile` as needed. The source path
 identifies the affected workflow; an unavailable tool does not mean that its file is missing.
 
+The bundled email-triage workflow reads whole threads for context, but marks read or
+trashes only each selected search-result message. Other messages in the thread are
+not changed. Message IDs also distinguish job effects when a new message arrives
+in a previously processed thread. Review tasks remain grouped by thread.
+
+When upgrading from thread-based email triage, existing receipts remain valid and
+need no migration. For scheduled jobs that use this workflow, increment the job's
+`context.revision`, validate it, then run `schedule refresh` and `schedule sync`
+with the same profile and project options. Until the changed definition is
+acknowledged, the schedule can report `lineage_required`. Saved workflow runs with
+the old graph cannot resume against the new graph; start a new run instead.
+
 ## Inspect and validate a workflow
 
 Always validate before you run a new or changed workflow:

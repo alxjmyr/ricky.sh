@@ -63,7 +63,7 @@ output = { should_write = false, reason = "Ignore-category noise; no durable fac
 [fixtures.compose-summary]
 output = { text = """# Email triage summary
 
-**Bottom line:** 1 reply parked for review, 1 needs-attention parked, 1 FYI marked read, 1 thread trashed, 1 memory write planned.
+**Bottom line:** 1 reply parked for review, 1 needs-attention parked, 1 FYI marked read, 1 message trashed, 1 memory write planned.
 
 ## Actions
 - Reply draft parked for review (task_0000) to person@example.com re: Please reply — confirms you'll take care of it. Nothing sent yet.

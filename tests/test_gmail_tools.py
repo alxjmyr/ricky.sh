@@ -974,3 +974,124 @@ async def test_download_reconciles_rotated_id_by_unique_mime_type_alone(
     )
     assert written.read_bytes() == content
     assert "m1-report.pdf" in result.content
+
+
+@pytest.mark.real_bundled_resources
+@pytest.mark.parametrize(
+    ("group_id", "step_id", "operation"),
+    [
+        ("process", "mark-action-read", "modify"),
+        ("mark-inform-read", "mark-inform", "modify"),
+        ("trash-ignore", "trash", "trash"),
+    ],
+)
+async def test_triage_message_effects_survive_new_mail_and_legacy_thread_receipts(
+    tmp_path: Path, group_id: str, step_id: str, operation: str
+) -> None:
+    """New messages are distinct effects; exact repeats still never dispatch."""
+    from datetime import UTC, datetime
+
+    from ricky.builtins import bundled_workflows_dir
+    from ricky.jobs.effects import GuardedEffectTool
+    from ricky.jobs.store import JobRunStore
+    from ricky.jobs.types import JobRun
+    from ricky.workflows.spec import ForeachStep, ToolStep, parse_workflow_toml
+    from ricky.workflows.values import resolve_mapping, resolve_value
+
+    path = bundled_workflows_dir() / "email-triage" / "workflow.toml"
+    spec = parse_workflow_toml(path.read_text(), source=str(path))
+    process = next(step for step in spec.steps if step.id == "process")
+    group = next(step for step in spec.steps if step.id == group_id)
+    assert isinstance(process, ForeachStep)
+    assert isinstance(group, ForeachStep)
+    step = next(step for step in group.body if step.id == step_id)
+    assert isinstance(step, ToolStep)
+    fake = FakeGmail(
+        {
+            ("POST", f"{kind}/{target}/{operation}"): httpx.Response(200, json={})
+            for kind, target in [("threads", "t1"), ("messages", "m1"), ("messages", "m2")]
+        }
+    )
+    client = fake.client()
+    tool = GmailModifyLabelsTool(client) if operation == "modify" else GmailTrashTool(client)
+    assert step.tool == tool.name
+    ctx = _ctx(tmp_path)
+    scope = ctx.session.profile_scope
+    store = JobRunStore(ctx.settings)
+    await store.initialize()
+
+    async def guarded(run_id: str) -> GuardedEffectTool:
+        await store.insert(
+            JobRun(
+                id=run_id,
+                job_name="triage",
+                provider="test",
+                model="test",
+                profile_scope=scope,
+                session_id=ctx.session.id,
+                started_at=datetime.now(UTC),
+            ),
+            scope=scope,
+        )
+        return GuardedEffectTool(
+            tool,
+            store=store,
+            job_name="triage",
+            run_id=run_id,
+            profile_scope=scope,
+            effect_budget=10,
+        )
+
+    try:
+        old = await guarded("legacy")
+        legacy_args: dict[str, object] = {"account": "personal/personal", "thread_id": "t1"}
+        if operation == "modify":
+            legacy_args["remove_labels"] = ["UNREAD"]
+        legacy = await old.run(tool.Params.model_validate(legacy_args), ctx)
+        assert not legacy.is_error
+
+        # Two runs see different messages in the same thread. The model may
+        # return an older message identity; mutations must use the search item.
+        for message_id in ["m1", "m2"]:
+            source = {"id": message_id, "thread_id": "t1"}
+            key = resolve_value(process.item_key, {"item": {"source": source}})
+            args = resolve_mapping(
+                step.args,
+                {
+                    "trigger": {"account": "personal/personal"},
+                    "item": {
+                        "source": {
+                            **source,
+                            "key": key,
+                            "output": {
+                                "classification": {"message_id": "stale", "thread_id": "t1"}
+                            },
+                        },
+                        "steps": {
+                            "classify": {"output": {"message_id": "stale", "thread_id": "t1"}}
+                        },
+                    },
+                },
+            )
+            assert args["message_id"] == message_id
+            assert "thread_id" not in args
+            current = await guarded(message_id)
+            result = await current.run(tool.Params.model_validate(args), ctx)
+            assert not result.is_error
+            assert result.effect_receipt is not None
+            assert result.effect_receipt.disposition == "performed"
+            assert result.effect_receipt.provider_reference == message_id
+            repeated = await guarded(f"repeat-{message_id}")
+            duplicate = await repeated.run(tool.Params.model_validate(args), ctx)
+            assert duplicate.is_error
+            assert duplicate.effect_receipt is not None
+            assert duplicate.effect_receipt.disposition == "not_performed"
+            assert fake.count("POST", f"messages/{message_id}/{operation}") == 1
+
+        actions = await store.list_actions(scope=scope, job_name="triage")
+        assert len(actions) == 3
+        assert all(action.status == "performed" for action in actions)
+        assert len({action.action_key for action in actions}) == 3
+        assert fake.count("POST", f"threads/t1/{operation}") == 1
+    finally:
+        await client.aclose()

@@ -215,7 +215,7 @@ Preserve the supplied message and thread identity (thread_id, message_id, from_a
   needs = ["classify"]
   when = { ref = "item.steps.classify.output.category", equals = "action" }
   tool = "gmail_modify_labels"
-  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.steps.classify.output.thread_id" }, remove_labels = ["UNREAD"] }
+  args = { account = { ref = "trigger.account" }, message_id = { ref = "item.source.id" }, remove_labels = ["UNREAD"] }
 
   [[steps.body]]
   id = "gather-context"
@@ -361,7 +361,7 @@ on_item_error = "collect"
   id = "mark-inform"
   kind = "tool"
   tool = "gmail_modify_labels"
-  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.source.output.classification.thread_id" }, remove_labels = ["UNREAD"] }
+  args = { account = { ref = "trigger.account" }, message_id = { ref = "item.source.key" }, remove_labels = ["UNREAD"] }
 
 [[steps]]
 id = "trash-ignore"
@@ -376,7 +376,7 @@ on_item_error = "collect"
   id = "trash"
   kind = "tool"
   tool = "gmail_trash"
-  args = { account = { ref = "trigger.account" }, thread_id = { ref = "item.source.output.classification.thread_id" } }
+  args = { account = { ref = "trigger.account" }, message_id = { ref = "item.source.key" } }
 
 [[steps]]
 id = "compose-summary"
