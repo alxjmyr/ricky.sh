@@ -120,6 +120,12 @@ before publishing. Missing, extra, or stale references fail verification. A sour
 distribution includes the canonical inputs and hook so rebuilding it also bundles
 the matching documentation.
 
+Use `scripts/run_release.sh` to prepare release tags. It runs the full test suite,
+lint, and type checks locally before creating the release commit and tag. The
+GitHub release workflow validates the tag version, builds and verifies the release
+assets, and publishes them; it does not repeat those local checks or install a
+browser test environment. Tags pushed outside the helper bypass the local checks.
+
 ## Improvement needs outcome evidence
 
 Memory, editable profile skills, and workflow fixtures provide ways to retain
