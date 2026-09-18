@@ -1262,7 +1262,14 @@ class ProfileBrowserSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     resources: dict[str, BrowserResourceSettings] = Field(default_factory=dict, max_length=100)
+    default_resource: str | None = Field(default=None, max_length=64)
     screenshot_allowed_providers: list[str] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def _default_resource(self) -> ProfileBrowserSettings:
+        if self.default_resource is not None and self.default_resource not in self.resources:
+            raise ValueError("browser default_resource must name a resource in this profile")
+        return self
 
     @field_validator("resources")
     @classmethod

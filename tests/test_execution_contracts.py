@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import sqlite3
 from collections.abc import AsyncIterator
@@ -211,6 +212,39 @@ async def _compiler(
         ),
     )
     return runtime, compiler
+
+
+@pytest.mark.asyncio
+async def test_cancelled_scope_preflight_leaves_no_draft_and_same_source_can_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _settings(tmp_path)
+    task = await _task(settings)
+    conversation_id = f"conversation_{uuid4().hex}"
+    source = _source("Read the project.", conversation_id=conversation_id)
+    proposal = AdHocExecutionProposal(
+        task_id=task.id,
+        expected_task_revision=task.revision,
+        goal="Read the project.",
+        requested_capabilities=("builtin.project.read",),
+    )
+    runtime, compiler = await _compiler(settings, tmp_path, conversation_id=conversation_id)
+    original = compiler._compile_browser_scope  # noqa: SLF001
+
+    async def interrupted(_guardrails):
+        raise asyncio.CancelledError
+
+    try:
+        monkeypatch.setattr(compiler, "_compile_browser_scope", interrupted)
+        with pytest.raises(asyncio.CancelledError):
+            await compiler.review(proposal, source=source)
+        assert await compiler.store.list_drafts(scope=settings.resolve_profile_scope()) == []
+        monkeypatch.setattr(compiler, "_compile_browser_scope", original)
+        draft = await compiler.review(proposal, source=source)
+        assert draft.status == "ready"
+        assert len(await compiler.store.list_drafts(scope=settings.resolve_profile_scope())) == 1
+    finally:
+        await runtime.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio

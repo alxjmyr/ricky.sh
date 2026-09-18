@@ -35,6 +35,15 @@ def _normalize_model(
     model: type[BaseModel],
     path: tuple[str, ...],
 ) -> tuple[dict[str, object], list[str]]:
+    if model.__pydantic_root_model__:
+        # RootModel serializes its root directly; there is no "root" key in
+        # the provider's argument object to visit in the ordinary field loop.
+        normalized_root, root_paths = _normalize_value(
+            value, model.model_fields["root"].annotation, path
+        )
+        if isinstance(normalized_root, dict):
+            return normalized_root, root_paths
+        return value, []
     normalized = dict(value)
     changed: list[str] = []
     for name, field in model.model_fields.items():

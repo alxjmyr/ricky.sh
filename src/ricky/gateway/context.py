@@ -280,6 +280,9 @@ def gateway_instructions(
     """Build deterministic foreground routing instructions for one message."""
 
     allowed = ", ".join(capabilities) or "inline answers only"
+    browsers = _bounded_json(
+        [item.model_dump(mode="json") for item in catalog.browser_resources], limit=16_000
+    )
     jobs = _bounded_json(
         [
             item.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
@@ -373,6 +376,17 @@ def gateway_instructions(
         "Omit optional attachment, protected-value, and private-network selections when the "
         "request does not need them; absence grants no access. Do not ask the user to fill "
         "irrelevant optional fields or translate a named site into origin syntax. "
+        "Use the scoped browser resource catalog below to resolve a user's short browser name. "
+        "Prefer a matching name in the primary profile; when no browser is named, use its "
+        "listed default. Never silently choose another profile's browser as a default. "
+        "For default selection in guardrails, omit resources and use #https://origin in "
+        "authenticated_origins; Ricky resolves and pins the exact browser. "
+        "Put browser_session_open_resource only in builtin.browser.interact.allowed_tools, "
+        "not builtin.browser.read.allowed_tools. "
+        "A delegate_task error about invalid browser arguments is for you to repair in this "
+        "turn, not a question for the user. Correct the arguments and retry before claiming "
+        "browser access failed. Only actual missing intent or ambiguous browser selection "
+        "needs a user question. "
         "Memory-save requests: when the user asks to remember, save, or commit facts "
         "to memory, use the background delegation path in this turn even if they did "
         "not say background. Do not ask them to repeat the request as a background "
@@ -397,6 +411,7 @@ def gateway_instructions(
         f"Configured capabilities: {allowed}. "
         f"Valid named jobs: {jobs}. Valid ad hoc capabilities: {ad_hoc_capabilities}. "
         f"Exact guarded capability intake specifications: {guardrail_intakes}."
+        f" Scoped browser resources: {browsers}."
     )
 
 

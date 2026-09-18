@@ -766,6 +766,13 @@ class BrowserService:
         guard_facts = self._guard_facts("browser_pages", entry=entry)
         await self._check_guard(guard_facts)
         await self._sync_pages(entry)
+        result = await self._page_list_model(entry)
+        await self._record_guard(guard_facts, disposition="completed")
+        return result
+
+    async def _page_list_model(self, entry: _SessionEntry) -> BrowserPageList:
+        """Describe synchronized pages within the operation already authorized."""
+
         page_models: list[BrowserPage] = []
         for page in entry.pages_by_key.values():
             async with page.lock:
@@ -776,9 +783,7 @@ class BrowserService:
             raise BrowserError(
                 BrowserFailure(code="session_closed", message="browser session has no open pages")
             )
-        result = BrowserPageList(session_id=entry.id, selected_page_id=selected, pages=pages)
-        await self._record_guard(guard_facts, disposition="completed")
-        return result
+        return BrowserPageList(session_id=entry.id, selected_page_id=selected, pages=pages)
 
     async def select_page(self, session_id: str, page_id: str) -> BrowserPage:
         entry, page = await self._require_page(session_id, page_id)
@@ -4193,7 +4198,7 @@ class BrowserService:
             )
 
     async def _session_model(self, entry: _SessionEntry) -> BrowserSession:
-        pages = await self.pages(entry.id)
+        pages = await self._page_list_model(entry)
         return BrowserSession(
             session_id=entry.id,
             resource=entry.resource,

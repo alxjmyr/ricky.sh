@@ -318,6 +318,22 @@ def test_registry_rejects_malformed_or_wrong_shape_json_without_semantic_coercio
     assert wrong_shape.normalized_paths == ()
 
 
+def test_validation_log_reports_schema_paths_without_input_values(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registry = ToolRegistry([StructuredTool()])
+    secret = "sensitive-value-not-for-logs"
+    result = registry.prepare_args(
+        "structured",
+        {"payload": {"label": [secret]}, "items": [], "literal": secret, secret: secret},
+    )
+    assert result.error is not None
+    assert "tool=structured" in caplog.text
+    assert "payload.label:string_type" in caplog.text
+    assert "*:extra_forbidden" in caplog.text
+    assert secret not in caplog.text
+
+
 def test_permission_engine_uses_grants_rules_and_risk_defaults() -> None:
     settings = RickySettings()
     session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())

@@ -185,6 +185,11 @@ guardrail lists are empty. A balance check does not require browser commit or pr
 The gateway derives the HTTPS origin from the site you name. Optional upload and private-network
 selections can be omitted or empty; both grant no access. A signed-in account on a public website
 does not require private-network access.
+Short browser names resolve within the gateway's accessible profiles, preferring its primary
+profile. Configure `[browser] default_resource` in the owning profile, or leave one eligible
+browser there, to omit the browser name. See [browser selection](browser-control.md#select-a-browser-from-telegram).
+An authority error naming `('shared', 'personal')` means the capability's `allowed_profiles`
+must include both profiles; `shared` is always part of that execution scope.
 
 Inspect the queued execution and its contract with `ricky execution show REQUEST_ID` and
 `ricky execution contract show CONTRACT_ID`. A shell-only contract cannot perform the requested
@@ -192,6 +197,25 @@ browser work through Ricky's browser tools. If diagnostics list browser capabili
 Telegram cannot see them, check the installed gateway version and its delegation catalog.
 Restart the gateway after changing configuration; `/new` clears conversation context but does
 not reload the running process's settings.
+
+An ad hoc Telegram browser request gets its browser scope from its execution contract.
+It does not need a named job or a `[browser]` section in a job file. If such a request
+fails with `named browser tools require an explicit [browser] job scope`, update the
+gateway to a build containing the worker handoff fix and restart it before retrying.
+
+## A gateway turn becomes uncertain after rejected tool calls
+
+`ToolArgumentRepairLimit` means the model repeated an invalid call after receiving
+repair feedback. It does not establish that browser access failed. Inspect the
+foreground gateway terminal for `Tool argument validation rejected` entries. They
+report schema field paths and validation types without argument values; `*` masks
+locations not declared as schema fields. JSON-encoded objects and arrays are
+normalized only where the tool schema expects them; scalar types and authority
+boundaries remain strict.
+
+Check existing tasks and execution requests before retrying: the failed turn may
+have created a task or queued work. `/new` starts fresh conversation context but
+does not undo those effects.
 
 ## A protected value is unavailable
 

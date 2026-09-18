@@ -26,6 +26,69 @@ class ResolvedBrowserResource:
     settings: BrowserResourceSettings
 
 
+class BrowserResourceSelectionError(ValueError):
+    """A user must choose between browsers or configure an eligible browser."""
+
+
+def select_browser_resource(
+    settings: RickySettings,
+    *,
+    scope: ProfileScope,
+    name: str | None = None,
+    background: bool = False,
+) -> ResolvedBrowserResource:
+    """Resolve a scoped name or primary-profile default without widening access."""
+
+    visible = resolve_browser_resources(settings, scope=scope)
+    eligible = tuple(
+        item
+        for item in visible
+        if not background or (item.settings.kind == "persistent" and item.settings.headless)
+    )
+    if name:
+        name = name.strip()
+        if "/" in name:
+            matches = [item for item in visible if item.ref.qualified == name]
+        else:
+            matches = [item for item in visible if item.ref.name == name]
+            primary = [item for item in matches if item.ref.profile == scope.primary]
+            matches = primary or matches
+        if len(matches) == 1:
+            if matches[0] in eligible:
+                return matches[0]
+            raise ValueError(
+                "browser resource is unavailable in the current scope or execution mode"
+            )
+        matches = [item for item in matches if item in eligible]
+        if len(matches) == 1:
+            return matches[0]
+        if not matches:
+            raise ValueError(
+                "browser resource is unavailable in the current scope or execution mode"
+            )
+    else:
+        matches = [item for item in eligible if item.ref.profile == scope.primary]
+        profile = settings.profile_configs.get(scope.primary)
+        default = profile.browser.default_resource if profile and profile.browser else None
+        if default is not None:
+            return select_browser_resource(
+                settings,
+                scope=scope,
+                name=f"{scope.primary}/{default}",
+                background=background,
+            )
+        if len(matches) == 1:
+            return matches[0]
+    choices = ", ".join(item.ref.qualified for item in matches[:10])
+    if len(matches) > 10:
+        choices += f", and {len(matches) - 10} more"
+    raise BrowserResourceSelectionError(
+        f"Which browser should I use? Available choices: {choices}."
+        if choices
+        else "No eligible browser is configured in your profile. Which browser should I use?"
+    )
+
+
 def resolve_browser_resources(
     settings: RickySettings,
     *,

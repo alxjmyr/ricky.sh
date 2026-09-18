@@ -1648,3 +1648,316 @@ async def test_compact_uses_existing_contract_and_persists_checkpoint(
     assert stored.session.active_checkpoint_id in reply.request.body
     assert "available in original history" in reply.request.body
     assert (await SessionStore(settings).get(compacted.session_id, scope=_SCOPE)).revision == 4
+
+
+@pytest.mark.parametrize("selection", ["short", "default", "sole", "ambiguous", "encoded"])
+async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resource(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
+) -> None:
+    from ricky.authority.registry import AuthorityRegistry
+    from ricky.browser.authority import browser_authority_evaluators
+    from ricky.browser.guardrails import browser_guardrail_evaluators
+    from ricky.executions.contracts import load_contract_snapshot
+
+    monkeypatch.setattr(
+        "ricky.runtime.composition.built_in_guardrail_evaluators", browser_guardrail_evaluators
+    )
+    monkeypatch.setattr(
+        "ricky.authority.compiler.default_authority_registry",
+        lambda: AuthorityRegistry(list(browser_authority_evaluators())),
+    )
+    raw = _settings(tmp_path).model_dump(mode="python")
+    raw["browser"] = {
+        "enabled": True,
+        "background": {"enabled": True, "read_enabled": True, "interaction_enabled": True},
+    }
+    resource = {"kind": "persistent", "headless": True, "description": "Personal browser"}
+    browsers = {"ricky-personal": resource}
+    if selection in {"default", "ambiguous"}:
+        browsers["second"] = resource
+    raw["profile_configs"] = {
+        "personal": {
+            "browser": {
+                "resources": browsers,
+                "default_resource": "ricky-personal" if selection == "default" else None,
+            }
+        },
+        "work": {"browser": {"resources": {"hidden-browser": resource}}},
+        "shared": {
+            "browser": {
+                "resources": {
+                    "shared-browser": resource,
+                    "headed-browser": {**resource, "headless": False},
+                    "cdp-browser": {
+                        "kind": "cdp",
+                        "endpoint": "http://127.0.0.1:9222",
+                        "description": "External browser",
+                    },
+                }
+            }
+        },
+    }
+    raw["authority"] = {
+        "enabled": True,
+        "allowed_principals": ["telegram:personal/bot:100"],
+        "capabilities": {
+            "browser_interact": {"enabled": True, "allowed_profiles": ["shared", "personal"]}
+        },
+    }
+    raw["agents"] = {
+        "ad_hoc_background": {
+            "confirmation_required_capabilities": [],
+            "guardrail_required_capabilities": [],
+            "execution": {"effect_calls": 1},
+        }
+    }
+    settings = RickySettings.model_validate(raw)
+
+    class BrowserProvider(AdHocProvider):
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            if self.step == 0:
+                rendered = "\n".join(
+                    p.text for m in request.messages for p in m.content if isinstance(p, TextPart)
+                )
+                catalog, _ = json.JSONDecoder().raw_decode(
+                    rendered.split("Scoped browser resources: ", 1)[1]
+                )
+                names = {item["name"] for item in catalog}
+                assert "personal/ricky-personal" in names
+                assert "shared/shared-browser" in names
+                assert not any(
+                    "hidden-browser" in name or "headed-browser" in name or "cdp-browser" in name
+                    for name in names
+                )
+                assert "127.0.0.1:9222" not in rendered
+                defaults = [item["name"] for item in catalog if item["default"]]
+                assert defaults == ([] if selection == "ambiguous" else ["personal/ricky-personal"])
+                async for event in super().stream(request):
+                    yield event
+                return
+            self.requests.append(request)
+            self.step += 1
+            results = "\n".join(
+                p.content for m in request.messages for p in m.content if p.kind == "tool_result"
+            )
+            if self.step in {2, 3} or (selection == "short" and self.step == 4):
+                if self.step == 3:
+                    assert "Correct the browser contract arguments" in results
+                if self.step == 4:
+                    assert "masked browser screenshots are not allowed" in results
+                task = re.search(r"task_[0-9a-f]{32}", results)
+                assert task is not None
+                alias = "ricky-personal" if selection == "short" else ""
+                guardrails = []
+                for capability, tools in [
+                    ("builtin.browser.read", "browser_navigate,browser_snapshot"),
+                    ("builtin.browser.interact", "browser_session_open_resource"),
+                ]:
+                    if self.step == 2 and capability == "builtin.browser.read":
+                        tools += ",browser_session_open_resource"
+                    visual = (
+                        selection == "short"
+                        and self.step == 3
+                        and capability == "builtin.browser.read"
+                    )
+                    if visual:
+                        tools += ",browser_visual_snapshot"
+                    fields: dict[str, str | bool] = {
+                        "mode": "read_only",
+                        "allowed_tools": tools,
+                        "authenticated_origins": f"{alias}#https://openrouter.ai",
+                    }
+                    if visual:
+                        fields["allow_masked_visual_observations"] = True
+                    if alias:
+                        fields["resources"] = alias
+                    guardrails.append(
+                        {
+                            "capability_id": capability,
+                            "fields": [
+                                {"field": key, "value": value} for key, value in fields.items()
+                            ],
+                        }
+                    )
+                capabilities = ["builtin.browser.read", "builtin.browser.interact"]
+                if selection == "encoded":
+                    for guardrail in guardrails:
+                        guardrail["fields"] = json.dumps(guardrail["fields"])
+                yield _tool(
+                    f"browser-{self.step}",
+                    "delegate_task",
+                    {
+                        "action": "start",
+                        "task_id": task.group(),
+                        "expected_task_revision": 1,
+                        "goal": "Read my OpenRouter balance only.",
+                        "requested_capabilities": json.dumps(capabilities)
+                        if selection == "encoded"
+                        else capabilities,
+                        "guardrails": json.dumps(guardrails)
+                        if selection == "encoded"
+                        else guardrails,
+                    },
+                )
+                return
+            if selection == "ambiguous" and self.step == 4:
+                yield _tool(
+                    "choose-browser",
+                    "delegate_task",
+                    {
+                        "action": "supply_guardrails",
+                        "draft_id": drafts[0].id,
+                        "expected_draft_revision": drafts[0].revision,
+                        "guardrails": [
+                            {
+                                "capability_id": capability,
+                                "fields": [
+                                    {"field": "resources", "value": "ricky-personal"},
+                                    {
+                                        "field": "authenticated_origins",
+                                        "value": "ricky-personal#https://openrouter.ai",
+                                    },
+                                ],
+                            }
+                            for capability in ("builtin.browser.read", "builtin.browser.interact")
+                        ],
+                    },
+                )
+                return
+            yield _answer("Queued the balance check.")
+
+    provider = BrowserProvider()
+    inbound = await _ingest(
+        settings,
+        suffix="a",
+        text="Use ricky-personal to check my OpenRouter balance."
+        if selection == "short"
+        else "Check my OpenRouter balance.",
+    )
+    coordinator = ConversationCoordinator(settings, provider_factory=lambda *_: provider)
+    await coordinator.process(inbound.id)
+    store = ExecutionStore(settings)
+    requests = await store.list(scope=_SCOPE, limit=10)
+    drafts = await store.list_drafts(scope=_SCOPE, limit=10)
+    assert len(drafts) == 1
+    if selection == "ambiguous":
+        assert not requests
+        assert drafts[0].status == "collecting_guardrails"
+        assert all("Which browser" in question for question in drafts[0].pending_questions)
+        answer = await _ingest(settings, suffix="b", text="Use ricky-personal.")
+        await coordinator.process(answer.id)
+        requests = await store.list(scope=_SCOPE, limit=10)
+    assert len(requests) == 1
+    assert requests[0].status == "queued"
+    assert requests[0].contract_digest is not None
+    contract = load_contract_snapshot(settings, requests[0].contract_digest)
+    assert contract.browser is not None
+    assert contract.browser.mode == "read_only"
+    assert [item.resource.qualified for item in contract.browser.resources] == [
+        "personal/ricky-personal"
+    ]
+    assert contract.browser.resources[0].authenticated_origin_ceiling == ("https://openrouter.ai",)
+    assert not contract.browser.attachments
+    assert not contract.browser.protected_resources
+    assert "browser_commit" not in contract.browser.allowed_tools
+    assert len(provider.requests) == (5 if selection in {"short", "ambiguous"} else 4)
+
+    # Exercise the actual worker handoff, not just contract creation and queueing.
+    from contextlib import asynccontextmanager
+
+    from browser_support import (
+        FakeBrowserBackend,
+        FakeBrowserPage,
+        FakeBrowserSession,
+        fake_executable,
+    )
+    from ricky.browser.policy import DestinationPolicy
+    from ricky.browser.service import BrowserService
+    from ricky.executions.dispatcher import ExecutionDispatcher
+    from ricky.jobs.store import JobRunStore
+    from ricky.notifications.routes import RoutePolicy
+    from ricky.notifications.service import NotificationService
+    from ricky.runtime import build_session_runtime
+
+    page = FakeBrowserPage(snapshot='- document\n  - text "Credit balance: $12.34"')
+    backend = FakeBrowserBackend()
+    backend.pending_sessions.append(FakeBrowserSession([page]))
+
+    async def resolve(host: str, port: int) -> tuple[str, ...]:
+        return ("93.184.216.34",)
+
+    monkeypatch.setattr(
+        "ricky.browser.service.DestinationPolicy",
+        lambda **kwargs: DestinationPolicy(resolver=resolve, **kwargs),
+    )
+
+    async def browser_factory(settings: RickySettings, **kwargs: Any) -> BrowserService:
+        return BrowserService(
+            settings, backend=backend, executable_path=fake_executable(tmp_path), **kwargs
+        )
+
+    @asynccontextmanager
+    async def runtime_factory(*args: Any, **kwargs: Any):
+        async with build_session_runtime(
+            *args, background_browser_factory=browser_factory, **kwargs
+        ) as runtime:
+            yield runtime
+
+    monkeypatch.setattr("ricky.jobs.runner.build_session_runtime", runtime_factory)
+
+    class WorkerProvider(AdHocProvider):
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            assert {tool.name for tool in request.tools if tool.name.startswith("browser_")} == {
+                "browser_session_open_resource",
+                "browser_navigate",
+                "browser_snapshot",
+            }
+            self.requests.append(request)
+            self.step += 1
+            results = "\n".join(
+                p.content for m in request.messages for p in m.content if p.kind == "tool_result"
+            )
+            if self.step == 1:
+                yield _tool(
+                    "open", "browser_session_open_resource", {"resource": "personal/ricky-personal"}
+                )
+                return
+            session = re.search(r"browser_session_[0-9a-f]{32}", results)
+            assert session is not None, results
+            if self.step == 2:
+                yield _tool(
+                    "navigate",
+                    "browser_navigate",
+                    {
+                        "session_id": session.group(),
+                        "url": "https://openrouter.ai/settings/credits",
+                    },
+                )
+            elif self.step == 3:
+                yield _tool("snapshot", "browser_snapshot", {"session_id": session.group()})
+            else:
+                assert "$12.34" in results
+                yield _answer("$12.34")
+
+    worker = WorkerProvider()
+    routes = RoutePolicy(settings, conversation_resolver=GatewayStore(settings))
+    dispatcher = ExecutionDispatcher(
+        settings,
+        project_root=tmp_path,
+        store=store,
+        provider_factory=lambda _: worker,
+        authority_registry=AuthorityRegistry(list(browser_authority_evaluators())),
+        routes=routes,
+        notifications=NotificationService(settings, routes=routes),
+    )
+    completed = await dispatcher.worker_once(scope=_SCOPE)
+    assert len(completed) == 1
+    assert completed[0].status == "succeeded", completed[0].error
+    assert completed[0].run_id is not None
+    run = await JobRunStore(settings).get(completed[0].run_id, scope=_SCOPE)
+    assert run.final_message == "$12.34"
+    assert len(worker.requests) == 4
+    assert page.navigations == ["https://openrouter.ai/settings/credits"]
+    assert page.snapshot_depths
+    assert backend.closed
+    assert page.closed

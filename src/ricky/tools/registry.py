@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from ricky.permissions.types import GrantScope
 
 DEFAULT_MAX_RESULT_CHARS = 12_000
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,11 @@ class ToolRegistry:
             normalized_paths = normalized.paths
             params = tool.Params.model_validate(normalized.args, strict=True)
         except ValidationError as exc:
+            _LOGGER.warning(
+                "Tool argument validation rejected tool=%s issues=%s",
+                name,
+                _validation_diagnostic(tool.Params, exc),
+            )
             details = _validation_details(exc, args)
             return PreparedToolArguments(
                 args=None,
@@ -361,6 +368,37 @@ class ToolRegistry:
                 "full_content_chars": len(result.content),
             }
         )
+
+
+def _validation_diagnostic(model: type[BaseModel], error: ValidationError) -> str:
+    """Log schema-owned field names and error codes, never model-supplied values."""
+
+    field_names: set[str] = set()
+
+    def collect(node: object) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                field_names.update(properties)
+            for child in node.values():
+                collect(child)
+        elif isinstance(node, list):
+            for child in node:
+                collect(child)
+
+    collect(model.model_json_schema())
+    issues = error.errors(include_url=False, include_context=False, include_input=False)
+    summaries = []
+    for issue in issues[:20]:
+        path = (
+            ".".join(
+                str(part) if isinstance(part, int) or part in field_names else "*"
+                for part in issue["loc"]
+            )
+            or "$"
+        )
+        summaries.append(f"{path}:{issue['type']}")
+    return "; ".join(summaries)[:2000]
 
 
 def _validation_details(

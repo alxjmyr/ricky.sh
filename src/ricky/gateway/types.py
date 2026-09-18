@@ -158,11 +158,22 @@ class GatewayCapabilityItem(_StrictModel):
         return self
 
 
+class GatewayBrowserResource(_StrictModel):
+    """Safe browser selection metadata; never endpoints or filesystem paths."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=3, max_length=300)
+    description: str = Field(max_length=2_000)
+    default: bool = False
+
+
 class GatewayCapabilityCatalog(_StrictModel):
     """Bounded valid named-job and ad hoc capability choices for one turn."""
 
     named_jobs: list[GatewayCapabilityItem] = Field(default_factory=list, max_length=100)
     ad_hoc_capabilities: list[GatewayCapabilityItem] = Field(default_factory=list, max_length=100)
+    browser_resources: list[GatewayBrowserResource] = Field(default_factory=list)
 
 
 class GatewayProcessResult(_StrictModel):

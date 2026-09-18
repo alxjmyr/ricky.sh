@@ -247,10 +247,22 @@ async def test_guard_observes_and_reserves_background_read_operations(tmp_path: 
     assert guard.reservations[2][2].effective_destination_origins == (_ORIGIN,)
     assert guard.reservations[3][2].controlled_page_count == 1
     assert [item.facts.tool_name for item in guard.evidence] == [
-        "browser_pages",
         "browser_session_open",
         "browser_navigate",
         "browser_snapshot",
+    ]
+    assert not any(facts.tool_name == "browser_pages" for facts in guard.checks)
+
+    check_count = len(guard.checks)
+    pages = await service.pages(session.session_id)
+    assert pages.selected_page_id == session.selected_page_id
+    assert len(pages.pages) == 1
+    assert [facts.tool_name for facts in guard.checks[check_count:]] == ["browser_pages"]
+    assert [item.facts.tool_name for item in guard.evidence] == [
+        "browser_session_open",
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_pages",
     ]
     assert all(item.disposition == "completed" for item in guard.evidence)
     await service.aclose()

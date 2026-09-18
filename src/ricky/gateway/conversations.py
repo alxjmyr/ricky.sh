@@ -27,6 +27,7 @@ from ricky.agent.session import AgentSession
 from ricky.authority.compiler import ContractAuthorityCompiler
 from ricky.authority.store import AuthorityStore
 from ricky.authority.tools import delegation_management_tools
+from ricky.browser.resources import resolve_browser_resources, select_browser_resource
 from ricky.capabilities import (
     GuardrailIntakeSpec,
     GuardrailRegistry,
@@ -66,6 +67,7 @@ from ricky.gateway.types import (
     Conversation,
     ConversationKey,
     GatewayActivity,
+    GatewayBrowserResource,
     GatewayCapabilityCatalog,
     GatewayCapabilityItem,
     GatewayProcessResult,
@@ -1597,7 +1599,25 @@ async def _gateway_capability_catalog(
             )
             for item in loaded_jobs[:100]
         ]
-    return GatewayCapabilityCatalog(named_jobs=jobs, ad_hoc_capabilities=ad_hoc)
+    browsers = []
+    if {"builtin.browser.read", "builtin.browser.interact"} <= {item.name for item in ad_hoc}:
+        scope = route.profile_scope()
+        try:
+            default = select_browser_resource(settings, scope=scope, background=True).ref.qualified
+        except ValueError:
+            default = None
+        browsers = [
+            GatewayBrowserResource(
+                name=item.ref.qualified,
+                description=item.settings.description,
+                default=item.ref.qualified == default,
+            )
+            for item in resolve_browser_resources(settings, scope=scope)
+            if item.settings.kind == "persistent" and item.settings.headless
+        ]
+    return GatewayCapabilityCatalog(
+        named_jobs=jobs, ad_hoc_capabilities=ad_hoc, browser_resources=browsers
+    )
 
 
 def _guardrail_intake(

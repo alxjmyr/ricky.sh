@@ -100,4 +100,5 @@ def test_empty_optional_support_preserves_required_type_and_size_checks(
     for evaluator in browser_guardrail_evaluators():
         result = evaluator.normalize_field(GuardrailFieldProposal(field=field, value=value))
         assert not result.accepted
-        assert result.question
+        assert result.reason
+        assert result.question is None

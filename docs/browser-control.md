@@ -74,6 +74,32 @@ ricky browser reset personal/ricky-personal
 Reset permanently deletes that resource's cookies, local storage, cache, and other Chrome state
 after confirmation. It leaves the resource configuration in place.
 
+## Select a browser from Telegram
+
+You can name a browser naturally: "Use ricky-personal to check my OpenRouter balance."
+The gateway sees only browsers in its allowed Ricky profiles. Short names prefer a match in the
+current primary profile; an exact `profile/name` reference selects that resource explicitly.
+
+To make a browser the default, add this to its owning profile's `ricky.toml`:
+
+```toml
+[browser]
+default_resource = "ricky-personal"
+```
+
+The named resource must be defined in the same profile. Without an explicit default, a profile's
+sole eligible browser is selected automatically. You can then ask "Check my OpenRouter balance"
+without naming a browser. Multiple eligible browsers without a default require clarification.
+Ricky never silently defaults to a different profile's browser.
+
+Gateway background work requires a persistent resource with `headless = true`. Headed and CDP
+resources are not offered for background selection. A configured but ineligible default is not
+silently replaced. Restart the gateway after configuration changes.
+
+Browser defaults select an identity, not permissions. Each background contract still pins the exact
+browser, permitted sites, and operations. Malformed delegation arguments are returned to the agent
+for correction; only genuine browser-choice ambiguity is sent to you as a question.
+
 ## Replace an older bundled-browser installation
 
 The Chrome-only release starts with fresh browser profiles; it does not convert old Chromium
@@ -175,20 +201,22 @@ max_effect_calls = 50
 [authority.capabilities.browser_interact]
 enabled = true
 max_effect_calls = 50
-allowed_profiles = ["personal"]
+allowed_profiles = ["shared", "personal"]
 
 [authority.capabilities.browser_commit]
 enabled = true
 max_effect_calls = 3
 max_financial_limit_minor = 25000
 currency = "USD"
-allowed_profiles = ["personal"]
+allowed_profiles = ["shared", "personal"]
 ```
 
 Use the complete disabled-by-default example in `ricky.toml.example` for budgets and protected
 value authority. Owner settings, the authenticated request, compiled contract, current claim,
 browser resource revision, live destination, and durable budgets all intersect. No webpage or
 model output can widen them.
+Authority `allowed_profiles` must cover the execution scope, which always includes `shared`,
+even when the selected browser belongs only to `personal`.
 
 An ad hoc gateway execution can research public HTTPS sites without naming a merchant in advance.
 When it reaches a consequential action, it proposes the exact live origin and transaction for a

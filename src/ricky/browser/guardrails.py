@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Literal, cast
 
 from pydantic import Field, JsonValue, field_validator, model_validator
 
+from ricky.browser.resources import BrowserResourceSelectionError, select_browser_resource
 from ricky.browser.types import BrowserModel
 from ricky.capabilities.guardrails import (
     AuthenticatedSource,
@@ -23,6 +24,7 @@ from ricky.capabilities.guardrails import (
     GuardrailVerdict,
     compile_guardrail,
 )
+from ricky.config import RickySettings
 from ricky.executions.browser import (
     BrowserAttachmentPin,
     BrowserBudgetOperation,
@@ -32,7 +34,7 @@ from ricky.executions.browser import (
     BrowserProtectedResourcePin,
     BrowserResourcePin,
 )
-from ricky.profiles import ProfileResourceRef
+from ricky.profiles import ProfileResourceRef, ProfileScope
 
 BrowserGuardrailCapability = Literal[
     "builtin.browser.read",
@@ -327,7 +329,11 @@ _FIELDS = (
     GuardrailIntakeField(
         name="resources",
         value_type="string",
-        description="Comma-separated qualified configured browser resource aliases.",
+        description=(
+            "Comma-separated browser names from the scoped catalog. Short names resolve in "
+            "the primary profile first; qualified profile/name identities remain exact. "
+            "Omit for default selection when opening a persistent browser."
+        ),
         required=False,
         question="Which configured browser resource aliases may be used?",
     ),
@@ -337,7 +343,8 @@ _FIELDS = (
         description=(
             "Semicolon-separated configured-resource origin ceilings in "
             "alias#https://origin|https://origin form. Derive exact HTTPS origins from "
-            "the sites named by the user; do not add unrelated sites or wildcard origins."
+            "the sites named by the user; do not add unrelated sites or wildcard origins. "
+            "An empty alias (#https://origin) selects the primary profile's default browser."
         ),
         required=False,
         question="Which exact HTTPS origins may each configured browser resource reach?",
@@ -408,6 +415,12 @@ class _BrowserGuardrailEvaluator:
     tools: ClassVar[frozenset[str]]
     intake_spec: ClassVar[GuardrailIntakeSpec]
 
+    def __init__(
+        self, settings: RickySettings | None = None, scope: ProfileScope | None = None
+    ) -> None:
+        self.settings = settings
+        self.scope = scope
+
     def normalize_field(self, proposal: GuardrailFieldProposal) -> GuardrailFieldDecision:
         field = self.intake_spec.get(proposal.field)
         if field is None:
@@ -420,7 +433,7 @@ class _BrowserGuardrailEvaluator:
         except (TypeError, ValueError) as exc:
             return GuardrailFieldDecision(
                 accepted=False,
-                question=f"{field.question} The supplied value was invalid: {exc}"[:500],
+                reason=f"Correct browser field {proposal.field}: {exc}"[:500],
             )
         return GuardrailFieldDecision(accepted=True, value=cast(JsonValue, value))
 
@@ -453,12 +466,20 @@ class _BrowserGuardrailEvaluator:
             if field.required and raw.get(field.name) in {None, ""}
         )
         if missing:
-            return GuardrailDecision(questions=missing)
+            return GuardrailDecision(
+                reason="Supply browser mode and allowed_tools from the request."
+            )
         try:
+            if not set(_split(str(raw["allowed_tools"]))) <= self.tools:
+                raise ValueError("browser guardrail selected a tool outside its capability")
+            if self.settings is not None and self.scope is not None:
+                raw = _resolve_resource_selections(raw, self.settings, self.scope)
             constraints = _constraints_from_raw(self.capability_id, raw)
+        except BrowserResourceSelectionError as exc:
+            return GuardrailDecision(questions=(str(exc),))
         except ValueError as exc:
             return GuardrailDecision(
-                questions=(f"Those browser boundaries are not usable: {exc}"[:500],)
+                reason=f"Correct the browser contract arguments and retry: {exc}"[:1500],
             )
         summary = _summary(constraints)
         return GuardrailDecision(
@@ -552,6 +573,42 @@ def browser_guardrail_evaluators() -> tuple[GuardrailEvaluator, ...]:
             BrowserCommitGuardrailEvaluator(),
         ),
     )
+
+
+def bind_browser_guardrail_evaluator(
+    evaluator: GuardrailEvaluator, settings: RickySettings, scope: ProfileScope
+) -> GuardrailEvaluator:
+    """Bind browser selection to issued access; leave other evaluators unchanged."""
+    if isinstance(evaluator, _BrowserGuardrailEvaluator):
+        return type(evaluator)(settings, scope)
+    return evaluator
+
+
+def _resolve_resource_selections(
+    raw: dict[str, Any], settings: RickySettings, scope: ProfileScope
+) -> dict[str, Any]:
+    def resolve(name: str) -> str:
+        return select_browser_resource(
+            settings, scope=scope, name=name or None, background=True
+        ).ref.qualified
+
+    result = dict(raw)
+    resources = [resolve(name) for name in _split(str(raw.get("resources", "")))]
+    infer_resources = not resources
+    origins = []
+    for selection in _split(str(raw.get("authenticated_origins", "")), separator=";"):
+        alias, marker, origin = selection.partition("#")
+        if not marker:
+            raise ValueError("authenticated_origins must use browser#https://origin")
+        qualified = resolve(alias)
+        origins.append(f"{qualified}#{origin}")
+        if infer_resources and qualified not in resources:
+            resources.append(qualified)
+    if not resources and "browser_session_open_resource" in _split(str(raw["allowed_tools"])):
+        resources = [resolve("")]
+    result["resources"] = ",".join(resources)
+    result["authenticated_origins"] = ";".join(origins)
+    return result
 
 
 def _normalize_field(name: str, value: JsonValue, *, required: bool) -> JsonValue:

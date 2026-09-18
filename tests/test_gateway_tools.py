@@ -20,7 +20,7 @@ from ricky.config import (
     TelegramAccountSettings,
 )
 from ricky.durable_tasks.store import DurableTaskStore
-from ricky.executions.drafts import AdHocExecutionProposal
+from ricky.executions.drafts import AdHocExecutionProposal, AdHocGuardrailContinuation
 from ricky.executions.tools import StartNamedJobTool as NeutralStartNamedJobTool
 from ricky.gateway.conversations import build_gateway_runtime
 from ricky.gateway.tools import (
@@ -38,6 +38,7 @@ from ricky.llm import CompletionRequest, StreamEvent
 from ricky.messaging.types import InboundMessage
 from ricky.profiles import ProfileScope
 from ricky.tools import Tool, ToolContext
+from ricky.tools.arguments import normalize_arguments
 
 NOW = datetime(2026, 8, 12, 12, tzinfo=UTC)
 SCOPE = ProfileScope.create("personal")
@@ -210,6 +211,61 @@ def test_delegate_task_schema_exposes_one_top_level_discriminated_command() -> N
                 )
             }
         )
+
+
+@pytest.mark.parametrize("action", ["start", "supply_guardrails"])
+def test_delegation_normalizes_encoded_structures_at_the_argument_root(action: str) -> None:
+    fields = [{"field": "authenticated_origins", "value": "#https://openrouter.ai"}]
+    raw: dict[str, Any] = {
+        "action": action,
+        "guardrails": json.dumps(
+            [{"capability_id": "builtin.browser.read", "fields": json.dumps(fields)}]
+        ),
+    }
+    if action == "start":
+        raw.update(
+            task_id="task_" + "a" * 32,
+            expected_task_revision=1,
+            goal='Keep this literal string: {"balance": true}',
+            requested_capabilities='["builtin.browser.read"]',
+        )
+    else:
+        raw.update(draft_id="draft_" + "a" * 32, expected_draft_revision=1)
+    normalized = normalize_arguments(DelegateTaskParams, raw)
+    command = DelegateTaskParams.model_validate(normalized.args, strict=True).root
+    assert isinstance(command, (AdHocExecutionProposal, AdHocGuardrailContinuation))
+    assert command.action == action
+    assert command.guardrails[0].fields[0].value == "#https://openrouter.ai"
+    assert "guardrails" in normalized.paths
+    assert "guardrails.0.fields" in normalized.paths
+    assert not any(path.startswith("root") for path in normalized.paths)
+    if isinstance(command, AdHocExecutionProposal):
+        assert command.goal == raw["goal"]
+        assert command.requested_capabilities == ["builtin.browser.read"]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"requested_capabilities": "{}"},
+        {"requested_capabilities": "[bad"},
+        {"expected_task_revision": "1"},
+        {"action": "unknown"},
+        {"principal_id": "invented"},
+    ],
+)
+def test_delegation_root_normalization_preserves_strict_validation(invalid: dict[str, Any]) -> None:
+    raw = {
+        "action": "start",
+        "task_id": "task_" + "a" * 32,
+        "expected_task_revision": 1,
+        "goal": "Check balance",
+        "requested_capabilities": '["builtin.browser.read"]',
+        **invalid,
+    }
+    normalized = normalize_arguments(DelegateTaskParams, raw)
+    with pytest.raises(ValueError):
+        DelegateTaskParams.model_validate(normalized.args, strict=True)
 
 
 def test_gateway_capability_inventory_does_not_replace_neutral_tool_schema() -> None:

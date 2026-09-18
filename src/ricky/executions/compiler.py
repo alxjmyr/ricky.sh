@@ -322,6 +322,12 @@ class ExecutionContractCompiler:
             assert outcome.guardrail is not None
             compiled[decision.capability_id] = outcome.guardrail
 
+        if not questions:
+            # Reject browser scope errors before persisting a draft. A corrected
+            # proposal from this same turn must not collide with an invalid draft.
+            # Compilation repeats these checks to pin current resource revisions.
+            await self._compile_browser_scope(tuple(compiled[key] for key in sorted(compiled)))
+
         confirmation_required = any(item.confirmation_required for item in selected)
         summary = self._confirmation_summary(
             requested_capabilities,

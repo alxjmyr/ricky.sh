@@ -2011,6 +2011,9 @@ async def chrome_display(monkeypatch: pytest.MonkeyPatch) -> Any:
         "-screen",
         "0",
         "1280x900x24",
+        # The fixture owns display shutdown. Avoid an X server reset racing
+        # the window-close probe when Chrome disconnects its last client.
+        "-noreset",
         "-nolisten",
         "tcp",
         stdout=asyncio.subprocess.PIPE,

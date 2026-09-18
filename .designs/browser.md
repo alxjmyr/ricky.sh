@@ -86,6 +86,24 @@ preference; Ricky derives its directory and never accepts an arbitrary Chrome pr
 resource contains an exact loopback HTTP endpoint with an explicit port. Endpoints and paths are
 local configuration and never model arguments or provider-facing output.
 
+Gateway browser selection uses only the issued profile scope. Its prompt catalog contains safe
+qualified names and descriptions for background-eligible persistent headless resources, never
+paths or CDP endpoints. Short names prefer an exact match in the primary profile, then a unique
+match elsewhere in the issued scope. A named but ineligible primary resource never silently falls
+back to another profile. Without a name, selection uses the primary profile's `default_resource`,
+or its sole eligible resource; it never defaults into another profile. Multiple choices require
+user clarification. A configured default must name a resource owned by that same profile.
+
+Capability-owned browser intake resolves aliases and defaults before compiling qualified
+resource/origin selections. Contracts retain exact identities, configuration revisions, origins,
+and operation ceilings; default selection grants no new authority. Invalid field types, malformed
+references, inconsistent tool membership, and invalid browser scope return repairable tool errors
+to the foreground agent before a draft is created or updated. Browser scope preflight checks owner
+ceilings, visual disclosure, resources, and attachments; compilation revalidates them before
+pinning the contract. Genuine selection ambiguity becomes durable user
+clarification. Repairing a rejected proposal repeats only validation, never browser work or a
+queued effect. Runtime dispatch continues to require exact contract-pinned resources.
+
 Ephemeral browser data lives below the primary profile's generated browser directory and is
 removed when its runtime closes. Persistent Chrome profiles live below their owning profile in a
 directory derived from a digest of the qualified resource identity. They retain cookies, storage,

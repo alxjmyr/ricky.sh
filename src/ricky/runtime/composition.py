@@ -25,6 +25,7 @@ from ricky.browser.guardrails import (
     BROWSER_INTERACT_TOOLS,
     BROWSER_PROTECTED_TOOLS,
     BROWSER_READ_TOOLS,
+    bind_browser_guardrail_evaluator,
     browser_guardrail_evaluators,
 )
 from ricky.browser.tools import BrowserAttachmentResolver
@@ -443,7 +444,12 @@ async def build_capability_runtime(
             skill_owners=derive_skill_owners(skills, settings=runtime_settings),
             state_guards=StateGuardRegistry([DurableTaskStateGuard(task_store)]),
         )
-        guardrail_registry = GuardrailRegistry(built_in_guardrail_evaluators())
+        guardrail_registry = GuardrailRegistry(
+            tuple(
+                bind_browser_guardrail_evaluator(evaluator, runtime_settings, session.profile_scope)
+                for evaluator in built_in_guardrail_evaluators()
+            )
+        )
         inventory_diagnostics = validate_capability_inventory(
             capability_registry,
             guardrail_registry,

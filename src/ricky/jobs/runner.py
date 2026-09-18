@@ -466,10 +466,16 @@ class JobRunner:
             provider=selection.provider,
             model=selection.model,
         )
-        named_browser_scope = _named_job_browser_scope(
-            spec,
-            settings=self.settings,
-            session=session,
+        # Ad hoc contracts already pin their browser scope separately from the
+        # synthetic JobSpec. Only named jobs derive it from a [browser] section.
+        if contract_execution and spec.browser is not None:
+            raise JobConfigurationError(
+                "named browser scope cannot be combined with an execution browser contract"
+            )
+        named_browser_scope = (
+            None
+            if contract_execution
+            else _named_job_browser_scope(spec, settings=self.settings, session=session)
         )
         if named_browser_scope is not None:
             if contract_execution or browser_scope is not None or loaded is None:

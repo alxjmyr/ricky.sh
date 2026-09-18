@@ -91,6 +91,12 @@ Resolution follows the data category rather than a generic merge:
   qualified identities;
 - installation process and storage mechanics remain root-owned.
 
+Gateway browser intake accepts short names within this scope and resolves them to qualified
+identities before contract compilation. It prefers a primary-profile name match. Unnamed browser
+selection uses only the primary profile's configured default or sole eligible browser; it never
+silently defaults across profiles. Ambiguous selection requires clarification. See
+[browser.md](browser.md) for selection and eligibility rules.
+
 Context assembly exposes a compact catalog for only the issued profiles and a
 non-secret catalog of accessible qualified accounts. Persona content is
 prepended in this order: `shared/SOUL.md`, then the primary profile's
