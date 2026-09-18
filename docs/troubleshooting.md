@@ -182,6 +182,9 @@ persistent resource needs `builtin.browser.read` and `builtin.browser.interact` 
 background execution, because `browser_session_open_resource` belongs to the interaction
 capability. The gateway supplies the required guardrail fields even when the owner's
 guardrail lists are empty. A balance check does not require browser commit or protected fills.
+The gateway derives the HTTPS origin from the site you name. Optional upload and private-network
+selections can be omitted or empty; both grant no access. A signed-in account on a public website
+does not require private-network access.
 
 Inspect the queued execution and its contract with `ricky execution show REQUEST_ID` and
 `ricky execution contract show CONTRACT_ID`. A shell-only contract cannot perform the requested

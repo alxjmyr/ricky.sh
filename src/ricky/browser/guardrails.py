@@ -336,7 +336,8 @@ _FIELDS = (
         value_type="string",
         description=(
             "Semicolon-separated configured-resource origin ceilings in "
-            "alias#https://origin|https://origin form."
+            "alias#https://origin|https://origin form. Derive exact HTTPS origins from "
+            "the sites named by the user; do not add unrelated sites or wildcard origins."
         ),
         required=False,
         question="Which exact HTTPS origins may each configured browser resource reach?",
@@ -365,14 +366,21 @@ _FIELDS = (
     GuardrailIntakeField(
         name="private_origin_ceiling",
         value_type="string",
-        description="Comma-separated exact HTTPS private origins, normally empty.",
+        description=(
+            "Comma-separated exact HTTPS private-network origins, not signed-in public sites. "
+            "Omit or leave empty unless the request needs private-network access; "
+            "empty grants none."
+        ),
         required=False,
         question="Which exact private HTTPS origins, if any, may be reached?",
     ),
     GuardrailIntakeField(
         name="attachment_ids",
         value_type="string",
-        description="Comma-separated execution attachment identifiers allowed for upload.",
+        description=(
+            "Comma-separated execution attachment identifiers allowed for upload. "
+            "Omit or leave empty when no upload is requested; empty grants none."
+        ),
         required=False,
         question="Which exact attachments may be uploaded?",
     ),
@@ -408,7 +416,7 @@ class _BrowserGuardrailEvaluator:
                 reason=f"unknown browser guardrail field: {proposal.field}",
             )
         try:
-            value = _normalize_field(proposal.field, proposal.value)
+            value = _normalize_field(proposal.field, proposal.value, required=field.required)
         except (TypeError, ValueError) as exc:
             return GuardrailFieldDecision(
                 accepted=False,
@@ -546,7 +554,7 @@ def browser_guardrail_evaluators() -> tuple[GuardrailEvaluator, ...]:
     )
 
 
-def _normalize_field(name: str, value: JsonValue) -> JsonValue:
+def _normalize_field(name: str, value: JsonValue, *, required: bool) -> JsonValue:
     if name == "mode":
         if value not in {"read_only", "transaction"}:
             raise ValueError("mode must be read_only or transaction")
@@ -562,7 +570,7 @@ def _normalize_field(name: str, value: JsonValue) -> JsonValue:
     if not isinstance(value, str):
         raise TypeError("expected bounded comma-separated text")
     value = value.strip()
-    if not value or len(value) > 10_000:
+    if (required and not value) or len(value) > 10_000:
         raise ValueError("selection text is blank or too long")
     return value
 
