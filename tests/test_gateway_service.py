@@ -79,6 +79,9 @@ class BlockingConversations:
     async def initialize(self) -> None:
         self.initialized = True
 
+    async def reconcile_handoffs(self) -> int:
+        return 0
+
     async def process(self, message_id: str) -> None:
         del message_id
 

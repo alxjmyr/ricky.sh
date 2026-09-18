@@ -336,7 +336,8 @@ def gateway_instructions(
         "treats that confirmation as task-scoped authorization to use every confirmed "
         "capability in the background execution, then compiles the exact tools, skills, "
         "context, optional guardrails, and effect ceilings. Report "
-        "delegated work as queued, never as completed. "
+        "delegated work as queued, never as completed. Successful delegation ends this "
+        "turn: Ricky sends the handoff acknowledgement and starts work after delivery. "
         if catalog.ad_hoc_capabilities
         else ""
     )
@@ -352,7 +353,9 @@ def gateway_instructions(
         "complete the task end-to-end from persisted task context. Include prerequisite read "
         "or discovery capabilities needed to resolve targets; never assume mutation implies "
         "read access. Then call delegate_task in the same turn. Do not mark that task "
-        "waiting, completed, or reviewed inline. If no suitable job or capability is "
+        "waiting, completed, or reviewed inline. Do not poll work you just delegated; "
+        "its completion is reported separately. Status tools are for a subsequent user "
+        "request about existing work. If no suitable job or capability is "
         "listed, explain the limitation or ask a normal "
         "question. Never claim background work was completed merely because it was "
         "queued. If a direct foreground tool reports that live review is "

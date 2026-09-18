@@ -6,6 +6,7 @@ import pytest
 
 from ricky.agent.session import AgentSession
 from ricky.config import RickySettings
+from ricky.jobs.briefing import browser_system_sections
 from ricky.jobs.runner import JobConfigurationError, _named_job_browser_scope
 from ricky.jobs.spec import JobBrowser, JobSpec, JobTools
 from ricky.profiles import ProfileResourceRef, ProfileScope
@@ -92,6 +93,10 @@ def test_named_job_compiles_exact_ephemeral_read_scope(tmp_path: Path) -> None:
     assert scope.allow_public_https_research is True
     assert scope.allow_masked_visual_observations is True
     assert scope.resources == ()
+    briefing = browser_system_sections(scope)["execution_browser"]
+    assert "Authorized browser resources: []" in briefing
+    assert "Ephemeral browser sessions permitted: True" in briefing
+    assert "personal/research" not in briefing
     assert set(scope.allowed_operations) == {
         "controlled_pages",
         "navigations",
@@ -124,6 +129,14 @@ def test_named_job_pins_headless_persistent_resource_and_origins(tmp_path: Path)
     assert scope.resources[0].resource == resource
     assert scope.resources[0].authenticated_origin_ceiling == ("https://example.com",)
     assert len(scope.resources[0].configuration_digest) == 64
+    briefing = browser_system_sections(scope)["execution_browser"]
+    assert '"resource": "personal/research"' in briefing
+    assert '"authenticated_origins": ["https://example.com"]' in briefing
+    assert "Ephemeral browser sessions permitted: False" in briefing
+
+
+def test_no_browser_context_without_browser_scope() -> None:
+    assert browser_system_sections(None) == {}
 
 
 @pytest.mark.parametrize(

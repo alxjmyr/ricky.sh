@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ricky.agent.handoff import BackgroundHandoff
 from ricky.agent.session import AgentSession
 from ricky.profiles import ProfileLabel
 
@@ -98,9 +99,13 @@ class StoredTurn(_StrictModel):
     started_at: datetime
     finished_at: datetime | None = None
     error: str | None = Field(default=None, max_length=16_000)
+    background_handoffs: list[BackgroundHandoff] = Field(default_factory=list)
+    handoff_acknowledgement: str | None = Field(default=None, min_length=1)
 
     @model_validator(mode="after")
     def _validate_state(self) -> StoredTurn:
+        if bool(self.background_handoffs) != (self.handoff_acknowledgement is not None):
+            raise ValueError("handoff evidence requires both accepted requests and acknowledgement")
         _require_utc(self.started_at, "started_at")
         if self.finished_at is not None:
             _require_utc(self.finished_at, "finished_at")

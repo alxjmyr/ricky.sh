@@ -9,6 +9,7 @@ from ricky.tool_contracts import (
     inspect_tool_surface,
 )
 from ricky.tools.base import (
+    BackgroundHandoff,
     DeclaredTool,
     EffectActionBinder,
     EffectDisposition,
@@ -35,6 +36,7 @@ from ricky.tools.builtin import builtin_tools
 from ricky.tools.registry import ToolRegistry
 
 __all__ = [
+    "BackgroundHandoff",
     "DeclaredTool",
     "PermissionArgsNormalizer",
     "PreparedEffect",

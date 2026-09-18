@@ -84,6 +84,33 @@ contract internally. If a runner must apply an additional wrapper, declare a
 stable `state_guard_id`; startup validation requires that guard to be
 registered.
 
+## Background handoffs
+
+A gateway admission tool returns a typed background-handoff result only after
+durable admission succeeds. Its references identify held executions; they do not
+authorize immediate worker dispatch. The runtime finishes and records the
+already-dispatched tool batch, aggregates accepted handoffs into one canonical
+acknowledgement, and ends the foreground turn without another provider request.
+It must preserve clarification or failure information from the same batch and
+must not imply that rejected work was admitted. Ordinary validation failures
+remain repairable before handoff.
+
+`ToolResult.background_handoff` contains a strict `BackgroundHandoff` with a
+request ID and bounded task title. An error result or a result asking for user
+input cannot also declare a successful handoff. The loop emits a
+`BackgroundHandoffEvent`; the persistent turn service commits its accepted
+request IDs and exact acknowledgement atomically with the conversation state.
+An admission followed by a tool error has no such evidence and cannot launch
+work under an unrelated foreground reply.
+
+The gateway releases accepted work only after the originating turn commits and
+the acknowledgement has recorded delivery receipts for every transport part.
+Tools must not send that
+acknowledgement directly, poll admitted work to completion, or construct a second
+terminal result notification. Later user-initiated status and cancellation calls
+remain ordinary foreground tools. Scheduled and CLI execution admission do not
+inherit this gateway-specific delivery dependency.
+
 ## Deterministic runtime rejections
 
 A tool or state guard may attach `ToolRuntimeFailure` to an error result only

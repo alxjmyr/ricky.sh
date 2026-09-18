@@ -97,7 +97,9 @@ resources are not offered for background selection. A configured but ineligible 
 silently replaced. Restart the gateway after configuration changes.
 
 Browser defaults select an identity, not permissions. Each background contract still pins the exact
-browser, permitted sites, and operations. Malformed delegation arguments are returned to the agent
+browser, permitted sites, and operations. The worker receives the exact authorized `profile/name`
+and authenticated origins in its context, even when resource discovery is not included in its tools.
+Malformed delegation arguments are returned to the agent
 for correction; only genuine browser-choice ambiguity is sent to you as a question.
 
 ## Replace an older bundled-browser installation

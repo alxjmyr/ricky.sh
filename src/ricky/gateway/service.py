@@ -372,6 +372,7 @@ class GatewayService:
 
     async def _execution_loop(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
+            await self.conversations.reconcile_handoffs()
             completed = await self.dispatcher.worker_once(scope=self.profile_scope)
             if not completed:
                 await _wait(stop, self.settings.executions.poll_seconds)

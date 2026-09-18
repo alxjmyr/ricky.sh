@@ -22,9 +22,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from ricky.authority.store import AuthorityStore
 from ricky.config import RickySettings, user_data_subpath
 from ricky.executions.store import ExecutionStore
+from ricky.executions.types import ExecutionRequest
 from ricky.gateway.store import GatewayStore
 from ricky.messaging.store import MessagingStore
-from ricky.notifications.store import NotificationStore
+from ricky.notifications.store import NotificationNotFoundError, NotificationStore
 from ricky.profiles import ProfileScope
 from ricky.sessions import SessionNotFoundError, SessionStore
 
@@ -113,7 +114,8 @@ class GatewayRetention:
         moment = now or datetime.now(UTC)
         cutoff = moment - timedelta(seconds=self.config.min_age_seconds)
         await self._initialize()
-        protected = await self._protected_message_ids()
+        handoffs = await self._protected_handoffs(cutoff)
+        protected = await self._protected_message_ids(handoffs)
         groups: list[RetentionGroup] = []
 
         inbox_ids = await self.messaging.prunable_inbox(
@@ -152,8 +154,15 @@ class GatewayRetention:
             keep=self.config.archived_conversations,
             before=cutoff,
         )
-        protected_conversations = await self.notifications.unresolved_conversation_ids(
-            scope=self.profile_scope
+        protected_conversations = tuple(
+            sorted(
+                set(await self.notifications.unresolved_conversation_ids(scope=self.profile_scope))
+                | {
+                    request.source_conversation_id
+                    for request in handoffs
+                    if request.source_conversation_id is not None
+                }
+            )
         )
         conversation_ids = [
             item for item in conversation_ids if item not in set(protected_conversations)
@@ -174,7 +183,7 @@ class GatewayRetention:
             keep=self.config.execution_requests,
             before=cutoff,
         )
-        protected_executions = await self._protected_execution_ids()
+        protected_executions = await self._protected_execution_ids(handoffs)
         execution_ids = [item for item in execution_ids if item not in protected_executions]
         groups.append(
             await self._group(
@@ -187,7 +196,7 @@ class GatewayRetention:
             )
         )
 
-        protected_outbox = await self._protected_outbox_ids()
+        protected_outbox = await self._protected_outbox_ids(handoffs)
         notification_ids = await self.notifications.prunable_notifications(
             scope=self.profile_scope,
             keep=self.config.notifications,
@@ -261,7 +270,32 @@ class GatewayRetention:
             removed=removed,
         )
 
-    async def _protected_message_ids(self) -> tuple[str, ...]:
+    async def _protected_handoffs(self, cutoff: datetime) -> list[ExecutionRequest]:
+        """Retain unresolved sends; age cancelled, never-deliverable handoffs normally."""
+        protected: list[ExecutionRequest] = []
+        for request in await self.executions.list_pending_acknowledgements(
+            scope=self.profile_scope
+        ):
+            if (
+                request.status == "cancelled"
+                and request.acknowledgement_expires_at is not None
+                and request.acknowledgement_expires_at <= cutoff
+            ):
+                if request.acknowledgement_outbox_id is None:
+                    continue
+                try:
+                    entry = await self.notifications.get_outbox(
+                        request.acknowledgement_outbox_id, scope=self.profile_scope
+                    )
+                except NotificationNotFoundError:
+                    pass  # Missing evidence requires review, not silent deletion.
+                else:
+                    if entry.status == "cancelled":
+                        continue
+            protected.append(request)
+        return protected
+
+    async def _protected_message_ids(self, handoffs: list[ExecutionRequest]) -> tuple[str, ...]:
         """Collect every inbound id an unresolved record still depends on."""
 
         protected: set[str] = set()
@@ -269,21 +303,33 @@ class GatewayRetention:
         for result in await self.gateway.running_results(scope=self.profile_scope):
             protected.add(result.message_id)
         protected.update(await self.executions.protected_message_ids(scope=self.profile_scope))
+        protected.update(
+            request.source_message_id
+            for request in handoffs
+            if request.source_message_id is not None
+        )
         return tuple(sorted(protected))
 
-    async def _protected_execution_ids(self) -> tuple[str, ...]:
+    async def _protected_execution_ids(self, handoffs: list[ExecutionRequest]) -> tuple[str, ...]:
         """Protect request/grant/contract chains that are not fully disposable."""
 
         protected = set(await self.authority.active_execution_request_ids(scope=self.profile_scope))
         protected.update(
             await self.executions.protected_parent_request_ids(scope=self.profile_scope)
         )
+        protected.update(request.id for request in handoffs)
         return tuple(sorted(protected))
 
-    async def _protected_outbox_ids(self) -> tuple[str, ...]:
+    async def _protected_outbox_ids(self, handoffs: list[ExecutionRequest]) -> tuple[str, ...]:
         """Collect every outbox id that is unresolved or still referenced."""
 
-        return await self.notifications.unresolved_outbox_ids(scope=self.profile_scope)
+        protected = set(await self.notifications.unresolved_outbox_ids(scope=self.profile_scope))
+        protected.update(
+            request.acknowledgement_outbox_id
+            for request in handoffs
+            if request.acknowledgement_outbox_id is not None
+        )
+        return tuple(sorted(protected))
 
     def _log_group(self, cutoff: datetime, apply_changes: bool) -> RetentionGroup:
         """Bound the private service log directory by byte and file count."""

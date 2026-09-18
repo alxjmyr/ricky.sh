@@ -253,6 +253,7 @@ class GatewayAudit:
                     detail="this conversation has processed no message",
                 )
             )
+            links.extend(await self._execution_links_for_conversation(conversation_id))
             return links
         for result in results:
             links.append(
@@ -304,10 +305,17 @@ class GatewayAudit:
                 at=request.created_at,
                 detail=(
                     f"{request.kind} via {execution_source}"
+                    + (
+                        "; waiting for foreground acknowledgement delivery"
+                        if request.status == "awaiting_acknowledgement"
+                        else ""
+                    )
                     + (f"; error: {request.error}" if request.error else "")
                 ),
             )
         )
+        if request.acknowledgement_outbox_id is not None:
+            links.extend(await self._notification_links(request.acknowledgement_outbox_id))
         if request.run_id is None:
             links.append(
                 AuditLink(
@@ -728,7 +736,14 @@ class GatewayAudit:
 
     async def _execution_links_for_conversation(self, conversation_id: str) -> list[AuditLink]:
         records = await self.notifications.list(scope=self.profile_scope, limit=200)
-        linked: list[str] = []
+        linked = [
+            request.id
+            for request in await self.executions.list_by_conversation(
+                conversation_id,
+                scope=self.profile_scope,
+                limit=10,
+            )
+        ]
         for record in records:
             if not any(
                 ref.kind == "conversation" and ref.id == conversation_id

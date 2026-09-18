@@ -16,12 +16,14 @@ import pytest
 
 from ricky.agent import AgentSession
 from ricky.agent.events import (
+    BackgroundHandoffEvent,
     LlmRequestStartedEvent,
     LlmResponseFinishedEvent,
     TextDeltaEvent,
     ToolCallStartedEvent,
     TurnFinishedEvent,
 )
+from ricky.agent.handoff import BackgroundHandoff
 from ricky.agent.session import PermissionGrant
 from ricky.config import RickySettings, SessionSettings
 from ricky.durable_tasks.types import TaskLease
@@ -72,6 +74,24 @@ class FakeLoop:
                 call_id="call_one",
                 tool_name="read_file",
             )
+            self.factory.reached.set()
+            await self.factory.hold.wait()
+            return
+        if self.factory.phase in {"handoff", "handoff_success"}:
+            session.history.extend(
+                [
+                    Message.text("user", user_input),
+                    Message.text("assistant", "I'll check the balance in the background."),
+                ]
+            )
+            yield BackgroundHandoffEvent(
+                turn_id="agent_turn",
+                handoffs=[BackgroundHandoff(request_id="execution_one", title="Check balance")],
+                acknowledgement="I'll check the balance in the background.",
+            )
+            if self.factory.phase == "handoff_success":
+                yield TurnFinishedEvent(turn_id="agent_turn", iterations=1)
+                return
             self.factory.reached.set()
             await self.factory.hold.wait()
             return
@@ -195,6 +215,7 @@ async def test_process_restart_continues_canonical_history_and_sanitizes_authori
         ("streaming", "active", "failed"),
         ("observable_stream", "uncertain", "uncertain"),
         ("tool", "uncertain", "uncertain"),
+        ("handoff", "uncertain", "uncertain"),
         ("close", "uncertain", "uncertain"),
     ],
 )
@@ -386,3 +407,24 @@ async def test_cancellation_at_store_commit_resolves_the_committed_revision(
     assert stored.status == "active"
     assert stored.revision == 1
     assert turns[0].status == "committed"
+
+
+async def test_successful_handoff_evidence_commits_atomically_with_session(tmp_path: Path) -> None:
+    settings, store, session = await _setup(tmp_path)
+    service = PersistentTurnService(
+        settings,
+        store,
+        profile_scope=SCOPE,
+        runtime_builder=RuntimeFactory("handoff_success"),
+    )
+    stored = await service.run_turn(
+        session.id, "Check balance", owner="worker", inbound_ref="inbound_one"
+    )
+    turn = await store.turn_for_inbound(session.id, "inbound_one", scope=SCOPE)
+    assert turn is not None and turn.status == "committed"
+    assert turn.background_handoffs == [
+        BackgroundHandoff(request_id="execution_one", title="Check balance")
+    ]
+    assert turn.handoff_acknowledgement == "I'll check the balance in the background."
+    assert stored.last_turn_id == turn.id
+    assert stored.session.history[-1] == Message.text("assistant", turn.handoff_acknowledgement)

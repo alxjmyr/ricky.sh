@@ -291,6 +291,36 @@ durable evidence shows nothing observable; otherwise it becomes `uncertain` or
 - An execution request is a fenced attempt under an immutable contract, not a
   second task system. Delegated authority can narrow the runnable contract but
   cannot add tools or profiles.
+- A gateway background admission is held until its originating foreground turn
+  has durably committed and its acknowledgement has confirmed transport delivery.
+  Successful admission returns a typed handoff outcome: the agent finishes the
+  dispatched tool batch, commits a canonical acknowledgement, and ends the turn
+  without another model request. Clarification and approval remain separate
+  pre-admission states. Scheduled and CLI admissions have no gateway delivery gate.
+- The gateway reconciles handoff dependencies using session, notification, and
+  messaging evidence through their public APIs. The execution store owns the
+  atomic transition from held to runnable work. Transport adapters only record
+  delivery; they never release executions. The committed source turn must name
+  the exact accepted execution and its canonical acknowledgement. Neither a
+  linked request nor an arbitrary final assistant message proves handoff.
+  Every acknowledgement part must have a durable transport receipt under the
+  current outbox fence. Pending, partial, failed, or ambiguous
+  acknowledgement delivery cannot release work. Recovery repairs committed
+  handoffs without replaying the model, and cancellation or expiry prevents a
+  delayed acknowledgement from starting stale work. Gateway acknowledgement
+  holds expire after one hour by default, configurable up to 24 hours. This
+  deadline is separate from a work contract's deadline. Session turn retention
+  preserves committed handoff evidence for 24 hours beyond ordinary count
+  limits; exact source-turn lookup remains available after later turns. After
+  that window, normal count pruning applies. Missing evidence never permits a
+  late release. Session schema 2 stores this evidence; execution schema 9
+  stores acknowledgement dependencies. Explicit owner migrations preserve
+  legacy rows without inventing handoffs or holding already admitted work.
+- The foreground turn owns the handoff acknowledgement; the execution owns its
+  terminal result notification. Routine messages omit internal execution/task
+  identifiers, which remain available through status and diagnostics. Later user
+  status requests remain supported. Execution success records task progress but
+  does not independently prove durable-task closure criteria were satisfied.
 - Linked task context is explicitly a historical snapshot at dispatch. Later
   task reads and mutation results supersede its mutable state; the contract's
   pinned task revision continues to identify the authorization boundary. A

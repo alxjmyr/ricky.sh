@@ -114,7 +114,7 @@ def _tables(path: Path) -> frozenset[str]:
 
 
 def _assert_adapter(adapter: UpgradeAdapter) -> None:
-    assert adapter.target_schema_version == 1
+    assert adapter.target_schema_version == (2 if adapter.adapter_id == "sessions" else 1)
 
 
 _CONCURRENT_CREATORS = 4
@@ -210,8 +210,8 @@ def test_create_current_preflight_verify_and_current_apply_are_idempotent(
         step_id=f"{adapter.adapter_id}.current",
         target_id=target.target_id,
         physical_path=target.physical_path,
-        source_schema_version=1,
-        target_schema_version=1,
+        source_schema_version=adapter.target_schema_version,
+        target_schema_version=adapter.target_schema_version,
     )
 
     adapter.apply(step)

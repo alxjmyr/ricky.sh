@@ -2,8 +2,36 @@
 
 from __future__ import annotations
 
+import json
+
 from ricky.agent.prompts import MOBILE_MARKDOWN_GUIDANCE
+from ricky.executions.browser import BrowserExecutionScope
 from ricky.jobs.spec import JobSpec
+
+
+def browser_system_sections(scope: BrowserExecutionScope | None) -> dict[str, str]:
+    """Expose only the browser identities already pinned for this execution."""
+    if scope is None:
+        return {}
+    resources = [
+        {
+            "resource": pin.resource.qualified,
+            "authenticated_origins": list(pin.authenticated_origin_ceiling),
+        }
+        for pin in scope.resources
+    ]
+    return {
+        "execution_browser": (
+            f"Browser execution mode: {scope.mode}.\n"
+            f"Authorized browser resources: {json.dumps(resources)}\n"
+            "To open a configured browser, pass the exact resource value above to "
+            "browser_session_open_resource. A profile name alone is not a resource. "
+            "Resource discovery is not required; these identities are already pinned "
+            "by this execution's contract. Use only exposed tools within its guards.\n"
+            f"Ephemeral browser sessions permitted: {scope.allow_ephemeral}. "
+            "An ephemeral session does not contain the configured browser's login."
+        )
+    }
 
 
 def job_system_sections(spec: JobSpec, *, named: bool) -> dict[str, str]:

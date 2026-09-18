@@ -6,6 +6,9 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from ricky.config import ExecutionSettings, MessagingSettings, RickySettings
 from ricky.durable_tasks.scoped import ScopedDurableTaskStore
@@ -420,3 +423,111 @@ async def test_receipt_read_failure_does_not_claim_task(tmp_path: Path) -> None:
         await dispatcher._update_task(request, task, run)
     tasks = await ScopedDurableTaskStore.create(settings, scope=SCOPE)
     assert await tasks.get_task(task.id) == task
+
+
+async def test_gateway_named_handoff_waits_for_delivery_and_projects_one_result(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _job(tmp_path)
+    dispatcher = ExecutionDispatcher(
+        settings,
+        project_root=tmp_path,
+        provider_factory=lambda _: ScriptedProvider("Brief complete."),
+    )
+    args: Any = dict(
+        notification_route="owner",
+        request_key="handoff:1",
+        profile_scope=SCOPE,
+        source_conversation_id="conversation-test",
+        source_message_id="inbound-test",
+        await_acknowledgement=True,
+        handoff_title="Prepare a brief",
+    )
+    request = await dispatcher.start_named_job("brief", **args)
+    duplicate = await dispatcher.start_named_job("brief", **args)
+    assert duplicate.id == request.id
+    assert request.status == "awaiting_acknowledgement"
+    assert request.expires_at is None
+    assert request.acknowledgement_expires_at is not None
+    assert await dispatcher.worker_once(scope=SCOPE) == []
+    await dispatcher.store.attach_acknowledgement(request.id, "outbox-test", scope=SCOPE)
+    assert await dispatcher.worker_once(scope=SCOPE) == []
+    await dispatcher.store.release_acknowledged(request.id, "outbox-test", scope=SCOPE)
+    [terminal] = await dispatcher.worker_once(scope=SCOPE)
+    assert terminal.status == "succeeded"
+    assert await dispatcher.worker_once(scope=SCOPE) == []
+
+
+async def test_cancelled_unacknowledged_handoff_does_not_notify_before_delivery(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    _job(tmp_path)
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    request = await dispatcher.start_named_job(
+        "brief",
+        notification_route="owner",
+        request_key="handoff:cancel",
+        profile_scope=SCOPE,
+        source_conversation_id="conversation-test",
+        source_message_id="inbound-test",
+        await_acknowledgement=True,
+        handoff_title="Prepare a brief",
+    )
+    await dispatcher.cancel_execution_request(request.id, scope=SCOPE)
+    await dispatcher.notifications.store.initialize()
+    assert (
+        await dispatcher.notifications.store.source_ids(source_kind="execution", scope=SCOPE)
+        == set()
+    )
+    assert await dispatcher.project_notifications(scope=SCOPE) == 0
+    await dispatcher.store.attach_acknowledgement(request.id, "outbox-test", scope=SCOPE)
+    await dispatcher.store.release_acknowledged(request.id, "outbox-test", scope=SCOPE)
+    assert await dispatcher.project_notifications(scope=SCOPE) == 1
+    assert await dispatcher.project_notifications(scope=SCOPE) == 0
+
+
+@pytest.mark.parametrize("gateway_handoff", [False, True])
+@pytest.mark.parametrize("final_message", ["", "$6.94"])
+async def test_success_notification_uses_friendly_gateway_fallback_only(
+    tmp_path: Path,
+    gateway_handoff: bool,
+    final_message: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _job(tmp_path)
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    request = await dispatcher.start_named_job(
+        "brief",
+        notification_route="owner",
+        request_key="fallback",
+        profile_scope=SCOPE,
+        await_acknowledgement=gateway_handoff,
+        handoff_title="Check balance" if gateway_handoff else None,
+        source_conversation_id="conversation-test" if gateway_handoff else None,
+        source_message_id="inbound-test" if gateway_handoff else None,
+    )
+    if gateway_handoff:
+        await dispatcher.store.attach_acknowledgement(request.id, "outbox-test", scope=SCOPE)
+        request = await dispatcher.store.release_acknowledged(
+            request.id, "outbox-test", scope=SCOPE
+        )
+    run = JobRun(
+        id="jobrun_fallback",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="session",
+        outcome="succeeded",
+        started_at=datetime.now(UTC),
+        final_message=final_message,
+        trigger="execution",
+        trigger_id=request.id,
+    )
+    request = request.model_copy(update={"status": "succeeded", "run_id": run.id})
+    await dispatcher._notify(request, run)
+    [record] = await dispatcher.notifications.store.list(scope=SCOPE)
+    expected = final_message or ("Completed." if gateway_handoff else f"Job run {run.id} succeeded")
+    assert record.request.body == expected
+    assert any(ref.kind == "job_run" and ref.id == run.id for ref in record.request.correlations)

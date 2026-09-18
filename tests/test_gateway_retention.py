@@ -22,6 +22,7 @@ from ricky.executions.store import ExecutionStore
 from ricky.gateway.retention import GatewayRetention
 from ricky.gateway.store import GatewayStore
 from ricky.messaging.store import MessagingStore
+from ricky.messaging.types import DeliveryReceipt
 from ricky.notifications.store import NotificationStore
 from ricky.sessions.store import SessionStore
 
@@ -58,6 +59,96 @@ async def test_a_dry_run_plan_deletes_nothing(tmp_path: Path) -> None:
     assert (await messaging.get_inbox(message_id)).id == message_id
 
 
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_held_handoff_protects_delivered_acknowledgement_and_source(
+    tmp_path: Path, cancel: bool
+) -> None:
+    config = _config(
+        tmp_path,
+        inbound_messages=0,
+        turn_results=0,
+        archived_conversations=0,
+        notifications=0,
+        execution_requests=0,
+    )
+    messaging = MessagingStore(config)
+    notifications = NotificationStore(config)
+    gateway = GatewayStore(config)
+    sessions = SessionStore(config)
+    executions = ExecutionStore(config)
+    for store in (messaging, notifications, gateway, sessions, executions):
+        await store.initialize()
+    message_id = await _processed_message(messaging, "held")
+    conversation_id, session_id = await make_conversation(gateway, sessions)
+    entry = await enqueue_notification(notifications)
+    claimed = await notifications.claim(
+        entry.id, scope=PROFILE_SCOPE, worker="w", transport="telegram", destination_ref="200"
+    )
+    part = transport_message(claimed)
+    await messaging.prepare_parts(claimed, [part])
+    await messaging.record_receipt(
+        claimed,
+        DeliveryReceipt(
+            transport="telegram",
+            account=part.account,
+            destination_id=part.destination_id,
+            transport_message_id=part.id,
+            platform_message_id="ack",
+            delivered_at=datetime.now(UTC),
+        ),
+    )
+    await notifications.mark_delivered(claimed, scope=PROFILE_SCOPE, platform_message_id="ack")
+    request = execution_request(
+        source_message_id=message_id, source_conversation_id=conversation_id
+    ).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Check balance",
+            "acknowledgement_expires_at": datetime.now(UTC) + timedelta(hours=1),
+        }
+    )
+    await executions.submit(request, scope=PROFILE_SCOPE)
+    await executions.attach_acknowledgement(request.id, entry.id, scope=PROFILE_SCOPE)
+    if cancel:
+        await executions.cancel(request.id, scope=PROFILE_SCOPE)
+    await gateway.begin_result(
+        message_id=message_id,
+        conversation_id=conversation_id,
+        session_id=session_id,
+        scope=PROFILE_SCOPE,
+    )
+    conversation = await gateway.get(conversation_id, scope=PROFILE_SCOPE)
+    await gateway.finish_result(
+        message_id=message_id,
+        conversation_id=conversation_id,
+        expected_conversation_revision=conversation.revision,
+        status="committed",
+        session_revision=1,
+        response_outbox_id=entry.id,
+        error=None,
+        scope=PROFILE_SCOPE,
+    )
+    conversation = await gateway.get(conversation_id, scope=PROFILE_SCOPE)
+    await gateway.archive(
+        conversation_id, scope=PROFILE_SCOPE, expected_revision=conversation.revision
+    )
+
+    plan = await GatewayRetention(config, scope=PROFILE_SCOPE).apply()
+
+    for group_name, protected_id in (
+        ("inbound_messages", message_id),
+        ("turn_results", message_id),
+        ("archived_conversations", conversation_id),
+        ("notifications", entry.id),
+        ("execution_requests", request.id),
+    ):
+        group = plan.group(group_name)
+        assert group is not None
+        assert protected_id in group.protected_ids
+        assert protected_id not in group.removable_ids
+    assert (await messaging.delivery_parts(entry.id))[0].platform_message_id == "ack"
+
+
 async def test_apply_removes_only_the_planned_records(tmp_path: Path) -> None:
     config = _config(tmp_path, inbound_messages=1)
     messaging = MessagingStore(config)
@@ -72,6 +163,48 @@ async def test_apply_removes_only_the_planned_records(tmp_path: Path) -> None:
     remaining = {item.id for item in await messaging.list_inbox(limit=100)}
     assert len(remaining) == 1
     assert remaining <= {older, newer}
+
+
+@pytest.mark.parametrize("ack_status", [None, "cancelled", "pending"])
+async def test_cancelled_handoff_ages_out_only_without_unresolved_delivery(
+    tmp_path: Path,
+    ack_status: str | None,
+) -> None:
+    config = _config(tmp_path, execution_requests=0, min_age_seconds=60.0)
+    executions = ExecutionStore(config)
+    notifications = NotificationStore(config)
+    await executions.initialize()
+    await notifications.initialize()
+    deadline = datetime.now(UTC) + timedelta(minutes=1)
+    request = execution_request(
+        source_message_id="inbound_" + "a" * 32,
+        source_conversation_id="conversation_" + "b" * 32,
+    ).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Check balance",
+            "acknowledgement_expires_at": deadline,
+        }
+    )
+    await executions.submit(request, scope=PROFILE_SCOPE)
+    if ack_status is not None:
+        entry = await enqueue_notification(notifications)
+        await executions.attach_acknowledgement(request.id, entry.id, scope=PROFILE_SCOPE)
+        if ack_status == "cancelled":
+            await notifications.cancel(entry.id, scope=PROFILE_SCOPE)
+    await executions.cancel(request.id, scope=PROFILE_SCOPE)
+    retention = GatewayRetention(config, scope=PROFILE_SCOPE)
+    young = await retention.plan(now=deadline + timedelta(seconds=30))
+    assert request.id in young.group("execution_requests").protected_ids  # type: ignore[union-attr]
+    old = await retention.plan(now=deadline + timedelta(seconds=61))
+    group = old.group("execution_requests")
+    assert group is not None
+    if ack_status == "pending":
+        assert request.id in group.protected_ids
+        assert request.id not in group.removable_ids
+    else:
+        assert request.id not in group.protected_ids
+        assert request.id in group.removable_ids
 
 
 async def test_apply_requires_retention_to_be_enabled(tmp_path: Path) -> None:

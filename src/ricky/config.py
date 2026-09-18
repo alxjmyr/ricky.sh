@@ -1054,6 +1054,7 @@ class ExecutionSettings(BaseModel):
 
     store_path: str = Field(default="executions/executions.sqlite3", min_length=1)
     contract_snapshot_dir: str = Field(default="executions/contracts", min_length=1)
+    acknowledgement_ttl_seconds: float = Field(default=3_600.0, gt=0, le=86_400)
     draft_ttl_seconds: float = Field(default=3_600.0, gt=0, le=604_800)
     confirmation_ttl_seconds: float = Field(default=900.0, gt=0, le=86_400)
     source_snapshot_chars: int = Field(default=4_000, ge=100, le=20_000)

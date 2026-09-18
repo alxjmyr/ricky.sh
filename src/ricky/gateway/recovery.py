@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ricky.config import RickySettings
 from ricky.executions.store import ExecutionNotFoundError, ExecutionStore
+from ricky.gateway.handoffs import reconcile_handoffs
 from ricky.gateway.store import GatewayStore
 from ricky.jobs.browser_store import BrowserRunLedger
 from ricky.jobs.lock import browser_worker_is_alive
@@ -158,6 +159,7 @@ class GatewayRecovery:
         actions: list[RecoveryAction] = []
         failures: list[str] = []
         for step in (
+            self._recover_handoffs,
             self._recover_inbox,
             self._recover_pollers,
             self._recover_foreground_turns,
@@ -189,11 +191,104 @@ class GatewayRecovery:
         await self.jobs.initialize()
         await self.browser_ledger.initialize()
 
+    async def _recover_handoffs(self, apply_changes: bool, now: datetime) -> list[RecoveryAction]:
+        """Reconcile committed handoffs before classifying abandoned foreground work."""
+        if not apply_changes:
+            return [
+                RecoveryAction(
+                    subsystem="foreground_turn",
+                    record_id=message_id,
+                    from_state=status,
+                    to_state=status,
+                    disposition="requires_review",
+                    reason=(
+                        "committed handoff awaits acknowledgement reconciliation; "
+                        "delivery evidence must be verified before execution release"
+                    ),
+                )
+                for message_id, status in (await self._committed_handoff_sources(now)).items()
+            ]
+        held = await self.executions.list(
+            scope=self.profile_scope, status="awaiting_acknowledgement", limit=1_000
+        )
+        await reconcile_handoffs(
+            self.settings,
+            gateway=self.gateway,
+            messaging=self.messaging,
+            notifications=self.notifications,
+            sessions=self.sessions,
+            executions=self.executions,
+            scope=self.profile_scope,
+            now=now,
+        )
+        actions = []
+        for request in held:
+            current = await self.executions.get(request.id, scope=self.profile_scope)
+            if current.status == request.status:
+                continue
+            actions.append(
+                RecoveryAction(
+                    subsystem="execution",
+                    record_id=request.id,
+                    from_state=request.status,
+                    to_state=current.status,
+                    disposition="released" if current.status == "queued" else "expired",
+                    reason="reconciled durable handoff acknowledgement and source-turn evidence",
+                    applied=True,
+                )
+            )
+        return actions
+
+    async def _committed_handoff_sources(self, now: datetime) -> dict[str, str]:
+        """Read exact source evidence without predicting delivery or writing recovery state."""
+        sources: dict[str, str] = {}
+        stale = {item.message.id for item in await self.messaging.stale_inbox_claims(now=now)}
+        for request in await self.executions.list_pending_acknowledgements(
+            scope=self.profile_scope
+        ):
+            if request.source_message_id is None or request.source_conversation_id is None:
+                continue
+            result = await self.gateway.get_result(
+                request.source_message_id, scope=request.profile_scope
+            )
+            if result is None or result.status not in {"running", "uncertain", "committed"}:
+                continue
+            if result.conversation_id != request.source_conversation_id:
+                continue
+            conversation = await self.gateway.get(
+                result.conversation_id, scope=request.profile_scope
+            )
+            if result.session_id != conversation.session_id:
+                continue
+            committed = await self.sessions.turn_for_inbound(
+                result.session_id,
+                result.message_id,
+                scope=request.profile_scope,
+            )
+            if (
+                committed is None
+                or committed.handoff_acknowledgement is None
+                or not any(item.request_id == request.id for item in committed.background_handoffs)
+            ):
+                continue
+            inbound = await self.messaging.get_inbox(result.message_id)
+            if (
+                result.status != "committed"
+                and inbound.status == "claimed"
+                and inbound.id not in stale
+            ):
+                continue
+            sources[result.message_id] = result.status
+        return sources
+
     async def _recover_inbox(self, apply_changes: bool, now: datetime) -> list[RecoveryAction]:
         """Rule: a claimed message is uncertain only when its turn had started."""
 
         actions: list[RecoveryAction] = []
+        handoff_sources = await self._committed_handoff_sources(now) if not apply_changes else {}
         for stale in await self.messaging.stale_inbox_claims(now=now):
+            if stale.message.id in handoff_sources:
+                continue
             result = await self.gateway.result_for_message(
                 stale.message.id,
                 scope=self.profile_scope,
@@ -267,7 +362,10 @@ class GatewayRecovery:
         """Rule: a running turn owns unobservable output, so it becomes uncertain."""
 
         actions: list[RecoveryAction] = []
+        handoff_sources = await self._committed_handoff_sources(now) if not apply_changes else {}
         for result in await self.gateway.running_results(scope=self.profile_scope):
+            if result.message_id in handoff_sources:
+                continue
             actions.append(
                 RecoveryAction(
                     subsystem="foreground_turn",

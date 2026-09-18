@@ -14,6 +14,7 @@ from ricky.profiles import ProfileLabel, ProfileScope
 
 ExecutionKind = Literal["named_job", "ad_hoc"]
 ExecutionStatus = Literal[
+    "awaiting_acknowledgement",
     "queued",
     "claimed",
     "running",
@@ -73,6 +74,10 @@ class ExecutionRequest(_StrictModel):
     profile_scope: ProfileScope
     source_conversation_id: str | None = Field(default=None, max_length=512)
     source_message_id: str | None = Field(default=None, max_length=512)
+    acknowledgement_outbox_id: str | None = Field(default=None, min_length=1, max_length=512)
+    handoff_title: str | None = Field(default=None, min_length=1, max_length=200)
+    acknowledgement_delivered_at: datetime | None = None
+    acknowledgement_expires_at: datetime | None = None
     grant_id: str | None = Field(default=None, pattern=r"^grant_[0-9a-f]{32}$")
     notification_route: str = Field(min_length=1, max_length=200)
     request_key: str = Field(min_length=1, max_length=500)
@@ -121,7 +126,14 @@ class ExecutionRequest(_StrictModel):
 
     @model_validator(mode="after")
     def _contract(self) -> ExecutionRequest:
-        for name in ("created_at", "not_before", "expires_at", "claim_expires_at"):
+        for name in (
+            "created_at",
+            "not_before",
+            "expires_at",
+            "claim_expires_at",
+            "acknowledgement_delivered_at",
+            "acknowledgement_expires_at",
+        ):
             value = getattr(self, name)
             if value is not None:
                 _aware(value, name)
@@ -152,6 +164,19 @@ class ExecutionRequest(_StrictModel):
                 raise ValueError("task_revision requires task_id")
         elif self.task_revision is None:
             raise ValueError("task linkage requires a revision")
+        if self.status == "awaiting_acknowledgement" and (
+            self.source_conversation_id is None
+            or self.source_message_id is None
+            or self.handoff_title is None
+            or self.acknowledgement_expires_at is None
+        ):
+            raise ValueError("held executions require source linkage, title, and expiration")
+        if self.acknowledgement_delivered_at is not None and (
+            self.acknowledgement_outbox_id is None
+            or self.handoff_title is None
+            or self.status == "awaiting_acknowledgement"
+        ):
+            raise ValueError("delivered acknowledgements require a linked settled handoff")
         claim_fields = (self.claimed_by, self.claim_token, self.claim_expires_at)
         if self.status in {
             "claimed",

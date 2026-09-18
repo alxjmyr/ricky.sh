@@ -33,7 +33,7 @@ _CREATE_RACE_DELAY_SECONDS = 0.02
 _V7_SCHEMA_VERSION = 7
 _V7_TO_V8_SQL = _BROWSER_APPROVAL_SCHEMA.replace(
     "COMMIT;",
-    f"PRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;",
+    "PRAGMA user_version = 8;\nCOMMIT;",
 )
 _BASE_SCHEMA = {
     "execution_requests": {
@@ -153,6 +153,27 @@ _BROWSER_SCHEMA = {
     },
 }
 
+_HANDOFF_COLUMNS = {
+    "acknowledgement_outbox_id",
+    "acknowledgement_delivered_at",
+    "acknowledgement_expires_at",
+    "handoff_title",
+}
+_CURRENT_SCHEMA = {
+    **_BASE_SCHEMA,
+    "execution_requests": _BASE_SCHEMA["execution_requests"] | _HANDOFF_COLUMNS,
+    **_BROWSER_SCHEMA,
+}
+_V8_TO_V9_SQL = """
+BEGIN IMMEDIATE;
+ALTER TABLE execution_requests ADD COLUMN acknowledgement_outbox_id TEXT;
+ALTER TABLE execution_requests ADD COLUMN acknowledgement_delivered_at TEXT;
+ALTER TABLE execution_requests ADD COLUMN acknowledgement_expires_at TEXT;
+ALTER TABLE execution_requests ADD COLUMN handoff_title TEXT;
+PRAGMA user_version = 9;
+COMMIT;
+"""
+
 
 def inspect_executions_database(path: Path) -> AdapterInspection:
     """Inspect one execution database without creating it or changing journal state."""
@@ -174,7 +195,7 @@ def inspect_executions_database(path: Path) -> AdapterInspection:
                     "execution database integrity check failed",
                 )
             if version == SCHEMA_VERSION:
-                if not _has_columns(connection, _BASE_SCHEMA | _BROWSER_SCHEMA):
+                if not _has_columns(connection, _CURRENT_SCHEMA):
                     return _inspection(
                         target,
                         "corrupt",
@@ -184,9 +205,28 @@ def inspect_executions_database(path: Path) -> AdapterInspection:
                     )
                 state = "current"
                 detail = "execution database is current"
+            elif version == 8:
+                if not _has_columns(connection, _BASE_SCHEMA | _BROWSER_SCHEMA) or any(
+                    str(row[1]) in _HANDOFF_COLUMNS
+                    for row in connection.execute("PRAGMA table_info(execution_requests)")
+                ):
+                    return _inspection(
+                        target,
+                        "corrupt",
+                        version,
+                        False,
+                        "execution schema version 8 is incomplete or partially migrated",
+                    )
+                state = "migration_required"
+                detail = "execution schema requires migration from 8 to 9"
             elif version == _V7_SCHEMA_VERSION:
-                if not _has_columns(connection, _BASE_SCHEMA) or any(
-                    _table_exists(connection, table) for table in _BROWSER_SCHEMA
+                if (
+                    not _has_columns(connection, _BASE_SCHEMA)
+                    or any(_table_exists(connection, table) for table in _BROWSER_SCHEMA)
+                    or any(
+                        str(row[1]) in _HANDOFF_COLUMNS
+                        for row in connection.execute("PRAGMA table_info(execution_requests)")
+                    )
                 ):
                     return _inspection(
                         target,
@@ -196,7 +236,7 @@ def inspect_executions_database(path: Path) -> AdapterInspection:
                         "execution schema version 7 is incomplete or partially migrated",
                     )
                 state = "migration_required"
-                detail = "execution schema requires migration from 7 to 8"
+                detail = "execution schema requires migration from 7 to 9"
             else:
                 return _inspection(
                     target,
@@ -213,7 +253,7 @@ def inspect_executions_database(path: Path) -> AdapterInspection:
 
 
 def create_current_executions_database(path: Path) -> None:
-    """Create schema version 8 only when the database file is genuinely absent."""
+    """Create schema version 9 only when the database file is genuinely absent."""
 
     _require_canonical(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -279,7 +319,7 @@ class ExecutionsUpgradeAdapter:
 
     @property
     def supported_source_schema_versions(self) -> frozenset[int]:
-        return frozenset({_V7_SCHEMA_VERSION, SCHEMA_VERSION})
+        return frozenset({_V7_SCHEMA_VERSION, 8, SCHEMA_VERSION})
 
     @property
     def target_schema_version(self) -> int:
@@ -318,14 +358,15 @@ class ExecutionsUpgradeAdapter:
         for path in self._paths:
             inspection = inspect_executions_database(path)
             if inspection.state == "migration_required":
+                assert inspection.found_schema_version is not None
                 target = _target(path)
                 steps.append(
                     MigrationStep(
                         adapter_id=ADAPTER_ID,
-                        step_id=f"{target.target_id}.v7-to-v8",
+                        step_id=f"{target.target_id}.v{inspection.found_schema_version}-to-v9",
                         target_id=target.target_id,
                         physical_path=str(path),
-                        source_schema_version=_V7_SCHEMA_VERSION,
+                        source_schema_version=inspection.found_schema_version,
                         target_schema_version=SCHEMA_VERSION,
                     )
                 )
@@ -343,9 +384,11 @@ class ExecutionsUpgradeAdapter:
         try:
             with sqlite3.connect(path, isolation_level=None) as connection:
                 connection.execute("PRAGMA foreign_keys = ON")
-                connection.executescript(_V7_TO_V8_SQL)
+                if inspection.found_schema_version == 7:
+                    connection.executescript(_V7_TO_V8_SQL)
+                connection.executescript(_V8_TO_V9_SQL)
         except sqlite3.Error as exc:
-            raise ExecutionStoreError("execution migration from 7 to 8 failed") from exc
+            raise ExecutionStoreError("execution acknowledgement migration failed") from exc
         if os.name == "posix":
             for candidate in path.parent.glob(f"{path.name}*"):
                 if candidate.is_file():
@@ -374,7 +417,7 @@ class ExecutionsUpgradeAdapter:
         if (
             step.adapter_id != ADAPTER_ID
             or step.physical_path is None
-            or step.source_schema_version != _V7_SCHEMA_VERSION
+            or step.source_schema_version not in {_V7_SCHEMA_VERSION, 8}
             or step.target_schema_version != SCHEMA_VERSION
         ):
             raise ExecutionStoreError("invalid execution migration step")

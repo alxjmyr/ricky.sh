@@ -18,6 +18,7 @@ from ricky.agent.context_types import ContextReport
 from ricky.agent.events import (
     AgentErrorEvent,
     AgentEvent,
+    BackgroundHandoffEvent,
     ContextCompactionFailedEvent,
     LlmRequestStartedEvent,
     LlmResponseFinishedEvent,
@@ -34,6 +35,7 @@ from ricky.agent.events import (
     TurnStartedEvent,
     UserInteractionRequiredEvent,
 )
+from ricky.agent.handoff import background_handoff_acknowledgement
 from ricky.agent.session import AgentSession, PermissionGrant
 from ricky.agent.tool_dispatch import (
     PermissionResponder,
@@ -392,7 +394,7 @@ class AgentLoop:
                     iteration_registry,
                 ):
                     yield event
-                    if isinstance(event, UserInteractionRequiredEvent):
+                    if isinstance(event, (UserInteractionRequiredEvent, BackgroundHandoffEvent)):
                         interaction_required = True
                     if isinstance(event, ToolCallRejectedEvent):
                         rejected_in_response.setdefault(event.input_digest, event.tool_name)
@@ -696,12 +698,22 @@ class AgentLoop:
                 )
             )
 
+        handoffs = list(
+            {
+                result.background_handoff.request_id: result.background_handoff
+                for call in tool_calls
+                if (result := resolved[call.id].result).background_handoff is not None
+                and not result.is_error
+            }.values()
+        )
+        response_parts = [background_handoff_acknowledgement(handoffs)] if handoffs else []
         interactions = [
             resolved[call.id].result.user_interaction
             for call in tool_calls
             if resolved[call.id].result.user_interaction is not None
             and not resolved[call.id].result.is_error
         ]
+        interaction_event: UserInteractionRequiredEvent | None = None
         if interactions:
             first = interactions[0]
             assert first is not None
@@ -722,13 +734,28 @@ class AgentLoop:
                     )
                     else "confirmation"
                 )
-            session.history.append(Message.text("assistant", prompt))
-            yield UserInteractionRequiredEvent(
+            response_parts.append(prompt)
+            interaction_event = UserInteractionRequiredEvent(
                 turn_id=turn_id,
                 interaction_kind=interaction_kind,
                 correlation_id=correlation_id,
                 prompt=prompt,
             )
+        if handoffs:
+            failures = [call.name for call in tool_calls if resolved[call.id].result.is_error]
+            if failures:
+                response_parts.append(
+                    "Other requests in this turn did not succeed: " + ", ".join(failures) + "."
+                )
+        if response_parts:
+            acknowledgement = "\n\n".join(response_parts)
+            session.history.append(Message.text("assistant", acknowledgement))
+            if interaction_event is not None:
+                yield interaction_event
+            if handoffs:
+                yield BackgroundHandoffEvent(
+                    turn_id=turn_id, handoffs=handoffs, acknowledgement=acknowledgement
+                )
 
     async def _run_tool(
         self,

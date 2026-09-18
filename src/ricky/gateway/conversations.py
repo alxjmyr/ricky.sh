@@ -57,6 +57,7 @@ from ricky.gateway.context import (
     gateway_instructions,
     render_gateway_activity,
 )
+from ricky.gateway.handoffs import enqueue_foreground_response, reconcile_handoffs
 from ricky.gateway.store import GatewayStore
 from ricky.gateway.tools import (
     gateway_capability_inventory_tools,
@@ -693,6 +694,37 @@ class ConversationCoordinator:
                 conversation.session_id,
                 scope=conversation.profile_scope,
             )
+            committed_handoff = await self.sessions.turn_for_inbound(
+                conversation.session_id,
+                inbound.id,
+                scope=conversation.profile_scope,
+            )
+            if (
+                committed_handoff is not None
+                and committed_handoff.status == "committed"
+                and committed_handoff.background_handoffs
+            ):
+                # Preserve the committed acknowledgement for deterministic
+                # recovery. A generic error reply under this source's dedupe
+                # key would permanently displace it after an enqueue failure.
+                with suppress(Exception):
+                    await self.gateway.finish_result(
+                        scope=conversation.profile_scope,
+                        message_id=inbound.id,
+                        conversation_id=conversation.id,
+                        expected_conversation_revision=base_revision,
+                        status="uncertain",
+                        session_revision=committed_handoff.base_revision + 1,
+                        response_outbox_id=None,
+                        error="committed background handoff awaits acknowledgement recovery",
+                    )
+                await self._finish_claim_uncertain(claim)
+                return GatewayProcessResult(
+                    message_id=inbound.id,
+                    conversation_id=conversation.id,
+                    session_id=conversation.session_id,
+                    status="uncertain",
+                )
             if stored.status == "uncertain":
                 await self._settle_uncertain(
                     claim,
@@ -1272,6 +1304,7 @@ class ConversationCoordinator:
             for item in linked
             if item.status
             in {
+                "awaiting_acknowledgement",
                 "queued",
                 "claimed",
                 "running",
@@ -1393,67 +1426,36 @@ class ConversationCoordinator:
         conversation: Conversation,
         body: str,
     ) -> str:
-        correlations = [
-            CorrelationRef(
-                kind="conversation",
-                id=conversation.id,
-                revision=conversation.revision,
-                profile_label=conversation.profile_scope.label(),
-            )
-        ]
-
-        execution_store = self.execution_store
-        linked_requests = []
-        for request in await execution_store.list_by_source_message(
+        turn = await self.sessions.turn_for_inbound(
+            conversation.session_id,
             inbound.id,
             scope=conversation.profile_scope,
-            limit=100,
-        ):
-            linked_requests.append(request)
-            correlations.append(
-                CorrelationRef(
-                    kind="execution_request",
-                    id=request.id,
-                    profile_label=request.profile_scope.label(),
-                )
-            )
-            if request.task_id is not None:
-                correlations.append(
-                    CorrelationRef(
-                        kind="task",
-                        id=request.task_id,
-                        revision=request.task_revision,
-                        profile_label=request.profile_scope.label(),
-                    )
-                )
-        if linked_requests:
-            footer_lines = ["Background work:"]
-            for linked in linked_requests:
-                line = f"- request {linked.id} ({linked.status})"
-                if linked.task_id is not None:
-                    line += f"; task {linked.task_id}"
-                footer_lines.append(line)
-            footer = "\n".join(footer_lines)
-            available = max(1, self.settings.messaging.body_char_limit - len(footer) - 2)
-            body = f"{body[:available]}\n\n{footer}"
-        request = NotificationRequest(
-            id=f"notification_{uuid4().hex}",
-            route=f"inbox:{inbound.id}",
-            body=body[: self.settings.messaging.body_char_limit],
-            body_format="portable_markdown_v1",
-            urgency="normal",
-            source_kind="gateway_turn",
-            profile_label=conversation.profile_scope.label(),
-            source_id=inbound.id,
-            dedupe_key=inbound.id,
-            correlations=correlations,
-            created_at=datetime.now(UTC),
         )
-        record = await self.notifications.enqueue(
-            request,
-            scope=conversation.profile_scope,
+        return await enqueue_foreground_response(
+            self.settings,
+            notifications=self.notifications,
+            executions=self.execution_store,
+            inbound=inbound,
+            conversation=conversation,
+            body=(
+                turn.handoff_acknowledgement
+                if turn is not None and turn.handoff_acknowledgement is not None
+                else body
+            ),
+            handoffs=turn.background_handoffs if turn is not None else (),
         )
-        return record.outbox.id
+
+    async def reconcile_handoffs(self) -> int:
+        await self.initialize()
+        return await reconcile_handoffs(
+            self.settings,
+            gateway=self.gateway,
+            messaging=self.messaging,
+            notifications=self.notifications,
+            sessions=self.sessions,
+            executions=self.execution_store,
+            scope=self.profile_scope,
+        )
 
     async def _settle_uncertain(
         self,

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel
 
 from ricky.authority.compiler import ContractAuthorityCompiler, build_grant_source
 from ricky.capabilities import AuthenticatedSource
+from ricky.durable_tasks.scoped import ScopedDurableTaskStore
 from ricky.executions.compiler import ExecutionContractCompiler
 from ricky.executions.dispatcher import ExecutionDispatcher
 from ricky.executions.drafts import AdHocDelegationCommand
@@ -19,7 +20,7 @@ from ricky.gateway.capability_use import PrepareCapabilityUseTool
 from ricky.gateway.types import Conversation
 from ricky.messaging.types import InboundMessage
 from ricky.project_scope import ProjectScope
-from ricky.tools import Tool, ToolContext, ToolResult, UserInteractionRequest
+from ricky.tools import BackgroundHandoff, Tool, ToolContext, ToolResult, UserInteractionRequest
 
 
 class _Params(BaseModel):
@@ -113,13 +114,15 @@ class StartNamedJobTool(_GatewayExecutionTool):
         request = await self.dispatcher.start_named_job(
             args.name,
             notification_route=self.route,
-            request_key=self.key(self.name),
+            request_key=self.key(f"{self.name}:{args.name}:{args.task_id}:{args.task_revision}"),
             profile_scope=ctx.session.profile_scope,
             task_id=args.task_id,
             task_revision=args.task_revision,
             source_conversation_id=self.conversation.id,
             source_message_id=self.inbound.id,
             project_scope=self.project_scope,
+            await_acknowledgement=True,
+            handoff_title=args.name.replace("_", " ").replace("-", " "),
         )
         return _queued(request)
 
@@ -248,6 +251,13 @@ class DelegateTaskTool(_GatewayExecutionTool):
                     ),
                     is_error=True,
                 )
+            tasks = await ScopedDurableTaskStore.create(
+                ctx.settings, scope=self.conversation.profile_scope
+            )
+            task = await tasks.get_task(contract.task_id)
+            title = " ".join(task.title.split()) or "Background task"
+            if len(title) > 200:
+                title = title[:199].rsplit(" ", 1)[0] + "…"
             grant = None
             if any(item.authority_capability is not None for item in contract.capabilities):
                 if self.contract_authority is None:
@@ -268,6 +278,8 @@ class DelegateTaskTool(_GatewayExecutionTool):
                     contract,
                     request_key=self.key(f"delegate:{draft.id}:{contract.digest}"),
                     grant_id=grant.id if grant is not None else None,
+                    await_acknowledgement=True,
+                    handoff_title=title,
                 )
                 grant_id = grant.id if grant is not None else None
             except Exception:
@@ -309,6 +321,7 @@ class DelegateTaskTool(_GatewayExecutionTool):
                 "Report it as queued, not completed."
             ),
             data=result.model_dump(mode="json"),
+            background_handoff=_handoff(request),
         )
 
 
@@ -487,4 +500,11 @@ def _queued(request: ExecutionRequest) -> ToolResult:
             "Report it as queued, not completed."
         ),
         data=data.model_dump(mode="json"),
+        background_handoff=_handoff(request),
     )
+
+
+def _handoff(request: ExecutionRequest) -> BackgroundHandoff | None:
+    if request.status != "awaiting_acknowledgement" or request.handoff_title is None:
+        return None
+    return BackgroundHandoff(request_id=request.id, title=request.handoff_title)

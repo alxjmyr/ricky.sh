@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from ricky.agent.events import (
     AgentEvent,
+    BackgroundHandoffEvent,
     LlmResponseFinishedEvent,
     TextDeltaEvent,
     ThinkingDeltaEvent,
@@ -126,6 +127,7 @@ class PersistentTurnService:
 
             async def run_owned_turn() -> StoredSession:
                 nonlocal observable
+                completed_turn = turn
                 final: TurnFinishedEvent | None = None
                 async with asyncio.timeout(self.settings.sessions.turn_wall_seconds):
                     async with runtime_builder(
@@ -188,6 +190,13 @@ class PersistentTurnService:
                                 extra_system_sections=extra_system_sections,
                             )
                         async for event in events:
+                            if isinstance(event, BackgroundHandoffEvent):
+                                completed_turn = completed_turn.model_copy(
+                                    update={
+                                        "background_handoffs": event.handoffs,
+                                        "handoff_acknowledgement": event.acknowledgement,
+                                    }
+                                )
                             if _is_observable(event):
                                 observable = True
                             if event_sink is not None:
@@ -203,7 +212,7 @@ class PersistentTurnService:
                     raise PersistentTurnError("agent turn was interrupted")
                 if final.error is not None:
                     raise PersistentTurnError(final.error)
-                return await self.store.commit(lease, stored.revision, session, turn)
+                return await self.store.commit(lease, stored.revision, session, completed_turn)
 
             try:
                 return await run_with_lease_heartbeat(
@@ -280,5 +289,6 @@ def _is_observable(event: AgentEvent) -> bool:
             ToolCallStartedEvent,
             ToolCallFinishedEvent,
             UserInteractionRequiredEvent,
+            BackgroundHandoffEvent,
         ),
     )

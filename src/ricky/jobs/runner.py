@@ -52,7 +52,7 @@ from ricky.executions.browser_runtime import (
 from ricky.executions.store import ExecutionStore
 from ricky.executions.types import ExecutionRequest
 from ricky.jobs.batches import persist_batch, prune_batch_payloads
-from ricky.jobs.briefing import job_system_sections
+from ricky.jobs.briefing import browser_system_sections, job_system_sections
 from ricky.jobs.browser_store import BrowserRunLedger
 from ricky.jobs.effects import GuardedEffectTool, is_guardable
 from ricky.jobs.escalation import escalate_blocked
@@ -657,7 +657,10 @@ class JobRunner:
                         runtime,
                         filtered,
                         permission_engine,
-                        system_sections=system_sections,
+                        system_sections={
+                            **(system_sections or {}),
+                            **browser_system_sections(browser_scope),
+                        },
                         pinned_runtime=pinned_runtime,
                         workflow_plan=workflow_plan,
                         run_seeded=run_seeded,

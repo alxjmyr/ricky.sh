@@ -27,6 +27,7 @@ from ricky.config import (
     TelegramAccountSettings,
     user_data_subpath,
 )
+from ricky.durable_tasks.scoped import ScopedDurableTaskStore
 from ricky.executions.store import ExecutionStore
 from ricky.gateway.conversations import ConversationCoordinator, GatewayConversationError
 from ricky.gateway.store import GatewayStore
@@ -39,12 +40,15 @@ from ricky.llm import (
     TextPart,
     ToolCallPart,
 )
+from ricky.messaging.runtime import MessagingRuntime
 from ricky.messaging.store import MessagingStore
 from ricky.messaging.types import (
+    DeliveryReceipt,
     InboundMessage,
     ReceiveBatch,
     ReceivedUpdate,
     TransportCursor,
+    TransportMessage,
 )
 from ricky.profiles import ProfileScope
 from ricky.sessions import SessionStore
@@ -58,6 +62,42 @@ def _test_only_guarded_capability(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 NOW = datetime(2026, 8, 12, 12, tzinfo=UTC)
+
+
+class HandoffTransport:
+    """Record accepted messages while the real messaging runtime persists receipts."""
+
+    def __init__(self) -> None:
+        self.sent: list[TransportMessage] = []
+
+    async def receive(self, cursor: TransportCursor | None) -> ReceiveBatch:
+        raise AssertionError("handoff test must not poll a transport")
+
+    async def send(self, message: TransportMessage) -> DeliveryReceipt:
+        self.sent.append(message)
+        return DeliveryReceipt(
+            transport=message.transport,
+            account=message.account,
+            destination_id=message.destination_id,
+            transport_message_id=message.id,
+            platform_message_id=str(len(self.sent)),
+            delivered_at=datetime.now(UTC),
+        )
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _handoff_messaging(settings: RickySettings, transport: HandoffTransport) -> MessagingRuntime:
+    from ricky.interfaces.messaging.telegram import split_telegram_text
+    from ricky.notifications.routes import RoutePolicy
+
+    return MessagingRuntime(
+        settings,
+        routes=RoutePolicy(settings, conversation_resolver=GatewayStore(settings)),
+        transport_factory=lambda _: transport,
+        text_splitter=split_telegram_text,
+    )
 
 
 class ScriptedProvider:
@@ -493,6 +533,7 @@ async def _ingest(
     account: str = "personal/bot",
     status: str = "pending",
     reply_to: str | None = None,
+    images_resized: bool = False,
 ) -> InboundMessage:
     message = InboundMessage(
         id="inbound_" + suffix * 32,
@@ -504,6 +545,7 @@ async def _ingest(
         platform_message_id=suffix,
         reply_to_platform_message_id=reply_to,
         text=text if status != "rejected" else "[rejected update]",
+        images_resized=images_resized,
         received_at=NOW,
         status=cast(Any, status),
     )
@@ -853,12 +895,16 @@ async def test_rejected_sender_reaches_no_provider_task_execution_or_reply(
     assert await notifications.list(scope=_SCOPE, limit=10) == []
 
 
+@pytest.mark.parametrize("images_resized", [False, True])
 async def test_named_job_is_queued_once_and_foreground_returns_without_running_it(
     tmp_path: Path,
+    images_resized: bool,
 ) -> None:
     settings = _settings(tmp_path)
     _job(tmp_path)
-    inbound = await _ingest(settings, suffix="a", text="Run my brief job")
+    inbound = await _ingest(
+        settings, suffix="a", text="Run my brief job", images_resized=images_resized
+    )
     provider = ScriptedProvider(
         [
             [_tool("job", "start_named_job", {"name": "brief"})],
@@ -876,10 +922,10 @@ async def test_named_job_is_queued_once_and_foreground_returns_without_running_i
     assert result == replay
     assert len(requests) == 1
     assert requests[0].kind == "named_job"
-    assert requests[0].status == "queued"
+    assert requests[0].status == "awaiting_acknowledgement"
     assert requests[0].source_conversation_id == result.conversation_id
     assert requests[0].source_message_id == inbound.id
-    assert len(provider.requests) == 2
+    assert len(provider.requests) == 1
     from ricky.notifications.store import NotificationStore
 
     assert result.response_outbox_id is not None
@@ -887,7 +933,45 @@ async def test_named_job_is_queued_once_and_foreground_returns_without_running_i
         result.response_outbox_id,
         scope=_SCOPE,
     )
-    assert requests[0].id in reply.request.body
+    assert requests[0].id not in reply.request.body
+    assert "Background work:" not in reply.request.body
+    assert ("resized" in reply.request.body.lower()) is images_resized
+    assert requests[0].acknowledgement_outbox_id == result.response_outbox_id
+    assert any(ref.id == requests[0].id for ref in reply.request.correlations)
+    assert await store.claim(scope=_SCOPE, worker_id="early", limit=1) == []
+    assert await coordinator.reconcile_handoffs() == 0
+    transport = HandoffTransport()
+    messaging = _handoff_messaging(settings, transport)
+    assert await messaging.deliver_once() == 1
+    assert await coordinator.reconcile_handoffs() == 1
+    assert await coordinator.reconcile_handoffs() == 0
+    assert (await store.get(requests[0].id, scope=_SCOPE)).status == "queued"
+    assert len(provider.requests) == 1
+    from ricky.executions.dispatcher import ExecutionDispatcher
+    from ricky.notifications.routes import RoutePolicy
+    from ricky.notifications.service import NotificationService
+
+    worker = ScriptedProvider([[_answer("Here is your brief.")]])
+    routes = RoutePolicy(settings, conversation_resolver=GatewayStore(settings))
+    dispatcher = ExecutionDispatcher(
+        settings,
+        project_root=tmp_path,
+        store=store,
+        provider_factory=lambda _: worker,
+        routes=routes,
+        notifications=NotificationService(settings, routes=routes),
+    )
+    completed = await dispatcher.worker_once(scope=_SCOPE)
+    assert len(completed) == 1
+    assert completed[0].status == "succeeded", completed[0].error
+    assert await messaging.deliver_once() == 1
+    assert len(transport.sent) == 2
+    assert "Here is your brief." not in transport.sent[0].text
+    assert "Here is your brief." in transport.sent[1].text
+    assert len(provider.requests) == 1
+    assert len(worker.requests) == 1
+    assert await dispatcher.worker_once(scope=_SCOPE) == []
+    assert await messaging.deliver_once() == 0
 
 
 async def test_ad_hoc_instruction_creates_task_before_execution_request(
@@ -922,8 +1006,104 @@ async def test_ad_hoc_instruction_creates_task_before_execution_request(
         result.response_outbox_id,
         scope=_SCOPE,
     )
-    assert request.id in reply.request.body
-    assert request.task_id in reply.request.body
+    assert request.status == "awaiting_acknowledgement"
+    assert request.id not in reply.request.body
+    assert request.task_id not in reply.request.body
+    assert {request.id, request.task_id} <= {ref.id for ref in reply.request.correlations}
+    assert len(provider.requests) == 2
+
+
+async def test_multiple_handoffs_share_one_delivered_acknowledgement(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    _job(tmp_path)
+    jobs = tmp_path / "user" / "profiles" / "personal" / "jobs"
+    second = jobs / "second"
+    second.mkdir()
+    (second / "job.toml").write_text(
+        (jobs / "brief" / "job.toml").read_text().replace('name = "brief"', 'name = "second"')
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                MessageDone(
+                    message=Message(
+                        role="assistant",
+                        content=[
+                            ToolCallPart(
+                                id="first", name="start_named_job", args={"name": "brief"}
+                            ),
+                            ToolCallPart(
+                                id="second", name="start_named_job", args={"name": "second"}
+                            ),
+                        ],
+                    ),
+                    stop_reason="tool_calls",
+                )
+            ]
+        ]
+    )
+    inbound = await _ingest(settings, suffix="a", text="Run both jobs")
+    coordinator = ConversationCoordinator(settings, provider_factory=lambda *_: provider)
+    result = await coordinator.process(inbound.id)
+    store = ExecutionStore(settings)
+    requests = await store.list(scope=_SCOPE, limit=10)
+    assert len(requests) == 2
+    assert all(request.status == "awaiting_acknowledgement" for request in requests)
+    assert {request.acknowledgement_outbox_id for request in requests} == {
+        result.response_outbox_id
+    }
+    assert await store.claim(scope=_SCOPE, worker_id="early", limit=1) == []
+    assert len(provider.requests) == 1
+
+    transport = HandoffTransport()
+    assert await _handoff_messaging(settings, transport).deliver_once() == 1
+    assert len(transport.sent) == 1
+    assert await coordinator.reconcile_handoffs() == 2
+    assert await coordinator.reconcile_handoffs() == 0
+    assert len(await store.claim(scope=_SCOPE, worker_id="ready", limit=2)) == 2
+
+
+@pytest.mark.parametrize("failure_boundary", ["enqueue", "finish_result"])
+async def test_committed_handoff_recovers_coordinator_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_boundary: str,
+) -> None:
+    settings = _settings(tmp_path)
+    _job(tmp_path)
+    provider = ScriptedProvider([[_tool("job", "start_named_job", {"name": "brief"})]])
+    coordinator = ConversationCoordinator(settings, provider_factory=lambda *_: provider)
+    owner = coordinator.notifications if failure_boundary == "enqueue" else coordinator.gateway
+    method_name = "enqueue" if failure_boundary == "enqueue" else "finish_result"
+    original = getattr(owner, method_name)
+    failed = False
+
+    async def fail_once(*args: Any, **kwargs: Any) -> Any:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("simulated durable write failure")
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(owner, method_name, fail_once)
+    inbound = await _ingest(settings, suffix="a", text="Run my brief")
+    result = await coordinator.process(inbound.id)
+    assert result.status == "uncertain"
+    records = await coordinator.notifications.list(scope=_SCOPE)
+    assert len(records) == (0 if failure_boundary == "enqueue" else 1)
+    assert await coordinator.reconcile_handoffs() == 0
+    records = await coordinator.notifications.list(scope=_SCOPE)
+    assert len(records) == 1
+    assert "background" in records[0].request.body
+    assert "simulated durable write failure" not in records[0].request.body
+    assert (await coordinator.messaging.get_inbox(inbound.id)).status == "processed"
+    transport = HandoffTransport()
+    assert await _handoff_messaging(settings, transport).deliver_once() == 1
+    assert await coordinator.reconcile_handoffs() == 1
+    assert len(provider.requests) == 1
+    assert (
+        len(await coordinator.execution_store.claim(scope=_SCOPE, worker_id="ready", limit=1)) == 1
+    )
 
 
 async def test_guarded_delegation_extracts_proactive_fields_stops_and_confirms_once(
@@ -965,10 +1145,10 @@ async def test_guarded_delegation_extracts_proactive_fields_stops_and_confirms_o
     yes = await _ingest(settings, suffix="b", text="Yes.")
     second = await coordinator.process(yes.id)
 
-    assert len(provider.requests) == 4
+    assert len(provider.requests) == 3
     requests = await ExecutionStore(settings).list(scope=_SCOPE, limit=10)
     assert len(requests) == 1
-    assert requests[0].status == "queued"
+    assert requests[0].status == "awaiting_acknowledgement"
     queued_draft = (await ExecutionStore(settings).list_drafts(scope=_SCOPE, limit=10))[0]
     assert queued_draft.status == "queued"
     assert queued_draft.confirmation is not None
@@ -979,7 +1159,8 @@ async def test_guarded_delegation_extracts_proactive_fields_stops_and_confirms_o
     second_reply = await NotificationStore(settings).get_by_outbox(
         second.response_outbox_id, scope=_SCOPE
     )
-    assert requests[0].id in second_reply.request.body
+    assert requests[0].id not in second_reply.request.body
+    assert any(ref.id == requests[0].id for ref in second_reply.request.correlations)
 
 
 async def test_rejection_after_coordinator_restart_cancels_draft_without_queueing(
@@ -1078,10 +1259,10 @@ async def test_guardrail_clarification_preserves_prior_fields_and_stops_each_tur
     yes = await _ingest(settings, suffix="c", text="Yes.")
     await coordinator.process(yes.id)
 
-    assert len(provider.requests) == 5
+    assert len(provider.requests) == 4
     requests = await ExecutionStore(settings).list(scope=_SCOPE, limit=10)
     assert len(requests) == 1
-    assert requests[0].status == "queued"
+    assert requests[0].status == "awaiting_acknowledgement"
 
 
 async def test_status_reports_linked_task_and_execution_and_cancel_is_scoped(
@@ -1107,7 +1288,10 @@ async def test_status_reports_linked_task_and_execution_and_cancel_is_scoped(
         scope=_SCOPE,
     )
     assert f"task {request.task_id} open rev=1" in status_reply.request.body
-    assert f"execution {request.id} queued task={request.task_id}" in status_reply.request.body
+    assert (
+        f"execution {request.id} awaiting_acknowledgement task={request.task_id}"
+        in status_reply.request.body
+    )
 
     cancel_message = await _ingest(
         settings,
@@ -1125,7 +1309,7 @@ async def test_status_reports_linked_task_and_execution_and_cancel_is_scoped(
     assert status_result.conversation_id == cancel_result.conversation_id
     assert cancelled.status == "cancelled"
     assert f"{request.id}: cancelled" in cancel_reply.request.body
-    assert len(provider.requests) == 3
+    assert len(provider.requests) == 2
 
 
 async def test_background_turn_receives_named_jobs_and_delegable_capability_catalog(
@@ -1848,11 +2032,15 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
         await coordinator.process(answer.id)
         requests = await store.list(scope=_SCOPE, limit=10)
     assert len(requests) == 1
-    assert requests[0].status == "queued"
+    assert requests[0].status == "awaiting_acknowledgement"
     assert requests[0].contract_digest is not None
     contract = load_contract_snapshot(settings, requests[0].contract_digest)
     assert contract.browser is not None
     assert contract.browser.mode == "read_only"
+    tasks = await ScopedDurableTaskStore.create(settings, scope=_SCOPE)
+    task = await tasks.get_task(contract.task_id)
+    assert requests[0].handoff_title == task.title
+    assert requests[0].handoff_title != contract.goal
     assert [item.resource.qualified for item in contract.browser.resources] == [
         "personal/ricky-personal"
     ]
@@ -1860,7 +2048,8 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert not contract.browser.attachments
     assert not contract.browser.protected_resources
     assert "browser_commit" not in contract.browser.allowed_tools
-    assert len(provider.requests) == (5 if selection in {"short", "ambiguous"} else 4)
+    foreground_count = 4 if selection in {"short", "ambiguous"} else 3
+    assert len(provider.requests) == foreground_count
 
     # Exercise the actual worker handoff, not just contract creation and queueing.
     from contextlib import asynccontextmanager
@@ -1918,8 +2107,21 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                 p.content for m in request.messages for p in m.content if p.kind == "tool_result"
             )
             if self.step == 1:
+                rendered = "\n".join(
+                    p.text for m in request.messages for p in m.content if isinstance(p, TextPart)
+                )
+                resources, _ = json.JSONDecoder().raw_decode(
+                    rendered.split("Authorized browser resources: ", 1)[1]
+                )
+                assert resources == [
+                    {
+                        "resource": "personal/ricky-personal",
+                        "authenticated_origins": ["https://openrouter.ai"],
+                    }
+                ]
+                assert "shared/shared-browser" not in rendered
                 yield _tool(
-                    "open", "browser_session_open_resource", {"resource": "personal/ricky-personal"}
+                    "open", "browser_session_open_resource", {"resource": resources[0]["resource"]}
                 )
                 return
             session = re.search(r"browser_session_[0-9a-f]{32}", results)
@@ -1950,6 +2152,16 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
         routes=routes,
         notifications=NotificationService(settings, routes=routes),
     )
+    assert await dispatcher.worker_once(scope=_SCOPE) == []
+    assert worker.requests == []
+    assert page.navigations == []
+    assert await coordinator.reconcile_handoffs() == 0
+    transport = HandoffTransport()
+    messaging = _handoff_messaging(settings, transport)
+    assert await messaging.deliver_once() == (2 if selection == "ambiguous" else 1)
+    assert "$12.34" not in transport.sent[-1].text
+    assert task.title in transport.sent[-1].text
+    assert await coordinator.reconcile_handoffs() == 1
     completed = await dispatcher.worker_once(scope=_SCOPE)
     assert len(completed) == 1
     assert completed[0].status == "succeeded", completed[0].error
@@ -1961,3 +2173,10 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert page.snapshot_depths
     assert backend.closed
     assert page.closed
+    assert await messaging.deliver_once() == 1
+    assert "$12.34" in transport.sent[-1].text
+    assert task.title in transport.sent[-1].text
+    assert len(transport.sent) == (3 if selection == "ambiguous" else 2)
+    assert len(provider.requests) == foreground_count
+    assert await dispatcher.worker_once(scope=_SCOPE) == []
+    assert await messaging.deliver_once() == 0

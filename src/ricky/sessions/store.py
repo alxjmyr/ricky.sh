@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from ricky.agent.handoff import BackgroundHandoff
 from ricky.agent.session import AgentSession
 from ricky.config import RickySettings, user_data_subpath
 from ricky.media import SessionMediaStore
@@ -236,6 +237,32 @@ class SessionStore:
         self._get(validated_id, scope)
         return self.root / validated_id / "artifacts"
 
+    async def turn_for_inbound(
+        self,
+        session_id: str,
+        inbound_ref: str,
+        *,
+        scope: ProfileScope,
+    ) -> StoredTurn | None:
+        """Read exact committed-turn evidence even outside the normal recent-turn window."""
+        return await self._run(self._turn_for_inbound, _session_id(session_id), inbound_ref, scope)
+
+    def _turn_for_inbound(
+        self,
+        session_id: str,
+        inbound_ref: str,
+        scope: ProfileScope,
+    ) -> StoredTurn | None:
+        with self._connect() as connection:
+            session = self._stored_session(self._required_session(connection, session_id))
+            _require_profile_access(scope, session.profile_label, "session", session_id)
+            row = connection.execute(
+                """SELECT * FROM turns WHERE session_id = ? AND inbound_ref = ?
+                   AND status = 'committed' ORDER BY started_at DESC, id DESC LIMIT 1""",
+                (session_id, inbound_ref),
+            ).fetchone()
+            return self._stored_turn(row, session.profile_label) if row is not None else None
+
     async def _run(self, operation: Callable[..., Any], *args: Any) -> Any:
         try:
             task = asyncio.create_task(asyncio.to_thread(operation, *args))
@@ -441,9 +468,17 @@ class SessionStore:
                 raise SessionStateError(f"turn is already {turn_row['status']}: {turn.id}")
             else:
                 connection.execute(
-                    """UPDATE turns SET status = 'committed', finished_at = ?, error = NULL
+                    """UPDATE turns SET status = 'committed', finished_at = ?, error = NULL,
+                       background_handoffs = ?, handoff_acknowledgement = ?
                        WHERE id = ?""",
-                    (_dump_dt(now), turn.id),
+                    (
+                        _dump_dt(now),
+                        json.dumps(
+                            [item.model_dump(mode="json") for item in turn.background_handoffs]
+                        ),
+                        turn.handoff_acknowledgement,
+                        turn.id,
+                    ),
                 )
             revision = expected_revision + 1
             connection.execute(
@@ -701,6 +736,11 @@ class SessionStore:
                 started_at=_load_dt(row["started_at"]),
                 finished_at=_load_optional_dt(row["finished_at"]),
                 error=cast(str | None, row["error"]),
+                background_handoffs=[
+                    BackgroundHandoff.model_validate(item)
+                    for item in json.loads(row["background_handoffs"])
+                ],
+                handoff_acknowledgement=row["handoff_acknowledgement"],
             )
         except ValidationError as exc:
             raise SessionSchemaError("stored turn is malformed") from exc
@@ -736,8 +776,8 @@ class SessionStore:
         connection.execute(
             """INSERT INTO turns(
                    id, session_id, inbound_ref, base_revision, status,
-                   started_at, finished_at, error
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   started_at, finished_at, error, background_handoffs, handoff_acknowledgement
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 turn.id,
                 turn.session_id,
@@ -747,16 +787,22 @@ class SessionStore:
                 _dump_dt(turn.started_at),
                 _dump_dt(cast(datetime, turn.finished_at)),
                 turn.error,
+                json.dumps([item.model_dump(mode="json") for item in turn.background_handoffs]),
+                turn.handoff_acknowledgement,
             ),
         )
 
     def _trim_turns(self, connection: sqlite3.Connection, session_id: str) -> None:
+        # Preserve evidence throughout the maximum supported acknowledgement TTL,
+        # independently of later setting changes. Older rows resume count retention.
+        handoff_cutoff = _dump_dt(_utc(self._clock()) - timedelta(days=1))
         connection.execute(
-            """DELETE FROM turns WHERE session_id = ? AND id IN (
+            """DELETE FROM turns WHERE session_id = ?
+                   AND (background_handoffs = '[]' OR finished_at < ?) AND id IN (
                    SELECT id FROM turns WHERE session_id = ?
                    ORDER BY started_at DESC, id DESC LIMIT -1 OFFSET ?
                )""",
-            (session_id, session_id, self.settings.turn_retention),
+            (session_id, handoff_cutoff, session_id, self.settings.turn_retention),
         )
 
     def _connect(self) -> sqlite3.Connection:

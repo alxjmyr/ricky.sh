@@ -61,6 +61,11 @@ ricky gateway prune --apply
 
 Ricky protects unresolved, open, queued, leased, uncertain, in-doubt, and referenced evidence.
 Candidates must also exceed configured age and count thresholds. A dry run is the default.
+Pending background acknowledgements retain their request, conversation, and delivery evidence.
+Committed handoff turns are protected from normal count pruning for 24 hours. A cancelled
+handoff with no acknowledgement, or a cancelled acknowledgement, can age
+out after its acknowledgement deadline and the retention age threshold. Failed or ambiguous
+delivery remains protected for reconciliation.
 
 ## Inspect notification delivery
 

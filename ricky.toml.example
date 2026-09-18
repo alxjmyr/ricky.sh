@@ -402,6 +402,9 @@ source_item_text_limit = 12000
 # Durable fire-and-report execution requests. Ad hoc requests pin complete
 # immutable version-2 or browser-bearing version-3 contracts.
 [executions]
+# Gateway-only wait for acknowledgement delivery before dispatch (maximum 86400).
+# Independent of contract/job runtime limits; scheduled and CLI launches do not wait.
+acknowledgement_ttl_seconds = 3600.0
 store_path = "executions/executions.sqlite3"
 contract_snapshot_dir = "executions/contracts"
 draft_ttl_seconds = 3600.0

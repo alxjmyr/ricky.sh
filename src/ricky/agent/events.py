@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ricky.agent.context_types import ContextBudget, ContextReport, ContextSection
+from ricky.agent.handoff import BackgroundHandoff
 from ricky.llm import Usage
 from ricky.permissions.types import GrantOption
 from ricky.tool_contracts import ToolRuntimeFailure
@@ -369,6 +370,17 @@ class UserInteractionRequiredEvent(EventBase):
     prompt: str = Field(min_length=1, max_length=8_000)
 
 
+class BackgroundHandoffEvent(EventBase):
+    """Accepted background work ended the foreground turn without model polling."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    kind: Literal["background_handoff"] = "background_handoff"
+    turn_id: str
+    handoffs: list[BackgroundHandoff] = Field(min_length=1)
+    acknowledgement: str = Field(min_length=1)
+
+
 class SkillActivatedEvent(EventBase):
     kind: Literal["skill_activated"] = "skill_activated"
     session_id: str
@@ -456,6 +468,7 @@ AgentEvent = Annotated[
     | ToolResultOffloadFailedEvent
     | TasksUpdatedEvent
     | UserInteractionRequiredEvent
+    | BackgroundHandoffEvent
     | SkillActivatedEvent
     | WorkflowEvent
     | TurnFinishedEvent

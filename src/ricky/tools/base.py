@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from ricky.agent.events import AgentEvent
+from ricky.agent.handoff import BackgroundHandoff
 from ricky.agent.session import AgentSession
 from ricky.config import RickySettings
 from ricky.llm import ImagePart, ToolArtifactRef
@@ -107,11 +108,16 @@ class ToolResult(BaseModel):
     full_content_chars: int | None = Field(default=None, ge=0)
     offload_error: str | None = None
     user_interaction: UserInteractionRequest | None = None
+    background_handoff: BackgroundHandoff | None = None
     follow_up_media: list[ImagePart] = Field(default_factory=list, max_length=20)
     """Canonical user-input media appended by the harness after this tool result."""
 
     @model_validator(mode="after")
     def _validate_runtime_failure(self) -> ToolResult:
+        if self.background_handoff is not None and (
+            self.is_error or self.user_interaction is not None
+        ):
+            raise ValueError("background handoff requires a successful result without user input")
         if self.runtime_failure is not None:
             if not self.is_error:
                 raise ValueError("runtime failure requires an error result")

@@ -1147,3 +1147,110 @@ async def test_same_response_runtime_conflict_reset_drops_pending_failure(
     assert tool.calls == 5
     assert events[-1].kind == "turn_finished"
     assert events[-1].error is None
+
+
+class _HandoffParams(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    request_id: str
+    title: str
+
+
+class _HandoffTool:
+    name: ClassVar[str] = "accept_background_work"
+    description: ClassVar[str] = "Admit one background task."
+    Params: ClassVar[type[BaseModel]] = _HandoffParams
+    risk: ClassVar[Risk] = "read_only"
+
+    async def run(self, params: BaseModel, ctx: ToolContext) -> ToolResult:
+        from ricky.tools import BackgroundHandoff
+
+        assert isinstance(params, _HandoffParams)
+        # Yield so simultaneous siblings must be awaited before termination.
+        await asyncio.sleep(0)
+        return ToolResult(
+            content="accepted",
+            background_handoff=BackgroundHandoff(request_id=params.request_id, title=params.title),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("multiple", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+async def test_background_handoff_ends_after_complete_batch(multiple: bool, mixed: bool) -> None:
+    from ricky.agent.events import BackgroundHandoffEvent
+
+    settings = RickySettings(max_turn_iterations=10)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    calls = [
+        ToolCallPart(
+            id="handoff_one",
+            name="accept_background_work",
+            args={"request_id": "execution_one", "title": "Check balance"},
+        )
+    ]
+    if multiple:
+        calls.append(
+            ToolCallPart(
+                id="handoff_two",
+                name="accept_background_work",
+                args={"request_id": "execution_two", "title": "Check weather"},
+            )
+        )
+    if mixed:
+        calls.extend(
+            [
+                ToolCallPart(id="question", name="request_user_detail", args={}),
+                ToolCallPart(id="invalid", name="accept_background_work", args={}),
+            ]
+        )
+    provider = FakeProvider(
+        [
+            [
+                MessageDone(
+                    message=Message(role="assistant", content=list(calls)), stop_reason="tool_calls"
+                )
+            ]
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([_HandoffTool(), _InteractionTool()]),
+        settings=settings,
+    )
+    events = await _collect_events(loop, session, "Do the requested work")
+    handoff = next(event for event in events if isinstance(event, BackgroundHandoffEvent))
+    assert len(handoff.handoffs) == (2 if multiple else 1)
+    assert "Check balance" in handoff.acknowledgement
+    assert "execution_one" not in handoff.acknowledgement
+    assert len(provider.requests) == 1
+    assert events[-1].kind == "turn_finished"
+    assert getattr(events[-1], "error", None) is None
+    assert session.history[-1] == Message.text("assistant", handoff.acknowledgement)
+    assert sum(message.role == "tool" for message in session.history) == len(calls)
+    if multiple:
+        assert "Check weather" in handoff.acknowledgement
+    if mixed:
+        assert "What is the exact arrival window?" in handoff.acknowledgement
+        assert "did not succeed: accept_background_work" in handoff.acknowledgement
+        assert any(isinstance(event, UserInteractionRequiredEvent) for event in events)
+
+
+def test_background_handoff_requires_success_and_round_trips() -> None:
+    from ricky.tools import BackgroundHandoff
+
+    handoff = BackgroundHandoff(request_id="execution_one", title="Check balance")
+    result = ToolResult(content="accepted", background_handoff=handoff)
+    assert ToolResult.model_validate_json(result.model_dump_json()) == result
+    with pytest.raises(ValidationError, match="successful result"):
+        ToolResult(content="failed", is_error=True, background_handoff=handoff)
+    with pytest.raises(ValidationError, match="successful result"):
+        ToolResult(
+            content="pending",
+            background_handoff=handoff,
+            user_interaction=UserInteractionRequest(
+                kind="confirmation", correlation_id="draft", prompt="Confirm?"
+            ),
+        )
+    with pytest.raises(ValidationError):
+        BackgroundHandoff(request_id="execution_one", title=" ")

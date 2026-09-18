@@ -460,7 +460,11 @@ async def test_conversation_and_source_filters_apply_before_execution_limits(
     response = await NotificationStore(config).get_by_outbox(outbox_id, scope=PROFILE_SCOPE)
 
     assert f"execution {target.id} queued" in status
-    assert f"request {target.id} (queued)" in response.request.body
+    assert response.request.body == "queued"
+    assert any(
+        ref.kind == "execution_request" and ref.id == target.id
+        for ref in response.request.correlations
+    )
     assert any(
         item.kind == "execution_request" and item.id == target.id
         for item in response.request.correlations

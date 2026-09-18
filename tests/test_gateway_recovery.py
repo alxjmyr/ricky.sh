@@ -565,3 +565,81 @@ async def test_one_broken_subsystem_does_not_hide_the_others(tmp_path: Path) -> 
 
     assert plan.by_subsystem("inbox")[0].to_state == "pending"
     assert any("effect ledger is unreadable" in failure for failure in plan.failures)
+
+
+@pytest.mark.parametrize("committed", [False, True])
+async def test_handoff_recovery_inspection_uses_committed_source_evidence(
+    tmp_path: Path,
+    committed: bool,
+) -> None:
+    from gateway_ops_support import execution_request
+    from ricky.agent.handoff import BackgroundHandoff
+    from ricky.sessions.types import StoredTurn
+
+    config = settings(tmp_path)
+    recovery = GatewayRecovery(config, scope=PROFILE_SCOPE)
+    await recovery._initialize()
+    message = await store_inbound(recovery.messaging, build_inbound())
+    await recovery.messaging.claim_inbox(message.id, owner="dead-worker", lease_seconds=1)
+    conversation_id, session_id = await make_conversation(recovery.gateway, recovery.sessions)
+    await recovery.gateway.begin_result(
+        message_id=message.id,
+        conversation_id=conversation_id,
+        session_id=session_id,
+        scope=PROFILE_SCOPE,
+    )
+    held = execution_request(
+        source_conversation_id=conversation_id,
+        source_message_id=message.id,
+    ).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Check balance",
+            "expires_at": datetime.now(UTC) + timedelta(hours=1),
+            "acknowledgement_expires_at": datetime.now(UTC) + timedelta(hours=1),
+        }
+    )
+    await recovery.executions.submit(held, scope=PROFILE_SCOPE)
+    if committed:
+        lease = await recovery.sessions.acquire(session_id, "foreground", scope=PROFILE_SCOPE)
+        stored = await recovery.sessions.get(session_id, scope=PROFILE_SCOPE)
+        turn = StoredTurn(
+            id="turn_handoff",
+            session_id=session_id,
+            profile_label=PROFILE_SCOPE.label(),
+            inbound_ref=message.id,
+            base_revision=stored.revision,
+            status="running",
+            started_at=datetime.now(UTC),
+            background_handoffs=[BackgroundHandoff(request_id=held.id, title="Check balance")],
+            handoff_acknowledgement="I'll check the balance in the background.",
+        )
+        await recovery.sessions.commit(lease, stored.revision, stored.session, turn)
+        await recovery.sessions.release(lease)
+    later = datetime.now(UTC) + timedelta(seconds=10)
+
+    inspected = await recovery.inspect(now=later)
+    assert inspected.applied is False
+    assert (await recovery.messaging.get_inbox(message.id)).status == "claimed"
+    if committed:
+        [preview] = inspected.by_subsystem("foreground_turn")
+        assert preview.disposition == "requires_review"
+        assert "acknowledgement reconciliation" in preview.reason
+        assert not inspected.by_subsystem("inbox")
+        unchanged = await recovery.gateway.get_result(message.id, scope=PROFILE_SCOPE)
+        assert unchanged is not None and unchanged.status == "running"
+        assert (
+            await recovery.executions.get(held.id, scope=PROFILE_SCOPE)
+        ).acknowledgement_outbox_id is None
+    else:
+        assert inspected.by_subsystem("foreground_turn")[0].disposition == "uncertain"
+    applied = await recovery.apply(now=later)
+
+    assert not applied.failures
+    assert (await recovery.messaging.get_inbox(message.id)).status == (
+        "processed" if committed else "uncertain"
+    )
+    assert (
+        await recovery.executions.get(held.id, scope=PROFILE_SCOPE)
+    ).status == "awaiting_acknowledgement"
+    assert await recovery.executions.claim(scope=PROFILE_SCOPE, worker_id="worker", limit=1) == []

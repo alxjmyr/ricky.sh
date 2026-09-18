@@ -43,7 +43,7 @@ from ricky.executions.types import (
 )
 from ricky.profiles import ProfileScope
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _TERMINAL = {"succeeded", "failed", "blocked", "cancelled", "uncertain"}
 _ACTIVE = {
     "claimed",
@@ -97,10 +97,116 @@ class ExecutionStore:
         *,
         scope: ProfileScope,
     ) -> ExecutionRequest:
-        if request.status != "queued" or request.claim_fence != 0:
-            raise ValueError("new execution requests must be unclaimed and queued")
+        if request.status not in {"queued", "awaiting_acknowledgement"} or request.claim_fence != 0:
+            raise ValueError(
+                "new execution requests must be unclaimed and queued or awaiting acknowledgement"
+            )
+        if (
+            request.acknowledgement_outbox_id is not None
+            or request.acknowledgement_delivered_at is not None
+        ):
+            raise ValueError("new execution requests cannot carry acknowledgement evidence")
+        if request.status == "queued" and request.handoff_title is not None:
+            raise ValueError("new gateway handoffs must await acknowledgement")
         _require_profile_access(scope, request.profile_scope, "execution request", request.id)
         return await self._run(self._submit, request)
+
+    async def list_pending_acknowledgements(self, *, scope: ProfileScope) -> list[ExecutionRequest]:
+        """Return every unresolved handoff dependency, including terminal admissions."""
+        return _permitted(scope, await self._run(self._list_pending_acknowledgements))
+
+    def _list_pending_acknowledgements(self) -> list[ExecutionRequest]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM execution_requests WHERE handoff_title IS NOT NULL "
+                "AND acknowledgement_delivered_at IS NULL ORDER BY created_at, id"
+            ).fetchall()
+        return [_row(row) for row in rows]
+
+    async def attach_acknowledgement(
+        self,
+        request_id: str,
+        outbox_id: str,
+        *,
+        scope: ProfileScope,
+    ) -> ExecutionRequest:
+        """Bind an admitted handoff to exactly one durable acknowledgement."""
+        await self.get(request_id, scope=scope)
+        if not outbox_id or len(outbox_id) > 512:
+            raise ValueError("invalid acknowledgement outbox id")
+        return await self._run(
+            self._acknowledgement, request_id, outbox_id, False, datetime.now(UTC)
+        )
+
+    async def release_acknowledged(
+        self,
+        request_id: str,
+        outbox_id: str,
+        *,
+        scope: ProfileScope,
+        now: datetime | None = None,
+    ) -> ExecutionRequest:
+        """Release a linked handoff after its coordinator proves delivery and commit."""
+        await self.get(request_id, scope=scope)
+        return await self._run(
+            self._acknowledgement, request_id, outbox_id, True, now or datetime.now(UTC)
+        )
+
+    def _acknowledgement(
+        self,
+        request_id: str,
+        outbox_id: str,
+        release: bool,
+        now: datetime,
+    ) -> ExecutionRequest:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            before = self._required(connection, request_id)
+            if before.acknowledgement_outbox_id not in {None, outbox_id}:
+                raise ExecutionStoreError("execution is bound to a different acknowledgement")
+            if release and before.acknowledgement_outbox_id != outbox_id:
+                raise ExecutionStoreError("execution acknowledgement is not attached")
+            if before.handoff_title is None:
+                raise ExecutionStoreError("execution is not a gateway handoff")
+            if release and before.acknowledgement_delivered_at is None:
+                connection.execute(
+                    "UPDATE execution_requests SET acknowledgement_delivered_at=? WHERE id=?",
+                    (_dt(now), request_id),
+                )
+            if not release:
+                connection.execute(
+                    "UPDATE execution_requests SET acknowledgement_outbox_id=? WHERE id=?",
+                    (outbox_id, request_id),
+                )
+            elif before.status == "awaiting_acknowledgement":
+                expired = any(
+                    deadline is not None and deadline <= now
+                    for deadline in (
+                        before.acknowledgement_expires_at,
+                        before.expires_at,
+                    )
+                )
+                target: ExecutionStatus = "blocked" if expired else "queued"
+                error = (
+                    "Acknowledgement deadline expired before background work started"
+                    if expired
+                    else None
+                )
+                connection.execute(
+                    "UPDATE execution_requests SET status=?, error=? WHERE id=?",
+                    (target, error, request_id),
+                )
+                self._activity(
+                    connection,
+                    before,
+                    "blocked" if expired else "released",
+                    before.status,
+                    target,
+                    error or "Acknowledgement delivered; execution released",
+                )
+            current = self._required(connection, request_id)
+            connection.commit()
+            return current
 
     async def create_draft(
         self,
@@ -895,7 +1001,12 @@ class ExecutionStore:
                 _values(request),
             )
             self._activity(
-                connection, request, "submitted", None, "queued", "Execution request submitted"
+                connection,
+                request,
+                "submitted",
+                None,
+                request.status,
+                "Execution request submitted",
             )
             connection.commit()
         return request
@@ -1838,7 +1949,7 @@ class ExecutionStore:
                 SELECT source_message_id, profile_scope_json FROM execution_requests
                 WHERE source_message_id IS NOT NULL
                   AND status IN (
-                      'queued','claimed','running','awaiting_protected_approval',
+                      'awaiting_acknowledgement','queued','claimed','running','awaiting_protected_approval',
                       'awaiting_transaction_approval','cancel_requested',
                       'uncertain','blocked','failed'
                   )
@@ -2106,6 +2217,10 @@ class ExecutionStore:
                 update={
                     "id": f"execution_{uuid4().hex}",
                     "status": "queued",
+                    "acknowledgement_outbox_id": None,
+                    "acknowledgement_delivered_at": None,
+                    "acknowledgement_expires_at": None,
+                    "handoff_title": None,
                     "request_key": f"{original.request_key}:retry:{uuid4().hex}",
                     "parent_request_id": original.id,
                     "created_at": created_at,
@@ -2177,6 +2292,28 @@ class ExecutionStore:
         recovered: list[ExecutionRequest] = []
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            held = connection.execute(
+                "SELECT * FROM execution_requests "
+                "WHERE (status='awaiting_acknowledgement' AND acknowledgement_expires_at<=?) "
+                "OR (status IN ('awaiting_acknowledgement','queued') AND expires_at<=?)",
+                (_dt(now), _dt(now)),
+            ).fetchall()
+            for row in held:
+                before = _row(row)
+                if not scope.permits(before.profile_scope.label()):
+                    continue
+                error = (
+                    "Acknowledgement deadline expired before background work started"
+                    if before.status == "awaiting_acknowledgement"
+                    else "Execution expired before background work started"
+                )
+                connection.execute(
+                    "UPDATE execution_requests SET status='blocked', error=? WHERE id=?",
+                    (error, before.id),
+                )
+                current = self._required(connection, before.id)
+                self._activity(connection, current, "blocked", before.status, "blocked", error)
+                recovered.append(current)
             rows = connection.execute(
                 """
                 SELECT * FROM execution_requests
@@ -2421,6 +2558,10 @@ _COLUMNS = (
     "profile_scope_json",
     "source_conversation_id",
     "source_message_id",
+    "acknowledgement_outbox_id",
+    "acknowledgement_delivered_at",
+    "acknowledgement_expires_at",
+    "handoff_title",
     "grant_id",
     "notification_route",
     "request_key",
@@ -2482,15 +2623,34 @@ def _same_submission(existing: ExecutionRequest, proposed: ExecutionRequest) -> 
         "request_key",
         "parent_request_id",
         "not_before",
-        "expires_at",
+        "handoff_title",
     )
-    return all(getattr(existing, name) == getattr(proposed, name) for name in immutable)
+    same_ack_expiry = existing.acknowledgement_expires_at == proposed.acknowledgement_expires_at
+    if existing.kind == "named_job" and existing.handoff_title is not None:
+        same_ack_expiry = (
+            existing.acknowledgement_expires_at is not None
+            and proposed.acknowledgement_expires_at is not None
+            and existing.acknowledgement_expires_at - existing.created_at
+            == proposed.acknowledgement_expires_at - proposed.created_at
+        )
+    return (
+        same_ack_expiry
+        and existing.expires_at == proposed.expires_at
+        and all(getattr(existing, name) == getattr(proposed, name) for name in immutable)
+    )
 
 
 def _row(row: sqlite3.Row) -> ExecutionRequest:
     values = dict(row)
     values["profile_scope"] = json.loads(values.pop("profile_scope_json"))
-    for name in ("created_at", "not_before", "expires_at", "claim_expires_at"):
+    for name in (
+        "created_at",
+        "not_before",
+        "expires_at",
+        "claim_expires_at",
+        "acknowledgement_delivered_at",
+        "acknowledgement_expires_at",
+    ):
         if values[name] is not None:
             values[name] = datetime.fromisoformat(values[name])
     return ExecutionRequest.model_validate(values)
@@ -2516,6 +2676,10 @@ CREATE TABLE execution_requests (
     profile_scope_json TEXT NOT NULL,
     source_conversation_id TEXT,
     source_message_id TEXT,
+    acknowledgement_outbox_id TEXT,
+    acknowledgement_delivered_at TEXT,
+    acknowledgement_expires_at TEXT,
+    handoff_title TEXT,
     grant_id TEXT,
     notification_route TEXT NOT NULL,
     request_key TEXT NOT NULL UNIQUE,

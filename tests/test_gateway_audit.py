@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -52,6 +52,46 @@ async def test_an_unrecognised_id_is_reported_not_guessed(tmp_path: Path) -> Non
 async def test_an_empty_id_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="cannot be empty"):
         await GatewayAudit(settings(tmp_path), scope=PROFILE_SCOPE).trace("   ")
+
+
+async def test_a_held_execution_is_visible_before_acknowledgement_exists(tmp_path: Path) -> None:
+    config = settings(tmp_path)
+    gateway = GatewayStore(config)
+    sessions = SessionStore(config)
+    executions = ExecutionStore(config)
+    await gateway.initialize()
+    await sessions.initialize()
+    await executions.initialize()
+    conversation_id, _ = await make_conversation(gateway, sessions)
+    request = execution_request(
+        source_conversation_id=conversation_id,
+        source_message_id=f"inbound_{uuid4().hex}",
+    ).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Check balance",
+            "acknowledgement_expires_at": datetime.now(UTC) + timedelta(hours=1),
+        }
+    )
+    await executions.submit(request, scope=PROFILE_SCOPE)
+
+    chain = await GatewayAudit(config, scope=PROFILE_SCOPE).trace(conversation_id)
+
+    link = _link(chain, "execution_request")
+    assert link.id == request.id
+    assert link.status == "awaiting_acknowledgement"
+    assert "waiting for foreground acknowledgement delivery" in link.detail
+    assert _link(chain, "job_run").state == "missing"
+
+    notifications = NotificationStore(config)
+    await notifications.initialize()
+    entry = await enqueue_notification(notifications)
+    await executions.attach_acknowledgement(request.id, entry.id, scope=PROFILE_SCOPE)
+
+    linked = await GatewayAudit(config, scope=PROFILE_SCOPE).trace(request.id)
+    assert _link(linked, "notification").id == entry.id
+    assert _link(linked, "notification").status == "pending"
+    assert _link(linked, "delivery_receipt").state == "missing"
 
 
 async def test_a_missing_inbound_message_reports_missing(tmp_path: Path) -> None:

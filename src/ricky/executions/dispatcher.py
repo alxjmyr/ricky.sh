@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -126,6 +126,8 @@ class ExecutionDispatcher:
         source_conversation_id: str | None = None,
         source_message_id: str | None = None,
         project_scope: ProjectScope | None = None,
+        await_acknowledgement: bool = False,
+        handoff_title: str | None = None,
     ) -> ExecutionRequest:
         await self.routes.validate(notification_route, profile_scope.label())
         scope = project_scope or self.project_scope
@@ -136,10 +138,12 @@ class ExecutionDispatcher:
             raise ValueError("named task linkage requires both task_id and task_revision")
         if task_id is not None:
             await self._validate_task(task_id, task_revision, profile_scope)
+        created_at = datetime.now(UTC)
         request = ExecutionRequest(
             id=f"execution_{uuid4().hex}",
             kind="named_job",
-            status="queued",
+            status="awaiting_acknowledgement" if await_acknowledgement else "queued",
+            handoff_title=handoff_title if await_acknowledgement else None,
             named_job=loaded.resource.qualified,
             job_digest=loaded.digest,
             project_root_ref=str(scope.root) if scope.enabled else None,
@@ -150,7 +154,12 @@ class ExecutionDispatcher:
             source_message_id=source_message_id,
             notification_route=notification_route,
             request_key=request_key,
-            created_at=datetime.now(UTC),
+            created_at=created_at,
+            acknowledgement_expires_at=(
+                created_at + timedelta(seconds=self.settings.executions.acknowledgement_ttl_seconds)
+            )
+            if await_acknowledgement
+            else None,
         )
         await self.store.initialize()
         return await self.store.submit(request, scope=profile_scope)
@@ -161,6 +170,8 @@ class ExecutionDispatcher:
         *,
         request_key: str,
         grant_id: str | None = None,
+        await_acknowledgement: bool = False,
+        handoff_title: str | None = None,
     ) -> ExecutionRequest:
         """Queue one new ad hoc request from an already-compiled exact contract."""
 
@@ -196,10 +207,15 @@ class ExecutionDispatcher:
             await self._validate_contract_grant_for_submission(grant_id, contract=contract)
         elif any(item.authority_capability is not None for item in contract.capabilities):
             raise ExecutionDispatchError("effectful execution contract requires an active grant")
+        created_at = datetime.now(UTC)
+        acknowledgement_deadline = contract.created_at + timedelta(
+            seconds=self.settings.executions.acknowledgement_ttl_seconds
+        )
         request = ExecutionRequest(
             id=f"execution_{uuid4().hex}",
             kind="ad_hoc",
-            status="queued",
+            status="awaiting_acknowledgement" if await_acknowledgement else "queued",
+            handoff_title=handoff_title if await_acknowledgement else None,
             goal=contract.goal,
             contract_id=contract.id,
             contract_digest=contract.digest,
@@ -213,8 +229,13 @@ class ExecutionDispatcher:
             notification_route=contract.notification_route,
             request_key=request_key,
             parent_request_id=contract.parent_request_id,
-            created_at=datetime.now(UTC),
+            created_at=created_at,
             expires_at=contract.expires_at,
+            acknowledgement_expires_at=min(
+                contract.expires_at or acknowledgement_deadline, acknowledgement_deadline
+            )
+            if await_acknowledgement
+            else None,
         )
         submitted = await self.store.submit(request, scope=contract.profile_scope)
         if grant_id is not None:
@@ -523,6 +544,8 @@ class ExecutionDispatcher:
         )
         requests = await self.store.list_for_notification_projection(scope=scope)
         for request in requests:
+            if request.handoff_title is not None and request.acknowledgement_delivered_at is None:
+                continue
             if request.id in projected_source_ids:
                 continue
             run = None
@@ -1116,12 +1139,26 @@ class ExecutionDispatcher:
         return request
 
     async def _notify(self, request: ExecutionRequest, run: JobRun | None) -> None:
+        if request.handoff_title is not None and request.acknowledgement_delivered_at is None:
+            return
         profile_label = request.profile_scope.label()
         summary = (
             await self._result_summary(run)
             if run is not None
             else (request.error or f"Execution {request.status}")
         )
+        if request.handoff_title is not None:
+            if (
+                request.status == "succeeded"
+                and run is not None
+                and run.outcome == "succeeded"
+                and not run.final_message
+                and not run.error
+                and not request.error
+            ):
+                summary = "Completed."
+            elif request.status == "cancelled" and run is None and not request.error:
+                summary = "Cancelled."
         correlations = [
             CorrelationRef(
                 kind="execution_request",
@@ -1152,7 +1189,7 @@ class ExecutionDispatcher:
             NotificationRequest(
                 id=f"notification_{uuid4().hex}",
                 route=request.notification_route,
-                title=f"Execution {request.status}",
+                title=request.handoff_title or f"Execution {request.status}",
                 body=summary,
                 body_format="portable_markdown_v1",
                 urgency="normal" if request.status == "succeeded" else "attention",

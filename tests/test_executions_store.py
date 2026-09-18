@@ -81,6 +81,13 @@ async def test_phase7_browser_approval_schema_migrates_additively(tmp_path: Path
     with sqlite3.connect(store.db_path) as database:
         database.execute("DROP TABLE execution_browser_attestations")
         database.execute("DROP TABLE execution_browser_approvals")
+        for column in (
+            "handoff_title",
+            "acknowledgement_outbox_id",
+            "acknowledgement_delivered_at",
+            "acknowledgement_expires_at",
+        ):
+            database.execute(f"ALTER TABLE execution_requests DROP COLUMN {column}")
         database.execute("PRAGMA user_version = 7")
 
     with pytest.raises(ExecutionStoreError, match="requires migration"):
@@ -207,3 +214,192 @@ async def test_execution_queries_enforce_profile_scope(tmp_path: Path) -> None:
         await store.cancel(submitted.id, scope=work)
     assert await store.list(scope=work) == []
     assert len(await store.list(scope=cross_profile)) == 1
+
+
+@pytest.mark.parametrize("settlement", ["release", "cancel", "expire", "recover_expired"])
+async def test_acknowledgement_admission_is_fenced_and_never_revives_terminal_work(
+    tmp_path: Path,
+    settlement: str,
+) -> None:
+    now = datetime.now(UTC)
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    held = _request(now).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Check balance",
+            "source_conversation_id": "conversation-test",
+            "source_message_id": "inbound-test",
+            "acknowledgement_expires_at": now + timedelta(seconds=60),
+        }
+    )
+    held = await store.submit(held, scope=SCOPE)
+    assert await store.submit(held, scope=SCOPE) == held
+    assert await store.claim(worker_id="early", scope=SCOPE, limit=1, now=now) == []
+    assert await store.list_pending_acknowledgements(scope=SCOPE) == [held]
+    assert await store.list_pending_acknowledgements(scope=ProfileScope.create("work")) == []
+    with pytest.raises(ExecutionStoreError, match="not attached"):
+        await store.release_acknowledged(held.id, "outbox-test", scope=SCOPE, now=now)
+    await store.attach_acknowledgement(held.id, "outbox-test", scope=SCOPE)
+    await store.attach_acknowledgement(held.id, "outbox-test", scope=SCOPE)
+    with pytest.raises(ExecutionStoreError, match="different acknowledgement"):
+        await store.attach_acknowledgement(held.id, "outbox-other", scope=SCOPE)
+    with pytest.raises(ExecutionNotFoundError):
+        await store.release_acknowledged(held.id, "outbox-test", scope=ProfileScope.create("work"))
+    if settlement == "cancel":
+        await store.cancel(held.id, scope=SCOPE)
+    if settlement in {"expire", "recover_expired"}:
+        now += timedelta(seconds=61)
+    if settlement == "recover_expired":
+        [expired] = await store.recover_expired(scope=SCOPE, now=now)
+        assert expired.status == "blocked"
+    released = await store.release_acknowledged(held.id, "outbox-test", scope=SCOPE, now=now)
+    assert (
+        released.status
+        == {
+            "release": "queued",
+            "cancel": "cancelled",
+            "expire": "blocked",
+            "recover_expired": "blocked",
+        }[settlement]
+    )
+    assert released.acknowledgement_delivered_at == now
+    assert (
+        await store.release_acknowledged(
+            held.id, "outbox-test", scope=SCOPE, now=now + timedelta(seconds=1)
+        )
+        == released
+    )
+    assert await store.list_pending_acknowledgements(scope=SCOPE) == []
+    claimed = await store.claim(worker_id="late", scope=SCOPE, limit=1, now=now)
+    assert len(claimed) == (1 if settlement == "release" else 0)
+
+
+async def test_v8_migration_preserves_legacy_queued_and_running_admission(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    first = await store.submit(_request(now, key="first"), scope=SCOPE)
+    [claimed] = await store.claim(worker_id="legacy", scope=SCOPE, limit=1, now=now)
+    assert claimed.claim_token is not None
+    running = await store.start(
+        first.id,
+        scope=SCOPE,
+        token=claimed.claim_token,
+        fence=claimed.claim_fence,
+        run_id="legacy-run",
+    )
+    queued = await store.submit(_request(now, key="second"), scope=SCOPE)
+    with sqlite3.connect(store.db_path) as database:
+        for column in (
+            "handoff_title",
+            "acknowledgement_outbox_id",
+            "acknowledgement_delivered_at",
+            "acknowledgement_expires_at",
+        ):
+            database.execute(f"ALTER TABLE execution_requests DROP COLUMN {column}")
+        database.execute("PRAGMA user_version = 8")
+    with pytest.raises(ExecutionStoreError, match="requires migration"):
+        await store.initialize()
+    adapter = ExecutionsUpgradeAdapter((store.db_path,))
+    [step] = adapter.plan_steps(source_data_generation=1, target_data_generation=1)
+    assert (step.source_schema_version, step.target_schema_version) == (8, 9)
+    adapter.apply(step)
+    adapter.apply(step)
+    await store.initialize()
+    assert await store.get(first.id, scope=SCOPE) == running
+    assert await store.get(queued.id, scope=SCOPE) == queued
+    assert await store.list_pending_acknowledgements(scope=SCOPE) == []
+
+
+async def test_expired_named_handoff_explicit_retry_gets_fresh_admission(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    held = _request(now).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Prepare brief",
+            "source_conversation_id": "conversation-test",
+            "source_message_id": "inbound-test",
+            "acknowledgement_expires_at": now + timedelta(seconds=1),
+        }
+    )
+    await store.submit(held, scope=SCOPE)
+    await store.recover_expired(scope=SCOPE, now=now + timedelta(seconds=2))
+    retried = await store.retry(held.id, scope=SCOPE, created_at=now + timedelta(seconds=3))
+    assert retried.status == "queued"
+    assert retried.handoff_title is None
+    assert retried.acknowledgement_outbox_id is None
+    assert retried.acknowledgement_delivered_at is None
+    assert retried.expires_at is None
+    [claimed] = await store.claim(
+        worker_id="retry", scope=SCOPE, limit=1, now=now + timedelta(seconds=4)
+    )
+    assert claimed.id == retried.id
+
+
+@pytest.mark.parametrize("version", [7, 8])
+async def test_partially_migrated_handoff_schema_is_rejected(tmp_path: Path, version: int) -> None:
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    with sqlite3.connect(store.db_path) as database:
+        if version == 7:
+            database.execute("DROP TABLE execution_browser_attestations")
+            database.execute("DROP TABLE execution_browser_approvals")
+        database.execute("ALTER TABLE execution_requests DROP COLUMN acknowledgement_delivered_at")
+        database.execute(f"PRAGMA user_version = {version}")
+    adapter = ExecutionsUpgradeAdapter((store.db_path,))
+    [target] = adapter.discover(user_data_dir=store.user_root)
+    assert adapter.inspect(target).state == "corrupt"
+    with pytest.raises(ExecutionStoreError, match="partially migrated"):
+        await store.initialize()
+
+
+async def test_released_handoff_that_expires_before_claim_becomes_blocked(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    held = _request(now).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Prepare brief",
+            "source_conversation_id": "conversation-test",
+            "source_message_id": "inbound-test",
+            "acknowledgement_expires_at": now + timedelta(seconds=1),
+            "expires_at": now + timedelta(seconds=1),
+        }
+    )
+    await store.submit(held, scope=SCOPE)
+    await store.attach_acknowledgement(held.id, "outbox-test", scope=SCOPE)
+    await store.release_acknowledged(held.id, "outbox-test", scope=SCOPE, now=now)
+    assert (
+        await store.claim(worker_id="late", scope=SCOPE, limit=1, now=now + timedelta(seconds=2))
+        == []
+    )
+    expired = await store.get(held.id, scope=SCOPE)
+    assert expired.status == "blocked"
+    assert expired.acknowledgement_delivered_at == now
+
+
+async def test_acknowledgement_deadline_does_not_expire_released_named_work(tmp_path: Path) -> None:
+    now = datetime.now(UTC)
+    store = ExecutionStore(_settings(tmp_path))
+    await store.initialize()
+    held = _request(now).model_copy(
+        update={
+            "status": "awaiting_acknowledgement",
+            "handoff_title": "Prepare brief",
+            "source_conversation_id": "conversation-test",
+            "source_message_id": "inbound-test",
+            "acknowledgement_expires_at": now + timedelta(seconds=1),
+        }
+    )
+    await store.submit(held, scope=SCOPE)
+    await store.attach_acknowledgement(held.id, "outbox-test", scope=SCOPE)
+    await store.release_acknowledged(held.id, "outbox-test", scope=SCOPE, now=now)
+    [claimed] = await store.claim(
+        worker_id="late", scope=SCOPE, limit=1, now=now + timedelta(seconds=2)
+    )
+    assert claimed.id == held.id
+    assert claimed.expires_at is None

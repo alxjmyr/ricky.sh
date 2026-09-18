@@ -260,3 +260,42 @@ async def test_reopening_tolerates_a_disappearing_sqlite_sidecar(
 
     assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600
+
+
+async def test_handoff_evidence_survives_recent_turn_window_then_expires(tmp_path: Path) -> None:
+    from ricky.agent.handoff import BackgroundHandoff
+    from ricky.config import SessionSettings
+
+    clock = MutableClock()
+    settings = RickySettings(
+        user_data_dir=str(tmp_path / "user"), sessions=SessionSettings(turn_retention=1)
+    )
+    store = SessionStore(settings, clock=clock)
+    await store.initialize()
+    session = AgentSession.create(settings, profile_scope=SCOPE)
+    await store.create(session, scope=SCOPE)
+    lease = await store.acquire(session.id, "worker", scope=SCOPE)
+    first = _running(session.id, 0, clock.now, "handoff").model_copy(
+        update={
+            "inbound_ref": "inbound_handoff",
+            "background_handoffs": [
+                BackgroundHandoff(request_id="execution_one", title="Check balance")
+            ],
+            "handoff_acknowledgement": "I'll check the balance in the background.",
+        }
+    )
+    await store.begin_turn(lease, first)
+    await store.commit(lease, 0, session, first)
+    clock.now += timedelta(seconds=1)
+    second = _running(session.id, 1, clock.now, "later")
+    await store.commit(lease, 1, session, second)
+    assert len(await store.turns(session.id, scope=SCOPE, limit=1)) == 1
+    evidence = await store.turn_for_inbound(session.id, "inbound_handoff", scope=SCOPE)
+    assert evidence is not None
+    assert evidence.background_handoffs == first.background_handoffs
+    assert evidence.handoff_acknowledgement == first.handoff_acknowledgement
+    await store.release(lease)
+    clock.now += timedelta(days=1, seconds=1)
+    lease = await store.acquire(session.id, "next-worker", scope=SCOPE)
+    await store.commit(lease, 2, session, _running(session.id, 2, clock.now, "prune"))
+    assert await store.turn_for_inbound(session.id, "inbound_handoff", scope=SCOPE) is None

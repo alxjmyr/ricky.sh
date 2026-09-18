@@ -19,7 +19,7 @@ from ricky.upgrades.models import (
 )
 
 ADAPTER_ID = "sessions"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 METADATA_KEY = "schema_version"
 
 # A create that loses the absent -> current race must not report corruption.
@@ -56,6 +56,8 @@ _TABLE_COLUMNS = {
             "started_at",
             "finished_at",
             "error",
+            "background_handoffs",
+            "handoff_acknowledgement",
         }
     ),
 }
@@ -86,7 +88,9 @@ _CREATE_STATEMENTS = (
            ),
            started_at TEXT NOT NULL,
            finished_at TEXT,
-           error TEXT
+           error TEXT,
+           background_handoffs TEXT NOT NULL DEFAULT '[]',
+           handoff_acknowledgement TEXT
        )""",
     "CREATE INDEX idx_sessions_status_updated ON sessions(status, updated_at DESC)",
     "CREATE INDEX idx_turns_session_started ON turns(session_id, started_at DESC)",
@@ -142,7 +146,7 @@ def inspect_sessions_store(path: Path) -> AdapterInspection:
                 return _inspection(
                     target, "corrupt", None, False, "session schema metadata is invalid"
                 )
-            if version != SCHEMA_VERSION:
+            if version not in {1, SCHEMA_VERSION}:
                 return _inspection(
                     target,
                     "unsupported",
@@ -150,7 +154,7 @@ def inspect_sessions_store(path: Path) -> AdapterInspection:
                     True,
                     f"unsupported session schema version: {version}",
                 )
-            invalid = _invalid_owned_tables(connection, tables)
+            invalid = _invalid_owned_tables(connection, tables, version=version)
             if invalid:
                 return _inspection(
                     target,
@@ -159,7 +163,15 @@ def inspect_sessions_store(path: Path) -> AdapterInspection:
                     False,
                     "session schema is incomplete or invalid: " + ", ".join(invalid),
                 )
-            return _inspection(target, "current", version, True, "session schema is current")
+            return _inspection(
+                target,
+                "migration_required" if version == 1 else "current",
+                version,
+                True,
+                "session schema requires migration from 1 to 2"
+                if version == 1
+                else "session schema is current",
+            )
     except sqlite3.Error:
         return _inspection(target, "corrupt", None, False, "session SQLite is unreadable")
 
@@ -273,7 +285,7 @@ class SessionsUpgradeAdapter:
 
     @property
     def supported_source_schema_versions(self) -> frozenset[int]:
-        return frozenset({SCHEMA_VERSION})
+        return frozenset({1, SCHEMA_VERSION})
 
     @property
     def target_schema_version(self) -> int:
@@ -306,17 +318,52 @@ class SessionsUpgradeAdapter:
     ) -> tuple[MigrationStep, ...]:
         if source_data_generation != target_data_generation:
             raise SessionsUpgradeError("sessions defines no cross-generation migration yet")
-        return ()
+        steps = []
+        for path in self._paths:
+            inspection = inspect_sessions_store(path)
+            if inspection.state == "migration_required":
+                target = _target(path)
+                steps.append(
+                    MigrationStep(
+                        adapter_id=ADAPTER_ID,
+                        step_id=f"{target.target_id}.v1-to-v2",
+                        target_id=target.target_id,
+                        physical_path=str(path),
+                        source_schema_version=1,
+                        target_schema_version=SCHEMA_VERSION,
+                    )
+                )
+            elif inspection.state in {"corrupt", "unsupported"}:
+                raise SessionsUpgradeError(inspection.detail)
+        return tuple(steps)
 
     def apply(self, step: MigrationStep) -> None:
         if (
             step.adapter_id != ADAPTER_ID
-            or step.source_schema_version != SCHEMA_VERSION
+            or step.source_schema_version not in {1, SCHEMA_VERSION}
             or step.target_schema_version != SCHEMA_VERSION
             or step.physical_path is None
         ):
             raise SessionsUpgradeError("unsupported session migration step")
-        self.verify(_target(Path(step.physical_path)))
+        path = Path(step.physical_path)
+        if path not in self._paths or step.target_id != _target(path).target_id:
+            raise SessionsUpgradeError("unknown session migration target")
+        inspection = inspect_sessions_store(path)
+        if inspection.state == "current":
+            return
+        if inspection.state != "migration_required":
+            raise SessionsUpgradeError(inspection.detail)
+        with sqlite3.connect(path) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "ALTER TABLE turns ADD COLUMN background_handoffs TEXT NOT NULL DEFAULT '[]'"
+            )
+            connection.execute("ALTER TABLE turns ADD COLUMN handoff_acknowledgement TEXT")
+            connection.execute(
+                "UPDATE store_metadata SET value = ? WHERE key = ?",
+                (str(SCHEMA_VERSION), METADATA_KEY),
+            )
+        self.verify(_target(path))
 
     def verify(self, target: AdapterTarget) -> AdapterInspection:
         inspected = self.inspect(target)
@@ -395,9 +442,13 @@ def _columns(connection: sqlite3.Connection, table: str) -> frozenset[str]:
     return frozenset(row[1] for row in connection.execute(f'PRAGMA table_info("{table}")'))
 
 
-def _invalid_owned_tables(connection: sqlite3.Connection, tables: frozenset[str]) -> list[str]:
+def _invalid_owned_tables(
+    connection: sqlite3.Connection, tables: frozenset[str], *, version: int
+) -> list[str]:
     invalid: list[str] = []
     for table, expected in _TABLE_COLUMNS.items():
+        if table == "turns" and version == 1:
+            expected = expected - {"background_handoffs", "handoff_acknowledgement"}
         if table not in tables:
             invalid.append(f"missing {table}")
         elif _columns(connection, table) != expected:

@@ -213,6 +213,112 @@ class GatewayStore:
             raise ValueError("gateway result limit must be between 1 and 1000")
         return await self._run(self._results, conversation_id, limit, scope)
 
+    async def reconcile_committed_result(
+        self,
+        *,
+        message_id: str,
+        scope: ProfileScope,
+        session_revision: int,
+        response_outbox_id: str,
+    ) -> GatewayInboundResult:
+        """Project independently proven session commit without reviving archived chats.
+
+        The gateway handoff coordinator owns verification of the exact committed
+        source turn. This transaction only settles its existing result; it never
+        creates a new inbound attempt or overwrites a different terminal reply.
+        """
+        return await self._run(
+            self._reconcile_committed_result,
+            message_id,
+            scope,
+            session_revision,
+            response_outbox_id,
+        )
+
+    def _reconcile_committed_result(
+        self,
+        message_id: str,
+        scope: ProfileScope,
+        session_revision: int,
+        response_outbox_id: str,
+    ) -> GatewayInboundResult:
+        now = self._now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT result_json FROM gateway_inbound_results WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if row is None:
+                raise GatewayResultConflictError("handoff gateway result is missing")
+            result = self._result(row["result_json"])
+            conversation_row = connection.execute(
+                "SELECT * FROM conversations WHERE id = ?",
+                (result.conversation_id,),
+            ).fetchone()
+            if conversation_row is None:
+                raise ConversationNotFoundError("handoff conversation is missing")
+            conversation = self._conversation(conversation_row)
+            self._assert_conversation_scope(conversation, scope)
+            if result.status == "committed":
+                if (
+                    result.session_revision != session_revision
+                    or result.response_outbox_id != response_outbox_id
+                ):
+                    raise GatewayResultConflictError("handoff result already committed differently")
+                return result
+            if result.status not in {"running", "uncertain"}:
+                raise GatewayResultConflictError("handoff result cannot be reconciled")
+            changed = result.model_copy(
+                update={
+                    "status": "committed",
+                    "session_revision": session_revision,
+                    "response_outbox_id": response_outbox_id,
+                    "error": None,
+                    "finished_at": now,
+                }
+            )
+            connection.execute(
+                "UPDATE gateway_inbound_results SET result_json = ?, status = ?, "
+                "finished_at = ? WHERE message_id = ?",
+                (changed.model_dump_json(), changed.status, _iso(now), message_id),
+            )
+            # An archived predecessor can still own a valid handoff. Never
+            # reactivate it, or overwrite a later conversation's progress.
+            newer_result = connection.execute(
+                "SELECT 1 FROM gateway_inbound_results WHERE conversation_id = ? "
+                "AND message_id != ? AND started_at > ? LIMIT 1",
+                (conversation.id, message_id, _iso(result.started_at)),
+            ).fetchone()
+            if newer_result is None and (
+                conversation.status == "active"
+                or (
+                    conversation.status == "uncertain"
+                    and conversation.last_processed_inbound_message_id == message_id
+                )
+            ):
+                conversation = conversation.model_copy(
+                    update={
+                        "status": "active",
+                        "revision": conversation.revision + 1,
+                        "updated_at": now,
+                        "last_processed_inbound_message_id": message_id,
+                    }
+                )
+                connection.execute(
+                    "UPDATE conversations SET conversation_json = ?, status = ?, "
+                    "revision = ?, updated_at = ? WHERE id = ?",
+                    (
+                        conversation.model_dump_json(),
+                        conversation.status,
+                        conversation.revision,
+                        _iso(now),
+                        conversation.id,
+                    ),
+                )
+            connection.commit()
+            return changed
+
     async def running_results(self, *, scope: ProfileScope) -> list[GatewayInboundResult]:
         """List foreground turns that were still running when the process stopped."""
 

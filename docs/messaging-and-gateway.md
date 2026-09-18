@@ -127,6 +127,15 @@ ricky gateway run
 Only one gateway can own a `user_data_dir`. Do not run a foreground gateway while the managed
 service is active.
 
+Existing installations must complete their [released upgrade](operations.md#upgrade-ricky)
+before starting a version that changes durable schemas. Background acknowledgement ordering
+requires execution schema 9 and session schema 2; migration preserves existing queued work and
+conversation history. Ordinary gateway startup does not migrate those stores.
+When testing from a source checkout against an existing development data root, stop its gateway
+and explicitly migrate that root through the owning upgrade adapters before restarting it.
+`uv run ricky upgrade --check` is read-only; applying a released upgrade requires the installed
+release launcher, not the checkout.
+
 The gateway starts with every protected-value vault locked by default. To make one or more
 initialized vaults resident in this gateway process, request each profile explicitly:
 
@@ -202,6 +211,32 @@ gateway restart resumes the same rotation instead of archiving a second conversa
 
 Telegram authority principals use the qualified account, for example
 `telegram:personal/bot:TELEGRAM_USER_ID`.
+
+## Background work
+
+When the gateway delegates work or starts a named job, Ricky first sends a short
+acknowledgement and ends the foreground turn. Work starts only after Telegram accepts
+every part of that acknowledgement and Ricky records its delivery receipts. The worker sends
+the result or an actionable failure separately; the foreground agent does not wait and repeat it.
+Required questions and approvals still happen before work is accepted.
+Delegated work uses the durable task's short title in acknowledgements and result notifications;
+the full execution instructions are supplied to the worker.
+
+Routine acknowledgements and results omit internal task and execution IDs. Use
+`/status` to inspect those details, including work waiting for acknowledgement
+delivery. A failed or uncertain send keeps that work on hold; Ricky does not assume
+you received it. Cancellation or expiry prevents a late acknowledgement from
+starting stale work. Gateway restarts reconcile recorded delivery without rerunning
+the foreground model. Scheduled jobs and jobs launched from the CLI keep their
+existing launch behavior.
+
+Unacknowledged work expires after one hour by default. Set
+`[executions].acknowledgement_ttl_seconds` to change that wait, up to 24 hours.
+This limit controls the wait for acknowledgement delivery, not how long an accepted job can run.
+
+`/new` starts a fresh conversation without cancelling work already acknowledged.
+Execution success records progress on a linked durable task; task completion still
+requires its normal closure checks.
 
 Cancellation is durable. A queued execution normally becomes `cancelled` immediately. A running
 one may appear as `cancel_requested` in `/status` while its owner stops and joins the work. It ends
