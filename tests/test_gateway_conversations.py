@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ from pydantic import SecretStr
 from authority_support import install_sandbox_runtime
 from ricky.authority.store import AuthorityStore
 from ricky.config import (
+    BrowserSettings,
     GatewayRouteSettings,
     GatewaySettings,
     MessagingRouteSettings,
@@ -1152,6 +1154,70 @@ async def test_background_turn_receives_named_jobs_and_delegable_capability_cata
     assert '"name": "personal/brief"' in first_request_text
     assert '"name": "builtin.project.read"' in first_request_text
     assert "execution_profiles" not in first_request_text
+
+
+@pytest.mark.parametrize("background_enabled", [False, True])
+async def test_actual_gateway_request_preserves_background_browser_catalog_and_intake(
+    tmp_path: Path, background_enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ricky.browser.guardrails import browser_guardrail_evaluators
+
+    # This regression needs the production browser evaluators, not the module's
+    # synthetic reservation-only evaluator fixture.
+    monkeypatch.setattr(
+        "ricky.runtime.composition.built_in_guardrail_evaluators", browser_guardrail_evaluators
+    )
+    settings = _settings(tmp_path).model_copy(
+        update={
+            "browser": BrowserSettings.model_validate(
+                {
+                    "enabled": True,
+                    "background": {
+                        "enabled": background_enabled,
+                        "read_enabled": background_enabled,
+                        "interaction_enabled": background_enabled,
+                        "commit_enabled": background_enabled,
+                    },
+                }
+            )
+        }
+    )
+    inbound = await _ingest(
+        settings, suffix="a", text="Use my personal browser profile to check my account balance."
+    )
+    provider = ScriptedProvider([[MessageDone(message=Message.text("assistant", "Acknowledged."))]])
+
+    await ConversationCoordinator(
+        settings, provider_factory=lambda _name, _settings: provider
+    ).process(inbound.id)
+
+    request = provider.requests[0]
+    text = "\n".join(
+        part.text
+        for message in request.messages
+        for part in message.content
+        if isinstance(part, TextPart)
+    )
+    catalog = json.loads(
+        text.split("Valid ad hoc capabilities: ", 1)[1].split(
+            ". Exact guarded capability intake specifications:", 1
+        )[0]
+    )
+    by_name = {item["name"]: item for item in catalog}
+    browser_ids = {"builtin.browser.read", "builtin.browser.interact", "builtin.browser.commit"}
+    if background_enabled:
+        assert browser_ids <= by_name.keys()
+        # Browser read requires a guardrail even with empty owner policy lists.
+        for capability_id in browser_ids:
+            assert by_name[capability_id]["guardrail_required"]
+            assert by_name[capability_id]["guardrail_intake"]["fields"]
+        assert "browser_session_open_resource" in by_name["builtin.browser.interact"]["resources"]
+    else:
+        assert browser_ids.isdisjoint(by_name)
+    tools = {tool.name for tool in request.tools}
+    assert "delegate_task" in tools
+    assert not any(name.startswith("browser_") for name in tools)
+    assert "builtin.protected_value.use" not in by_name
 
 
 class FailingProvider:

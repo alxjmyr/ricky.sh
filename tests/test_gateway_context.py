@@ -107,6 +107,9 @@ def test_gateway_instructions_expose_exact_guardrail_intake_before_delegation() 
     assert "mobile-first portable Markdown" in instructions
     assert "tables to at most three short columns" in instructions
     assert "Do not emit raw HTML" in instructions
+    assert "delegate browser work in this turn" in instructions
+    assert "do not substitute host shell execution" in instructions
+    assert "browser_session_open_resource from builtin.browser.interact" in instructions
 
 
 @pytest.mark.parametrize(

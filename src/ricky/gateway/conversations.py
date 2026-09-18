@@ -308,6 +308,12 @@ async def build_gateway_runtime(
                     [DurableTaskStateGuard(capabilities.durable_tasks)]
                 ),
             )
+            # The returned runtime also supplies the background delegation
+            # catalog. Keep its descriptors even though foreground tools cannot
+            # call them; otherwise browser capabilities disappear from Telegram.
+            for definition in capabilities.capability_registry.definitions():
+                if foreground_registry.get(definition.id) is None:
+                    foreground_registry.register(definition)
             diagnostics = [
                 *validate_capability_inventory(
                     foreground_registry,
@@ -1555,13 +1561,13 @@ async def _gateway_capability_catalog(
             resources=[resource.id for resource in definition.resources],
             confirmation_required=decision.confirmation_required,
             guardrail_required=(
-                decision.guardrail_required or definition.authority_capability is not None
+                decision.guardrail_required or definition.guardrail_schema_id is not None
             ),
             guardrail_intake=_guardrail_intake(
                 runtime.guardrail_registry,
                 definition.id,
                 required=(
-                    decision.guardrail_required or definition.authority_capability is not None
+                    decision.guardrail_required or definition.guardrail_schema_id is not None
                 ),
             ),
             delegable_capabilities=(

@@ -174,6 +174,22 @@ Adding a capability to a guardrail list constrains it; it does not install or en
 Startup checks borrow the gateway's resident unlock only for profiles accessible to each route.
 A separate `ricky gateway doctor` or `ricky capability validate` command runs with locked vaults.
 
+## Telegram says browser access is unavailable
+
+The foreground gateway delegates browser work; it does not expose direct browser tools.
+Check `ricky capability list` and `ricky browser check personal/RESOURCE`. A configured
+persistent resource needs `builtin.browser.read` and `builtin.browser.interact` in the
+background execution, because `browser_session_open_resource` belongs to the interaction
+capability. The gateway supplies the required guardrail fields even when the owner's
+guardrail lists are empty. A balance check does not require browser commit or protected fills.
+
+Inspect the queued execution and its contract with `ricky execution show REQUEST_ID` and
+`ricky execution contract show CONTRACT_ID`. A shell-only contract cannot perform the requested
+browser work through Ricky's browser tools. If diagnostics list browser capabilities but
+Telegram cannot see them, check the installed gateway version and its delegation catalog.
+Restart the gateway after changing configuration; `/new` clears conversation context but does
+not reload the running process's settings.
+
 ## A protected value is unavailable
 
 Confirm that `[protected_values] enabled = true` is in the installation `ricky.toml`, then inspect
