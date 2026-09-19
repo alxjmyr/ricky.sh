@@ -345,3 +345,64 @@ async def test_effect_evidence_is_published_with_shared_action_identity(
     assert evidence.logical_effect_key == identity.action_key
     assert evidence.disposition == "performed"
     assert "browser_action_id=" in (evidence.postcondition or "")
+
+
+@pytest.mark.parametrize("tool", ["browser_commit", "browser_coordinate_commit"])
+async def test_commit_preparation_checks_scope_without_dispatch_authority(tool: str) -> None:
+    from ricky.browser.types import BrowserTransactionEvidence, CoordinateFallbackEvidence
+
+    guard = _guard()
+    guard.browser_scope = guard.browser_scope.model_copy(update={"allowed_tools": (tool,)})
+    facts = BrowserGuardFacts.model_validate(
+        {
+            "tool_name": tool,
+            "phase": "prepare",
+            "session_mode": "owned_ephemeral",
+            "top_level_origin": "https://example.com",
+            "target_frame_origin": "https://example.com",
+            "coordinate_fallback": CoordinateFallbackEvidence(
+                semantic_snapshot_id="browser_snapshot_" + "a" * 32,
+                reason="no_supported_semantic_target",
+            )
+            if tool == "browser_coordinate_commit"
+            else None,
+        }
+    )
+    await guard.check(facts)
+    if tool == "browser_coordinate_commit":
+        with pytest.raises(BrowserExecutionGuardError, match="semantic fallback"):
+            await guard.check(facts.model_copy(update={"coordinate_fallback": None}))
+    with pytest.raises(BrowserExecutionGuardError, match="exact envelope"):
+        await guard.check(facts.model_copy(update={"phase": "dispatch"}))
+    with pytest.raises(BrowserExecutionGuardError, match="preparation cannot reserve"):
+        await guard.reserve("transaction_commits", 1, facts)
+    with pytest.raises(BrowserExecutionGuardError, match="preparation cannot reserve"):
+        await guard.reserve_possible_pages(1, facts)
+    with pytest.raises(BrowserExecutionGuardError, match="preparation cannot record"):
+        await guard.record(BrowserRuntimeEvidence(facts=facts, disposition="performed"))
+    transaction = BrowserTransactionEvidence(
+        envelope_kind="financial",
+        envelope_sha256="a" * 64,
+        top_level_origin="https://example.com",
+        target_frame_origin="https://example.com",
+    )
+    await guard.check(facts.model_copy(update={"phase": "dispatch", "transaction": transaction}))
+    # Preparation still enforces origin ceilings, coordinate fallback, and mode.
+    guard.browser_scope = guard.browser_scope.model_copy(
+        update={"allow_public_https_research": False}
+    )
+    with pytest.raises(BrowserExecutionGuardError, match="research was not authorized"):
+        await guard.check(facts)
+    guard.browser_scope = guard.browser_scope.model_copy(update={"mode": "read_only"})
+    with pytest.raises(BrowserExecutionGuardError, match="read-only"):
+        await guard.check(facts)
+
+
+def test_preparation_phase_is_not_a_model_argument_or_noncommit_bypass() -> None:
+    from pydantic import ValidationError
+
+    from ricky.browser.tools import BrowserCommitParams
+
+    with pytest.raises(ValidationError, match="preparation guard facts"):
+        BrowserGuardFacts(tool_name="browser_click", phase="prepare")
+    assert "phase" not in BrowserCommitParams.model_fields

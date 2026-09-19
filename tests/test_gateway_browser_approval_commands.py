@@ -140,7 +140,9 @@ async def test_browser_decision_requires_identifier_and_code(verb: str) -> None:
         approve=verb == "approve",
     )
 
-    assert response == f"Usage: /{verb} browser_<approval-id> <one-time-code>"
+    assert f"entire /{verb} command" in response
+    assert "one-time code after the approval ID" in response
+    assert f"`/{verb} APPROVAL_ID ONE_TIME_CODE`" in response
     assert dispatcher.calls == []
 
 
@@ -157,7 +159,7 @@ async def test_browser_decision_rejects_prefixed_command_names(command: str) -> 
         approve=command.startswith("/approve"),
     )
 
-    assert response.startswith("Usage:")
+    assert response.startswith("Copy and send the entire")
     assert dispatcher.calls == []
 
 

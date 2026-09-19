@@ -15,17 +15,19 @@ The background worker navigates and prepares the exact commit once, then enters
 `awaiting_transaction_approval`. It retains its browser, page, resource lease, claim, and in-memory
 prepared effect. It performs no model or browser work while parked.
 
-The gateway sends the complete transaction envelope, live HTTPS origins, known destinations,
-semantic or coordinate target mode, exact browser resource identity and revision, pinned model
-provider, execution budget ceiling, protected aliases and revisions, approval ID, expiration, and a
-one-time correlation code. Approve or deny from that same authenticated conversation:
+The gateway sends a readable review of the proposed action, merchant or destination, total,
+fees, recurrence, consequences, browser resource, website, target, and expiration. Exact resource
+revisions, occurrence hashes, and budget bindings stay in the durable approval record.
+Copy and send the complete approve or deny command from that same authenticated conversation:
 
 ```text
 /approve browser_transaction_<id> <one-time-code>
 /deny browser_transaction_<id> <one-time-code>
 ```
 
-A bare `yes`, `no`, or reaction cannot decide a browser transaction. The code is an intent and
+A command containing only the approval ID is incomplete. Ricky generates the one-time code and
+includes it as the final token in each command. It does not come from the website, SMS, or an
+authenticator. A bare `yes`, `no`, or reaction cannot decide a browser transaction. The code is an intent and
 correlation check, not a second authentication factor. The configured bot account, sender
 allowlist, gateway route, principal policy, and owner ceilings remain the authentication boundary.
 
@@ -61,7 +63,10 @@ an unbounded tip, or apply unknown future pricing, complete the commit yourself 
 browser handoff.
 
 A free trial that automatically becomes paid is financial even when today's charge is zero.
-Entering a payment field is preparation and has its own protected-value permission; activating the
+Selecting a purchase amount and preparing ordinary form fields use interaction tools. Amounts
+and currencies are not payment credentials. Review the final total including fees before
+requesting approval; buying $20 in credits may cost more than $20. Entering a credential field
+is preparation and has its own protected-value permission; activating the
 final purchase or subscription control requires the separate financial approval.
 
 ### Non-financial browser transaction

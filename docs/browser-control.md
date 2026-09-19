@@ -102,6 +102,17 @@ and authenticated origins in its context, even when resource discovery is not in
 Malformed delegation arguments are returned to the agent
 for correction; only genuine browser-choice ambiguity is sent to you as a question.
 
+If an agent supplies an unknown browser session or page ID, Ricky returns safe references
+from that runtime so the agent can correct its call. A session-limit error also points it
+to existing sessions. Ricky never substitutes a different session automatically. Repeated
+identical reference failures against unchanged state stop the turn with recovery guidance.
+
+Before asking you to approve a transaction, Ricky checks that its delegated authority and browser
+budgets can still permit the action. Approval does not reset those budgets. A budget rejection
+before dispatch is reported as not performed. If an earlier action timed out after possible
+dispatch, it remains uncertain and its reserved popup capacity may block further actions;
+Ricky does not automatically retry it or assume that capacity is unused.
+
 ## Replace an older bundled-browser installation
 
 The Chrome-only release starts with fresh browser profiles; it does not convert old Chromium
@@ -207,7 +218,7 @@ allowed_profiles = ["shared", "personal"]
 
 [authority.capabilities.browser_commit]
 enabled = true
-max_effect_calls = 3
+max_effect_calls = 50
 max_financial_limit_minor = 25000
 currency = "USD"
 allowed_profiles = ["shared", "personal"]
@@ -219,6 +230,14 @@ browser resource revision, live destination, and durable budgets all intersect. 
 model output can widen them.
 Authority `allowed_profiles` must cover the execution scope, which always includes `shared`,
 even when the selected browser belongs only to `personal`.
+
+Effect-call ceilings count all delegated effects, including preparation clicks and the final
+commit. The execution uses the lowest ceiling across its execution budget, authority policy,
+and selected authority capabilities. Setting `browser_commit.max_effect_calls = 1` therefore
+leaves no room for preparation clicks in the same execution. To permit one purchase with room
+for preparation, set adequate effect-call ceilings and set
+`[browser.background.budget].transaction_commits = 1`. Each financial commit still requires
+exact approval and must fit `max_financial_limit_minor` and `currency`.
 
 An ad hoc gateway execution can research public HTTPS sites without naming a merchant in advance.
 When it reaches a consequential action, it proposes the exact live origin and transaction for a

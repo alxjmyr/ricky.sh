@@ -7,7 +7,7 @@ import json
 from decimal import Decimal
 from typing import ClassVar, cast
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from ricky.authority.registry import AuthorityEvaluator
 from ricky.authority.types import AuthorityScope, AuthorityVerdict
@@ -30,7 +30,7 @@ from ricky.browser.tools import (
     BrowserSetCheckedParams,
     BrowserUploadParams,
 )
-from ricky.browser.types import BrowserCommitEnvelope, BrowserFinancialTransactionEnvelope
+from ricky.browser.types import BrowserFinancialTransactionEnvelope
 from ricky.tools.base import (
     EffectIdentity,
     EffectReceipt,
@@ -38,7 +38,6 @@ from ricky.tools.base import (
     make_effect_identity,
 )
 
-_ENVELOPE = TypeAdapter(BrowserCommitEnvelope)
 _AUTHORITY_TO_GROUP = {
     "browser_interact": "builtin.browser.interact",
     "protected_value_use": "builtin.protected_value.use",
@@ -117,9 +116,8 @@ class _BrowserAuthorityEvaluator:
                 )
         amount_minor = 0
         currency: str | None = None
-        if tool_name in BROWSER_COMMIT_TOOLS:
-            payload = parsed.model_dump(mode="python").get("envelope")
-            envelope = _ENVELOPE.validate_python(payload)
+        if isinstance(parsed, (BrowserCommitParams, BrowserCoordinateCommitParams)):
+            envelope = parsed.envelope
             if isinstance(envelope, BrowserFinancialTransactionEnvelope):
                 try:
                     amount_minor = browser_money_minor_units(
@@ -180,7 +178,11 @@ class _BrowserAuthorityEvaluator:
             or scope.schema_version != self.schema_version
         ):
             raise ValueError("browser authority scope identity mismatch")
-        constraints = BrowserGuardrailConstraints.model_validate(scope.constraints)
+        # AuthorityScope stores opaque JSON, including arrays for strict tuple
+        # fields. Decode at the JSON boundary, preserving strict scalar checks.
+        constraints = BrowserGuardrailConstraints.model_validate_json(
+            json.dumps(scope.constraints, sort_keys=True, separators=(",", ":"))
+        )
         if constraints.capability_id != _AUTHORITY_TO_GROUP[self.capability]:
             raise ValueError("browser authority constraints have another capability")
         return constraints

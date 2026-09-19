@@ -216,6 +216,33 @@ class BackgroundBrowserApprovalCoordinator:
         return draft
 
     async def reserve_park(self, _draft: BrowserApprovalDraft) -> None:
+        if _draft.kind == "browser_transaction":
+            # Parking cannot make exhausted dispatch capacity usable. This read
+            # does not reserve the effect; dispatch still checks atomically.
+            usage = {
+                item.operation: item
+                for item in await self.ledger.budget_usage(
+                    self.context.attempt_id, scope=self.context.profile_scope
+                )
+            }
+            controlled = usage.get("controlled_pages")
+            if controlled is None:
+                raise ValueError(
+                    "browser controlled-page budget is unavailable; cannot request approval"
+                )
+            possible_pages = max(1, controlled.ceiling - controlled.used)
+            for operation, amount in (
+                ("transaction_commits", 1),
+                ("navigations", 1),
+                ("controlled_pages", possible_pages),
+                ("created_pages", possible_pages),
+            ):
+                counter = usage.get(operation)
+                if counter is None or counter.used + amount > counter.ceiling:
+                    raise ValueError(
+                        f"browser budget exhausted: {operation}; transaction was not "
+                        "dispatched and approval cannot restore exhausted capacity"
+                    )
         await self.ledger.reserve_budget(
             self.context.attempt_id,
             "parked_browsers",

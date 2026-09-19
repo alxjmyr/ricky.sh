@@ -1,6 +1,9 @@
 """Stable browser transaction identity and protected-commit policy tests."""
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -12,6 +15,8 @@ from ricky.browser.types import (
     BrowserSiteFundingSource,
 )
 from ricky.executions.browser import (
+    BrowserApprovalDraft,
+    BrowserBudgetUsage,
     BrowserExecutionBudget,
     BrowserLiveBinding,
     BrowserProtectedUseEvidence,
@@ -19,10 +24,77 @@ from ricky.executions.browser import (
     envelope_digest,
 )
 from ricky.executions.browser_runtime import (
+    BackgroundBrowserApprovalContext,
+    BackgroundBrowserApprovalCoordinator,
     _logical_transaction_identity,
     _protected_commit_requests,
 )
-from ricky.profiles import ProfileResourceRef
+from ricky.executions.store import ExecutionStore
+from ricky.jobs.browser_store import BrowserRunLedger
+from ricky.profiles import ProfileResourceRef, ProfileScope
+
+
+@pytest.mark.parametrize("blocker", ["missing_controlled", "missing_navigation", "retained_popups"])
+async def test_unavailable_capacity_does_not_park_or_prompt(blocker: str) -> None:
+    attempt_id = "browser_attempt_" + "a" * 32
+    scope = ProfileScope.create("personal")
+    counts = {
+        "controlled_pages": (1, 8),
+        "created_pages": (7 if blocker == "retained_popups" else 0, 8),
+        "navigations": (0, 40),
+        "transaction_commits": (0, 1),
+    }
+    if blocker == "missing_controlled":
+        del counts["controlled_pages"]
+    if blocker == "missing_navigation":
+        del counts["navigations"]
+    usage = [
+        BrowserBudgetUsage.model_validate(
+            {
+                "attempt_id": attempt_id,
+                "operation": operation,
+                "used": used,
+                "ceiling": ceiling,
+                "updated_at": datetime.now(UTC),
+            }
+        )
+        for operation, (used, ceiling) in counts.items()
+    ]
+    reserve = AsyncMock()
+    transition = AsyncMock()
+    notify = AsyncMock()
+    coordinator = BackgroundBrowserApprovalCoordinator(
+        context=cast(
+            BackgroundBrowserApprovalContext,
+            SimpleNamespace(
+                attempt_id=attempt_id,
+                profile_scope=scope,
+            ),
+        ),
+        store=cast(ExecutionStore, object()),
+        ledger=cast(
+            BrowserRunLedger,
+            SimpleNamespace(
+                budget_usage=AsyncMock(return_value=usage),
+                reserve_budget=reserve,
+                transition=transition,
+            ),
+        ),
+        notifier=notify,
+        protected_values=None,
+    )
+    with pytest.raises(ValueError, match="budget"):
+        await coordinator.reserve_park(
+            cast(
+                BrowserApprovalDraft,
+                SimpleNamespace(
+                    kind="browser_transaction",
+                ),
+            )
+        )
+    reserve.assert_not_called()
+    transition.assert_not_called()
+    notify.assert_not_called()
 
 
 def _financial_envelope(

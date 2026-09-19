@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -184,6 +185,13 @@ class DelegatedEffectTool:
         if not verdict.allowed:
             return await self._deny(verdict.reason, capability=scope.capability)
 
+        # Preparation may park a live browser and prompt the user. Do not ask for
+        # approval when durable authority is already unusable. Reservation below
+        # remains the atomic check after preparation/approval and handles races.
+        reason = await self._admission_denial(verdict.amount_minor, verdict.currency)
+        if reason is not None:
+            return await self._deny(reason, capability=scope.capability)
+
         prepared: PreparedEffect | None = None
         try:
             if isinstance(self._tool, PreparedEffectProvider):
@@ -202,6 +210,15 @@ class DelegatedEffectTool:
                     attempt_reason="invalid_preflight",
                 ),
             )
+        if prepared is not None:
+            try:
+                reason = await self._admission_denial(verdict.amount_minor, verdict.currency)
+            except BaseException:
+                await _abort_prepared(self._tool, prepared, ctx, "authority revalidation failed")
+                raise
+            if reason is not None:
+                await _abort_prepared(self._tool, prepared, ctx, reason)
+                return await self._deny(reason, capability=scope.capability)
         reservation = asyncio.create_task(
             self._jobs.reserve_grant_action(
                 grant_id=self._grant.id,
@@ -396,6 +413,32 @@ class DelegatedEffectTool:
     ) -> dict[str, object]:
         hook = getattr(self._tool, "normalize_permission_args", None)
         return hook(args, ctx) if hook is not None else args
+
+    async def _admission_denial(self, amount_minor: int, currency: str | None) -> str | None:
+        current = await self._authority.get(self._grant.id, scope=self._grant.profile_scope)
+        budget = await self._jobs.get_grant_budget(self._grant.id, scope=self._grant.profile_scope)
+        if current.status != "active":
+            return f"delegation grant is {current.status}"
+        if current.expires_at <= datetime.now(UTC):
+            return "delegation grant is expired"
+        if budget is None:
+            return "delegation grant has no budget"
+        if budget["status"] != "active":
+            return f"delegation grant is {budget['status']}"
+        if datetime.fromisoformat(str(budget["expires_at"])) <= datetime.now(UTC):
+            return "delegation grant is expired"
+        if budget["effects_used"] >= budget["effect_limit"]:
+            return "delegated effect-call limit exhausted"
+        if amount_minor > 0 and (
+            budget["financial_limit_minor"] is None
+            or budget["currency"] != currency
+            or budget["financial_used_minor"] + amount_minor > budget["financial_limit_minor"]
+        ):
+            return "delegated financial limit exhausted"
+        run = await self._jobs.get(self._run_id, scope=self._grant.profile_scope)
+        if run.outcome is not None or run.effect_calls >= self._effect_budget:
+            return "execution effect-call budget is unavailable"
+        return None
 
     async def _deny(self, reason: str, *, capability: str | None) -> ToolResult:
         await self._authority.record(

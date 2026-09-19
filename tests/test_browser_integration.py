@@ -102,6 +102,16 @@ class _FixtureHandler(BaseHTTPRequestHandler):
             with suppress(BrokenPipeError, ConnectionResetError):
                 self.wfile.write(body)
             return
+        if path == "/checkout-modal":
+            from browser_transaction_support import checkout_html
+
+            body = checkout_html()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/start":
             self.send_response(302)
             self.send_header("Location", "/page?token=server-secret&source=fixture")
@@ -1664,6 +1674,73 @@ async def test_real_chrome_rejects_oversized_download_before_publication(
                 / settings.browser.download_dir
             )
             assert not durable.exists()
+        finally:
+            await service.aclose()
+
+
+async def test_real_chrome_modal_amount_preparation_and_final_transaction(
+    installed_browser: _InstalledBrowser, tmp_path: Path
+) -> None:
+    from ricky.browser.tools import BrowserSnapshotTool
+
+    with _fixture_server() as (origin, requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "browser": {"enabled": True, "allowed_private_origins": [origin]},
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        try:
+            opened = await service.open_session(headless=True)
+            await service.navigate(opened.session_id, page_id=None, url=f"{origin}/checkout-modal")
+            initial = await service.snapshot(opened.session_id, page_id=None)
+            opened_checkout = await service.action(
+                _target(initial, "Open checkout"), BrowserActionRequest(kind="click")
+            )
+            assert opened_checkout.disposition == "performed"
+            snapshot = await service.snapshot(opened.session_id, page_id=None)
+            assert "Visible modal dialog" in snapshot.content
+            assert "Account information" not in snapshot.content
+            amount = next(
+                item for item in snapshot.descriptors if item.name == "Credit amount (USD)"
+            )
+            assert amount.control_kind == "number" and amount.editable
+            filled = await service.action(
+                _target(snapshot, "Credit amount (USD)"),
+                BrowserActionRequest(kind="fill", value="20"),
+            )
+            assert filled.disposition == "performed", filled.failure
+            assert requests["/checkout-complete"] == 0
+            snapshot = await service.snapshot(opened.session_id, page_id=None)
+            assert "21.60" in snapshot.content
+            ctx = ToolContext(
+                cwd=tmp_path,
+                settings=settings,
+                session=AgentSession.create(
+                    settings, profile_scope=settings.resolve_profile_scope()
+                ),
+            )
+            tool = BrowserSnapshotTool(service)
+            rendered = await tool.run(tool.Params(session_id=opened.session_id), ctx)
+            assert len(rendered.content) < settings.context.tool_results.offload_threshold_chars
+            assert "Credit amount (USD)" in rendered.content
+            snapshot = await service.snapshot(opened.session_id, page_id=None)
+            result = await _semantic_transaction(
+                service,
+                _target(snapshot, "Purchase credits"),
+                BrowserActionRequest(kind="commit", activation="click"),
+            )
+            assert result.disposition == "performed"
+            assert requests["/checkout-complete"] == 1
+            assert requests["submission:credits=20"] == 1
+            assert requests["submission:charged=21.60"] == 1
         finally:
             await service.aclose()
 

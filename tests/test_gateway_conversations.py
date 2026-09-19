@@ -1834,7 +1834,21 @@ async def test_compact_uses_existing_contract_and_persists_checkpoint(
     assert (await SessionStore(settings).get(compacted.session_id, scope=_SCOPE)).revision == 4
 
 
-@pytest.mark.parametrize("selection", ["short", "default", "sole", "ambiguous", "encoded"])
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "short",
+        "default",
+        "sole",
+        "ambiguous",
+        "encoded",
+        "purchase",
+        "purchase_denied",
+        "purchase_budget_denied",
+        "purchase_popup_budget_denied",
+        "recover_id",
+    ],
+)
 async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resource(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selection: str
 ) -> None:
@@ -1843,6 +1857,19 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     from ricky.browser.guardrails import browser_guardrail_evaluators
     from ricky.executions.contracts import load_contract_snapshot
 
+    purchase = selection.startswith("purchase")
+    popup_denied = selection == "purchase_popup_budget_denied"
+    budget_denied = selection in {"purchase_budget_denied", "purchase_popup_budget_denied"}
+    denied = selection == "purchase_denied" or budget_denied
+    final_report = (
+        "Starting balance: $6.65. No purchase made; browser budget exhausted."
+        if budget_denied
+        else "Starting balance: $6.65. No purchase made; approval denied."
+        if denied
+        else "Starting balance: $6.65. Ending balance: $26.65."
+        if purchase
+        else "$12.34"
+    )
     monkeypatch.setattr(
         "ricky.runtime.composition.built_in_guardrail_evaluators", browser_guardrail_evaluators
     )
@@ -1853,8 +1880,18 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     raw = _settings(tmp_path).model_dump(mode="python")
     raw["browser"] = {
         "enabled": True,
-        "background": {"enabled": True, "read_enabled": True, "interaction_enabled": True},
+        "background": {
+            "enabled": True,
+            "read_enabled": True,
+            "interaction_enabled": True,
+            "commit_enabled": purchase,
+            "budget": {"transaction_commits": 1},
+        },
     }
+    if budget_denied:
+        raw["browser"]["background"]["budget"].update(
+            {"created_pages": 0} if popup_denied else {"navigations": 2}
+        )
     resource = {"kind": "persistent", "headless": True, "description": "Personal browser"}
     browsers = {"ricky-personal": resource}
     if selection in {"default", "ambiguous"}:
@@ -1884,15 +1921,27 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     raw["authority"] = {
         "enabled": True,
         "allowed_principals": ["telegram:personal/bot:100"],
+        "max_effect_calls": 20 if purchase else 1,
         "capabilities": {
-            "browser_interact": {"enabled": True, "allowed_profiles": ["shared", "personal"]}
+            "browser_interact": {
+                "enabled": True,
+                "allowed_profiles": ["shared", "personal"],
+                "max_effect_calls": 20 if purchase else 1,
+            },
+            "browser_commit": {
+                "enabled": purchase,
+                "allowed_profiles": ["shared", "personal"],
+                "max_effect_calls": 20 if purchase else 1,
+                "max_financial_limit_minor": 3000,
+                "currency": "USD",
+            },
         },
     }
     raw["agents"] = {
         "ad_hoc_background": {
             "confirmation_required_capabilities": [],
             "guardrail_required_capabilities": [],
-            "execution": {"effect_calls": 1},
+            "execution": {"effect_calls": 20 if purchase else 1},
         }
     }
     settings = RickySettings.model_validate(raw)
@@ -1933,10 +1982,18 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                 assert task is not None
                 alias = "ricky-personal" if selection == "short" else ""
                 guardrails = []
-                for capability, tools in [
+                capability_tools = [
                     ("builtin.browser.read", "browser_navigate,browser_snapshot"),
-                    ("builtin.browser.interact", "browser_session_open_resource"),
-                ]:
+                    (
+                        "builtin.browser.interact",
+                        "browser_session_open_resource,browser_click"
+                        if purchase
+                        else "browser_session_open_resource",
+                    ),
+                ]
+                if purchase:
+                    capability_tools.append(("builtin.browser.commit", "browser_commit"))
+                for capability, tools in capability_tools:
                     if self.step == 2 and capability == "builtin.browser.read":
                         tools += ",browser_session_open_resource"
                     visual = (
@@ -1947,7 +2004,7 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                     if visual:
                         tools += ",browser_visual_snapshot"
                     fields: dict[str, str | bool] = {
-                        "mode": "read_only",
+                        "mode": "transaction" if purchase else "read_only",
                         "allowed_tools": tools,
                         "authenticated_origins": f"{alias}#https://openrouter.ai",
                     }
@@ -1964,6 +2021,8 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                         }
                     )
                 capabilities = ["builtin.browser.read", "builtin.browser.interact"]
+                if purchase:
+                    capabilities.append("builtin.browser.commit")
                 if selection == "encoded":
                     for guardrail in guardrails:
                         guardrail["fields"] = json.dumps(guardrail["fields"])
@@ -1974,7 +2033,9 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                         "action": "start",
                         "task_id": task.group(),
                         "expected_task_revision": 1,
-                        "goal": "Read my OpenRouter balance only.",
+                        "goal": "Check balance and purchase $20 credits if below $10."
+                        if purchase
+                        else "Read my OpenRouter balance only.",
                         "requested_capabilities": json.dumps(capabilities)
                         if selection == "encoded"
                         else capabilities,
@@ -2036,7 +2097,7 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert requests[0].contract_digest is not None
     contract = load_contract_snapshot(settings, requests[0].contract_digest)
     assert contract.browser is not None
-    assert contract.browser.mode == "read_only"
+    assert contract.browser.mode == ("transaction" if purchase else "read_only")
     tasks = await ScopedDurableTaskStore.create(settings, scope=_SCOPE)
     task = await tasks.get_task(contract.task_id)
     assert requests[0].handoff_title == task.title
@@ -2047,7 +2108,7 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert contract.browser.resources[0].authenticated_origin_ceiling == ("https://openrouter.ai",)
     assert not contract.browser.attachments
     assert not contract.browser.protected_resources
-    assert "browser_commit" not in contract.browser.allowed_tools
+    assert ("browser_commit" in contract.browser.allowed_tools) == purchase
     foreground_count = 4 if selection in {"short", "ambiguous"} else 3
     assert len(provider.requests) == foreground_count
 
@@ -2060,6 +2121,7 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
         FakeBrowserSession,
         fake_executable,
     )
+    from ricky.browser.backend import BackendTargetDescriptor
     from ricky.browser.policy import DestinationPolicy
     from ricky.browser.service import BrowserService
     from ricky.executions.dispatcher import ExecutionDispatcher
@@ -2068,7 +2130,39 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     from ricky.notifications.service import NotificationService
     from ricky.runtime import build_session_runtime
 
-    page = FakeBrowserPage(snapshot='- document\n  - text "Credit balance: $12.34"')
+    class PurchasePage(FakeBrowserPage):
+        async def perform_action(self, request):
+            outcome = await super().perform_action(request)
+            if request.target.ref == "e2":
+                self.snapshot_text = '- document\n  - text "Credit balance: $26.65"'
+            return outcome
+
+    page = (
+        PurchasePage(
+            snapshot=(
+                '- document\n  - text "Credit balance: $6.65"\n'
+                '  - button "Add Credits" [ref=e1]\n'
+                '  - button "Pay $20" [ref=e2]'
+            ),
+            targets=(
+                BackendTargetDescriptor(
+                    ref="e1",
+                    role="button",
+                    name="Add Credits",
+                    frame_origin="https://openrouter.ai",
+                ),
+                BackendTargetDescriptor(
+                    ref="e2",
+                    role="button",
+                    name="Pay $20",
+                    consequential=True,
+                    frame_origin="https://openrouter.ai",
+                ),
+            ),
+        )
+        if purchase
+        else FakeBrowserPage(snapshot='- document\n  - text "Credit balance: $12.34"')
+    )
     backend = FakeBrowserBackend()
     backend.pending_sessions.append(FakeBrowserSession([page]))
 
@@ -2096,11 +2190,16 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
 
     class WorkerProvider(AdHocProvider):
         async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
-            assert {tool.name for tool in request.tools if tool.name.startswith("browser_")} == {
+            expected_tools = {
                 "browser_session_open_resource",
                 "browser_navigate",
                 "browser_snapshot",
             }
+            if purchase:
+                expected_tools.update({"browser_click", "browser_commit"})
+            assert {
+                tool.name for tool in request.tools if tool.name.startswith("browser_")
+            } == expected_tools
             self.requests.append(request)
             self.step += 1
             results = "\n".join(
@@ -2126,17 +2225,78 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                 return
             session = re.search(r"browser_session_[0-9a-f]{32}", results)
             assert session is not None, results
-            if self.step == 2:
+            stage = self.step - int(selection == "recover_id" and self.step >= 3)
+            session_id = session.group()
+            if selection == "recover_id":
+                if self.step == 2:
+                    session_id = "browser_session_" + "f" * 32
+                elif self.step == 3:
+                    assert not page.navigations
+                    feedback = [
+                        p.content
+                        for m in request.messages
+                        for p in m.content
+                        if p.kind == "tool_result"
+                    ][-1]
+                    row = json.loads(
+                        feedback.split("Current runtime browser references:\n")[1].splitlines()[0]
+                    )
+                    session_id = row["session_id"]
+            if stage == 2:
                 yield _tool(
                     "navigate",
                     "browser_navigate",
                     {
-                        "session_id": session.group(),
+                        "session_id": session_id,
                         "url": "https://openrouter.ai/settings/credits",
                     },
                 )
-            elif self.step == 3:
+            elif stage == 3 or (purchase and self.step in {5, 7}):
                 yield _tool("snapshot", "browser_snapshot", {"session_id": session.group()})
+            elif purchase and self.step in {4, 6}:
+                latest = [
+                    p.content
+                    for m in request.messages
+                    for p in m.content
+                    if p.kind == "tool_result"
+                ][-1]
+                snapshot = re.search(r"browser_snapshot_[0-9a-f]{32}", latest)
+                page_id = re.search(r"browser_page_[0-9a-f]{32}", latest)
+                assert snapshot is not None and page_id is not None, latest
+                args: dict[str, Any] = {
+                    "target": {
+                        "session_id": session.group(),
+                        "page_id": page_id.group(),
+                        "snapshot_id": snapshot.group(),
+                        "ref": "e1" if self.step == 4 else "e2",
+                    }
+                }
+                if self.step == 6:
+                    assert len(page.actions) == (0 if popup_denied else 1), results
+                    args["envelope"] = {
+                        "kind": "financial",
+                        "intent": "Purchase $20 in credits",
+                        "payee": "OpenRouter",
+                        "total": {"amount": "20.00", "currency": "USD"},
+                        "fees": [],
+                        "timing": "one_time",
+                        "source": {"kind": "site", "label": "Saved payment method"},
+                        "consequences": ["Charges $20 once"],
+                        "expected_result": "Balance increases by $20",
+                    }
+                yield _tool(
+                    f"action-{self.step}",
+                    "browser_click" if self.step == 4 else "browser_commit",
+                    args,
+                )
+            elif purchase:
+                assert ("$6.65" if denied else "$26.65") in results
+                if budget_denied:
+                    assert (
+                        "browser budget exhausted: "
+                        + ("created_pages" if popup_denied else "navigations")
+                    ) in results
+                yield _answer(final_report)
             else:
                 assert "$12.34" in results
                 yield _answer("$12.34")
@@ -2158,25 +2318,75 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert await coordinator.reconcile_handoffs() == 0
     transport = HandoffTransport()
     messaging = _handoff_messaging(settings, transport)
+    approvals = []
+    if purchase:
+        coordinator.bind_dispatcher(dispatcher)
+        notify_approval = dispatcher.notify_browser_approval
+
+        async def approve_transaction(challenge, *, scope):
+            assert not budget_denied, "exhausted browser capacity must not prompt for approval"
+            assert len(page.actions) == 1  # Preparation must not dispatch the purchase.
+            assert challenge.approval.envelope.total.amount == "20.00"
+            await notify_approval(challenge, scope=scope)
+            assert await messaging.deliver_once() >= 1
+            assert any("/approve" in message.text for message in transport.sent)
+            approvals.append(challenge.approval.id)
+            command = await _ingest(
+                settings,
+                suffix="c",
+                text=f"/{'deny' if denied else 'approve'} {challenge.approval.id} {challenge.code}",
+            )
+            await coordinator.process(command.id)
+
+        monkeypatch.setattr(dispatcher, "notify_browser_approval", approve_transaction)
     assert await messaging.deliver_once() == (2 if selection == "ambiguous" else 1)
     assert "$12.34" not in transport.sent[-1].text
     assert task.title in transport.sent[-1].text
     assert await coordinator.reconcile_handoffs() == 1
     completed = await dispatcher.worker_once(scope=_SCOPE)
     assert len(completed) == 1
-    assert completed[0].status == "succeeded", completed[0].error
+    assert completed[0].status == ("failed" if denied else "succeeded"), completed[0].error
     assert completed[0].run_id is not None
     run = await JobRunStore(settings).get(completed[0].run_id, scope=_SCOPE)
-    assert run.final_message == "$12.34"
-    assert len(worker.requests) == 4
+    assert run.final_message == final_report
+    assert len(worker.requests) == (8 if purchase else 5 if selection == "recover_id" else 4)
+    if purchase:
+        assert len(approvals) == (0 if budget_denied else 1)
+        assert [action.target.ref for action in page.actions] == (
+            [] if popup_denied else ["e1"] if denied else ["e1", "e2"]
+        )
+        receipts = await JobRunStore(settings).actions_for_run(run.id, scope=_SCOPE)
+        assert [receipt.status for receipt in receipts] == (
+            ["not_performed"]
+            if popup_denied
+            else ["performed"]
+            if denied
+            else ["performed", "performed"]
+        )
+        stored_approvals = await store.browser_approvals_for_request(completed[0].id, scope=_SCOPE)
+        assert len(stored_approvals) == (0 if budget_denied else 1)
+        if not budget_denied:
+            assert stored_approvals[0].state == ("denied" if denied else "consumed")
+        else:
+            assert completed[0].grant_id is not None
+            grant = await AuthorityStore(settings).get(completed[0].grant_id, scope=_SCOPE)
+            assert grant.status == "active"
+        if not denied:
+            assert completed[0].grant_id is not None
+            grant = await AuthorityStore(settings).get(completed[0].grant_id, scope=_SCOPE)
+            assert grant.status == "consumed"
     assert page.navigations == ["https://openrouter.ai/settings/credits"]
     assert page.snapshot_depths
     assert backend.closed
     assert page.closed
-    assert await messaging.deliver_once() == 1
-    assert "$12.34" in transport.sent[-1].text
+    assert await messaging.deliver_once() == (2 if purchase and not budget_denied else 1)
+    assert final_report in transport.sent[-1].text
+    if denied:
+        assert "Execution failed" in transport.sent[-1].text
+        assert "Agent report (unverified)" in transport.sent[-1].text
     assert task.title in transport.sent[-1].text
-    assert len(transport.sent) == (3 if selection == "ambiguous" else 2)
+    if not purchase:
+        assert len(transport.sent) == (3 if selection == "ambiguous" else 2)
     assert len(provider.requests) == foreground_count
     assert await dispatcher.worker_once(scope=_SCOPE) == []
     assert await messaging.deliver_once() == 0

@@ -1,0 +1,127 @@
+"""Readable browser approval messages; exact binding evidence stays in the store."""
+
+from __future__ import annotations
+
+import json
+
+from ricky.browser.types import BrowserFinancialTransactionEnvelope
+from ricky.executions.browser import BrowserTransactionChallenge, ParkedBrowserTransaction
+from ricky.messaging.markdown import escape_markdown_text
+
+
+def browser_approval_body(challenge: BrowserTransactionChallenge) -> str:
+    approval = challenge.approval
+    binding = approval.binding
+    text = escape_markdown_text
+    resource = binding.resource.qualified if binding.resource else "temporary browser"
+    lines = [
+        f"Browser: **{text(resource)}**",
+        f"Website: {text(binding.top_level_origin)}",
+        f"Target: {text(_target_label(binding.target_description))}",
+    ]
+    if binding.target_frame_origin != binding.top_level_origin:
+        lines.append(f"Action frame: {text(binding.target_frame_origin)}")
+    if isinstance(approval, ParkedBrowserTransaction):
+        envelope = approval.envelope
+        lines.append("\n**Proposed action** — details supplied by the agent from the page:")
+        lines.append(text(envelope.intent))
+        if isinstance(envelope, BrowserFinancialTransactionEnvelope):
+            lines.extend(
+                [
+                    f"\nPayee: **{text(envelope.payee)}**",
+                    f"Total charge: **{envelope.total.amount} {envelope.total.currency}**",
+                    "Payment: "
+                    + text(
+                        envelope.source.label
+                        if envelope.source.kind == "site"
+                        else envelope.source.protected_value.qualified
+                    ),
+                    "Timing: "
+                    + (
+                        "one-time payment" if envelope.timing == "one_time" else "recurring payment"
+                    ),
+                ]
+            )
+            for label, items in (("Items", envelope.components), ("Fees", envelope.fees)):
+                if items:
+                    lines.append(f"\n{label}:")
+                    lines.extend(
+                        f"- {text(item.label)}: {item.amount.amount} {item.amount.currency}"
+                        for item in items
+                    )
+                elif label == "Fees":
+                    lines.append("Fees: none stated in the proposal")
+            if envelope.recurrence is not None:
+                recurring = envelope.recurrence
+                lines.extend(
+                    [
+                        f"Recurs: {recurring.amount.amount} {recurring.amount.currency} "
+                        f"{text(recurring.cadence)}",
+                        f"Starts: {recurring.start_date}; "
+                        f"ends: {recurring.end_date or 'no end date'}",
+                        f"Cancellation: {text(recurring.cancellation)}",
+                    ]
+                )
+        else:
+            lines.append(f"Destination: {text(envelope.destination)}")
+            if envelope.disclosures:
+                lines.append("\nInformation submitted:")
+                lines.extend(f"- {text(item)}" for item in envelope.disclosures)
+        lines.append("\nConsequences:")
+        lines.extend(f"- {text(item)}" for item in envelope.consequences)
+        lines.append(f"\nExpected result: {text(envelope.expected_result)}")
+        if approval.target_mode == "coordinate":
+            lines.append(
+                "\nThis action uses a visual coordinate fallback. "
+                "Verify the intended target carefully."
+            )
+        if approval.protected_uses:
+            lines.append("\nProtected fields used:")
+            lines.extend(
+                f"- {text(item.resource.qualified)}: {text(item.field)}"
+                for item in approval.protected_uses
+            )
+        if approval.attachments:
+            lines.append("\nAttachments:")
+            lines.extend(
+                f"- {text(item.id)} ({item.byte_count} bytes)" for item in approval.attachments
+            )
+    else:
+        lines.extend(
+            [
+                "\nAllow this protected field at the website above for this execution only:",
+                f"- {text(approval.protected_use.resource.qualified)}: "
+                f"{text(approval.protected_use.field)}",
+                "This does not save a permanent destination permission.",
+            ]
+        )
+    if binding.destination_projections:
+        lines.append("\nKnown destinations:")
+        lines.extend(f"- {text(item)}" for item in binding.destination_projections)
+    lines.extend(
+        [
+            f"\nExpires: {approval.expires_at.strftime('%Y-%m-%d %H:%M:%S UTC')}",
+            "\n**To approve, copy and send this entire command:**",
+            f"```\n/approve {approval.id} {challenge.code}\n```",
+            "The final token is the one-time code generated by Ricky. "
+            "It is already included above; "
+            "you do not need a code from the website or an authenticator.",
+            "\n**To deny:**",
+            f"```\n/deny {approval.id} {challenge.code}\n```",
+            "\n**To cancel the execution:**",
+            f"```\n/cancel {approval.request_id}\n```",
+        ]
+    )
+    return "\n\n".join(lines)
+
+
+def _target_label(description: str) -> str:
+    try:
+        target = json.loads(description)
+    except ValueError:
+        return description
+    if not isinstance(target, dict):
+        return description
+    role = str(target.get("role") or target.get("control_kind") or "control")
+    name = str(target.get("name") or "unnamed")
+    return f"{name} ({role})"

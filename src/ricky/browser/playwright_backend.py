@@ -100,15 +100,15 @@ _CONSEQUENTIAL_WORDS = frozenset(
 _PROTECTED_TERMS = (
     "account number",
     "card",
-    "credit",
     "credential",
     "cvc",
     "cvv",
-    "debit",
     "expiration",
     "expiry",
-    "one-time",
-    "one time",
+    "one-time code",
+    "one time code",
+    "one-time password",
+    "one time password",
     "otp",
     "passcode",
     "password",
@@ -131,8 +131,6 @@ _PROTECTED_AUTOCOMPLETE_TOKENS = frozenset(
         "current-password",
         "new-password",
         "one-time-code",
-        "transaction-amount",
-        "transaction-currency",
         "webauthn",
     }
 )
@@ -874,6 +872,7 @@ class _PlaywrightPage:
         try:
             async with asyncio.timeout(self._session._operation_timeout_seconds):
                 raw_content = await self._page.aria_snapshot(depth=depth, mode="ai")
+                raw_content = await self._focus_modal_snapshot(raw_content)
                 content, character_truncated = _bound_aria_content(
                     raw_content,
                     character_limit=character_limit,
@@ -2243,6 +2242,37 @@ class _PlaywrightPage:
             failure=failure,
         )
 
+    async def _focus_modal_snapshot(self, content: str) -> str:
+        """Focus a single locally verified modal, retaining its original ARIA refs."""
+        dialogs = [
+            match
+            for match in _TARGET_LINE.finditer(content)
+            if match.group("role") in {"dialog", "alertdialog"}
+        ]
+        if len(dialogs) != 1:
+            return content
+        match = dialogs[0]
+        resolved = await self._resolve_target(match.group("ref"), allow_ambiguous=True)
+        if resolved is None:
+            return content
+        _, locator = resolved
+        modal = await locator.evaluate(
+            "element => element.getAttribute('aria-modal') === 'true' || element.matches(':modal')"
+        )
+        if modal is not True:
+            return content
+        lines = content[match.start() :].splitlines()
+        indent = len(match.group("indent"))
+        end = next(
+            (
+                index
+                for index, line in enumerate(lines[1:], start=1)
+                if line.strip() and len(line) - len(line.lstrip()) <= indent
+            ),
+            len(lines),
+        )
+        return "Visible modal dialog (background page omitted):\n" + "\n".join(lines[:end])
+
     async def _snapshot_targets(self, content: str) -> tuple[BackendTargetDescriptor, ...]:
         targets: list[BackendTargetDescriptor] = []
         for parsed in _parse_aria_targets(content):
@@ -2323,28 +2353,34 @@ class _PlaywrightPage:
         name: str,
         fallback_option_labels: tuple[str, ...] = (),
     ) -> BackendTargetDescriptor:
+        attribute_names = (
+            "aria-label",
+            "accept",
+            "autocomplete",
+            "contenteditable",
+            "id",
+            "inputmode",
+            "name",
+            "multiple",
+            "role",
+            "type",
+        )
+        raw_attributes = await locator.evaluate(
+            """(element, names) => Object.fromEntries([
+                ...names.map(name => [name, element.getAttribute(name)]),
+                ['effective_type', typeof element.type === 'string' ? element.type : null]
+            ])""",
+            attribute_names,
+        )
         attributes = {
-            attribute: await _attribute(locator, attribute)
-            for attribute in (
-                "aria-label",
-                "accept",
-                "autocomplete",
-                "contenteditable",
-                "id",
-                "inputmode",
-                "name",
-                "multiple",
-                "role",
-                "type",
-            )
+            name: value[:1_000] if isinstance(value, str) else None
+            for name in attribute_names
+            for value in (raw_attributes.get(name),)
         }
         input_type = (attributes["type"] or "").casefold()
-        with suppress(PlaywrightError):
-            effective_type = await locator.evaluate(
-                "element => typeof element.type === 'string' ? element.type : null"
-            )
-            if isinstance(effective_type, str):
-                input_type = effective_type.casefold()[:100]
+        effective_type = raw_attributes.get("effective_type")
+        if isinstance(effective_type, str):
+            input_type = effective_type.casefold()[:100]
         explicit_role = attributes["role"] or role
         control_kind = _control_kind(explicit_role, input_type, attributes["contenteditable"])
         try:
@@ -2712,14 +2748,6 @@ def _bound_aria_content(content: str, *, character_limit: int) -> tuple[str, boo
     return bounded[: final_line_end + 1], True
 
 
-async def _attribute(locator: Locator, name: str) -> str | None:
-    try:
-        value = await locator.get_attribute(name)
-    except PlaywrightError:
-        return None
-    return value[:1_000] if value is not None else None
-
-
 def _control_kind(
     role: str,
     input_type: str,
@@ -2771,7 +2799,15 @@ def _protected_control_kind(
 ) -> ProtectedControlKind | None:
     """Classify only categories that the dedicated protected-fill path supports."""
     if "one-time-code" in autocomplete_tokens or any(
-        term in identifying_text for term in ("one-time", "one time", "otp", "verification code")
+        term in identifying_text
+        for term in (
+            "one-time code",
+            "one time code",
+            "one-time password",
+            "one time password",
+            "otp",
+            "verification code",
+        )
     ):
         return "one_time_code"
     if "cc-csc" in autocomplete_tokens or any(

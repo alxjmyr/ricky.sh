@@ -181,6 +181,14 @@ snapshot. Ricky treats opaque session and page ids, canonical origin, navigation
 truncation facts as trusted metadata. The provider-safe URL projection, page title, page-derived
 text, accessible names, attributes, and instructions are untrusted external content.
 
+Provider observations lead with compact actionable-control metadata, omitting default fields
+and redundant descriptors for static text. Full structured descriptors remain available to
+local consumers. Enrichment batches attribute reads and retains nonstandard editable targets
+without relying on an ARIA-role whitelist. A single dialog verified as modal may focus the snapshot on its
+subtree before truncation, preserving original refs and excluding the inert background.
+Purchase amount and currency fields are ordinary inputs, while identifiable card and credential
+fields retain protected-fill requirements.
+
 Destination enforcement uses the exact URL locally. Provider-facing observations omit URL
 fragments and query values by default while retaining the origin, path, and query-key names needed
 to understand location. Locally known protected values and common credential-bearing parameters
@@ -301,6 +309,12 @@ exact and allowed. Exact destination URLs stay local; only safe projections reac
 persisted evidence. Dispatch revalidates all prepared mutable facts under the page action lock and
 returns `not_performed` if any known binding changed.
 
+Background guards distinguish harness-owned, non-dispatching preparation from dispatch.
+Preparation enforces transaction mode, tool, resource, and origin ceilings before review;
+it cannot reserve effect budgets or record dispatch evidence. Dispatch additionally requires
+the exact frozen transaction evidence and its consumed durable approval. This distinction
+is internal and is never a model-supplied tool argument.
+
 The service dispatch boundary rejects semantic and coordinate commits that do not carry both the
 prepared preflight and transaction evidence. Commit action results and resident latest-action
 evidence require the transaction reference in performed, rejected, and ambiguous outcomes. A
@@ -317,10 +331,20 @@ code. The approval binds the execution, principal, conversation, review digest, 
 browser occurrence, one-way session and page digests, resource identity and configuration revision
 or ephemeral occurrence digest, pinned provider, complete browser budget ceiling, page generation,
 origins, known destinations, target mode, protected-source evidence, and TTL.
+The gateway renders readable business terms and relevant browser facts with separately copyable
+complete commands. It explains that Ricky supplies the one-time code. Internal binding hashes
+and budget JSON stay in the durable approval rather than the chat review; this presentation
+does not change the exact occurrence checks.
 The waiting execution revalidates every binding under the page action lock before it reserves and
 dispatches the same prepared effect. Approval cannot be applied to a replacement browser or a
 reconstructed cart. The envelope digest participates in stable logical effect identity and compact
 action evidence, so changing any reviewed fact requires a new preparation and approval.
+
+Before preparation can request approval, delegated authority checks its current durable grant
+and remaining effect and financial budgets. It repeats those checks after approval; atomic
+reservation remains the final authority boundary. Before parking, the browser owner also checks
+remaining navigation, transaction, and worst-case page capacity without reserving an effect.
+An approval cannot restore exhausted capacity or revive a retired grant.
 
 Dialog handling is fixed before the action that may create the dialog. Ordinary interaction
 dismisses unexpected dialogs. A commit may explicitly predeclare accept or dismiss, including
@@ -376,6 +400,14 @@ requirements, and cumulative browser budgets. A runtime-local `BrowserExecutionG
 budgets before work and rechecks live resource, session, page, origin, destination, target,
 attachment, protected-source, envelope, current authority, and claim facts immediately before each
 mutation. Page content and model output cannot populate or widen the scope.
+
+Failures while reserving local capacity before an action backend is called produce a
+`not_performed` receipt. They do not retire an interaction grant as an ambiguous effect.
+This boundary does not include backend dispatch, receipt publication, or post-dispatch accounting.
+An ambiguous earlier action remains ambiguous. Its possible-page reservation retains the
+worst-case creation count; later observations alone do not prove that no transient pages existed.
+If that retained reservation prevents further dispatch, report the exhausted capacity rather
+than prompting for a transaction that cannot proceed or refunding unproven page capacity.
 
 A browser-commit delegation binds the current owner-configured financial amount and currency
 ceiling into its durable grant. Other capabilities in the same execution cannot lower or erase that

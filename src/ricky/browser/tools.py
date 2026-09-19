@@ -17,6 +17,7 @@ from ricky.attachments import (
     attachment_source_label,
     load_attachments,
 )
+from ricky.browser.recovery import BrowserReferenceError
 from ricky.browser.service import (
     BrowserPreparedCommit,
     BrowserPreparedCoordinateClick,
@@ -51,6 +52,7 @@ from ricky.browser.types import (
     BrowserSessionMode,
     BrowserSnapshot,
     BrowserTarget,
+    BrowserTargetDescriptor,
     BrowserTransactionEnvelope,
     BrowserTransactionEvidence,
     BrowserViewport,
@@ -303,12 +305,7 @@ class _BrowserTool:
         try:
             value = await operation
         except BrowserError as exc:
-            failure = exc.failure
-            return ToolResult(
-                content=failure.message,
-                data=failure.model_dump(mode="json", exclude_none=True),
-                is_error=True,
-            )
+            return _browser_reference_result(exc)
         if isinstance(value, BrowserSnapshot):
             metadata = value.model_dump(mode="json", exclude={"content", "targets", "descriptors"})
             page_metadata = cast(dict[str, object], metadata["page"])
@@ -317,8 +314,7 @@ class _BrowserTool:
             refs = [target.ref for target in value.targets]
             untrusted = f"Page URL: {page_url}\nPage title: {page_title}\n{value.content}"
             if value.descriptors:
-                descriptors = [item.model_dump(mode="json") for item in value.descriptors]
-                untrusted += "\nTarget descriptors:\n" + json.dumps(descriptors, sort_keys=True)
+                untrusted = _control_summary(value.descriptors) + "\n" + untrusted
             content = (
                 "Trusted browser metadata:\n"
                 f"{json.dumps({**metadata, 'available_refs': refs}, sort_keys=True)}\n"
@@ -417,12 +413,7 @@ class BrowserSessionOpenResourceTool:
         try:
             value = await self._service.open_resource(params.resource)
         except BrowserError as exc:
-            failure = exc.failure
-            return ToolResult(
-                content=failure.message,
-                data=failure.model_dump(mode="json", exclude_none=True),
-                is_error=True,
-            )
+            return _browser_reference_result(exc)
         payload = value.model_dump(mode="json")
         trusted, page_content = _partition_page_content(payload)
         content = (
@@ -602,12 +593,7 @@ class BrowserVisualSnapshotTool:
                 )
                 raise
         except BrowserError as exc:
-            failure = exc.failure
-            return ToolResult(
-                content=failure.message,
-                data=failure.model_dump(mode="json", exclude_none=True),
-                is_error=True,
-            )
+            return _browser_reference_result(exc)
 
         image = ImagePart(artifact=record.reference())
         value = BrowserVisualSnapshot(
@@ -1115,6 +1101,10 @@ class BrowserCommitTool(_BrowserActionTool):
     description = (
         "Freshly review a required financial or browser transaction envelope, then activate one "
         "consequential snapshot-bound target exactly once."
+        " Use only for the final action that submits the transaction, never for selecting "
+        "amounts, filling fields, opening a dialog, or clicking labels/headings. Prepare with "
+        "ordinary browser interaction tools first, inspect the final total including fees "
+        "and recurring terms, then commit the actual submit control."
     )
     Params = BrowserCommitParams
     risk: ClassVar[Literal["destructive"]] = "destructive"
@@ -1608,7 +1598,9 @@ class BrowserCoordinateCommitTool(_BrowserEffectActionMixin):
     name = "browser_coordinate_commit"
     description = (
         "Freshly review a required financial or browser transaction envelope, then click one "
-        "point on one exact current masked visual snapshot."
+        "point on one exact current masked visual snapshot. Use only for the final consequential "
+        "submission, after preparing the form and inspecting the total, fees, and recurrence. "
+        "Do not use a commit merely to select an amount or open a checkout dialog."
     )
     Params = BrowserCoordinateCommitParams
     Result = BrowserActionToolResult
@@ -1821,12 +1813,7 @@ class BrowserHandoffTool:
                 reason=params.reason,
             )
         except BrowserError as exc:
-            failure = exc.failure
-            return ToolResult(
-                content=failure.message,
-                data=failure.model_dump(mode="json", exclude_none=True),
-                is_error=True,
-            )
+            return _browser_reference_result(exc)
         payload = handoff.model_dump(mode="json")
         return ToolResult(
             content=handoff.prompt,
@@ -1837,6 +1824,15 @@ class BrowserHandoffTool:
                 prompt=handoff.prompt,
             ),
         )
+
+
+def _browser_reference_result(exc: BrowserError) -> ToolResult:
+    return ToolResult(
+        content=exc.failure.message,
+        data=exc.failure.model_dump(mode="json", exclude_none=True),
+        is_error=True,
+        runtime_failure=exc.runtime_failure if isinstance(exc, BrowserReferenceError) else None,
+    )
 
 
 def _browser_action_error(exc: BrowserError) -> ToolResult:
@@ -1851,6 +1847,11 @@ def _browser_action_error(exc: BrowserError) -> ToolResult:
         data=failure.model_dump(mode="json", exclude_none=True),
         is_error=True,
         effect_receipt=EffectReceipt(disposition=disposition),
+        runtime_failure=(
+            exc.runtime_failure
+            if isinstance(exc, BrowserReferenceError) and disposition == "not_performed"
+            else None
+        ),
     )
 
 
@@ -1887,6 +1888,19 @@ def _partition_page_content(
     return trusted, page_content
 
 
+def _control_summary(descriptors: tuple[BrowserTargetDescriptor, ...]) -> str:
+    """Keep useful controls visible without repeating defaults for every text node."""
+    controls = [
+        item.model_dump(mode="json", exclude_defaults=True)
+        for item in descriptors
+        if item.control_kind != "other" or item.editable or item.file or item.protected
+    ]
+    return (
+        "Controls (page-derived; use the exact ref whose label and kind match your action):\n"
+        + "\n".join(json.dumps(item, ensure_ascii=False, sort_keys=True) for item in controls)
+    )
+
+
 def _browser_action_result(value: BrowserActionResult) -> ToolResult:
     payload = value.model_dump(mode="json")
     trusted = value.model_dump(mode="json", exclude={"snapshot", "dialogs"})
@@ -1911,9 +1925,7 @@ def _browser_action_result(value: BrowserActionResult) -> ToolResult:
         }
         untrusted["snapshot"] = {
             "content": value.snapshot.content,
-            "descriptors": [
-                descriptor.model_dump(mode="json") for descriptor in value.snapshot.descriptors
-            ],
+            "controls": _control_summary(value.snapshot.descriptors),
         }
     content = (
         "Trusted browser action evidence:\n"

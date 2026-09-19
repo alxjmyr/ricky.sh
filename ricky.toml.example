@@ -459,7 +459,9 @@ allowed_profiles = ["shared", "personal"]
 
 [authority.capabilities.browser_commit]
 enabled = false
-max_effect_calls = 3
+# Shared grant ceiling, including preparation effects; not a purchase count.
+# Use browser.background.budget.transaction_commits to limit commit count.
+max_effect_calls = 50
 max_ttl_seconds = 3600.0
 # Minor currency units; 25000 means USD 250.00.
 max_financial_limit_minor = 25000

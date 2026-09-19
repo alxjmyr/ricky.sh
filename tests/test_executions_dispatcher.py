@@ -382,8 +382,12 @@ async def test_failed_execution_reports_effect_but_keeps_task_blocked(tmp_path: 
     records = await NotificationStore(settings).list(scope=SCOPE)
     assert len(records) == 1
     assert records[0].request.title == "Execution failed"
-    assert records[0].request.body == updated.current_summary
-    assert "Everything succeeded" not in records[0].request.body
+    body = records[0].request.body
+    assert body.startswith("Execution failed.\n\nConfirmed effects: 1 performed.")
+    assert "Task revision conflict" in body
+    assert action.id in body
+    assert body.endswith("Agent report (unverified):\n> Everything succeeded.")
+    assert "Everything succeeded" not in updated.current_summary
     assert len(await jobs.actions_for_run(run.id, scope=SCOPE)) == 1
 
 
@@ -531,3 +535,190 @@ async def test_success_notification_uses_friendly_gateway_fallback_only(
     expected = final_message or ("Completed." if gateway_handoff else f"Job run {run.id} succeeded")
     assert record.request.body == expected
     assert any(ref.kind == "job_run" and ref.id == run.id for ref in record.request.correlations)
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome", "error"),
+    [
+        ("failed", "failed", "external effect call did not produce a performed receipt"),
+        ("uncertain", "uncertain", "external effect lacks a confirmed receipt"),
+        ("failed", "budget_exceeded", "wall clock deadline exceeded"),
+        ("cancelled", "succeeded", "execution cancelled after work completed"),
+        ("blocked", "approval_required", "background execution requires attention"),
+    ],
+)
+@pytest.mark.parametrize("report", [None, "", "  ", "Balance was $6.65; Add Credits was denied."])
+async def test_failure_notification_preserves_status_cause_and_optional_report(
+    tmp_path: Path, status: str, outcome: str, error: str, report: str | None
+) -> None:
+    settings = _settings(tmp_path)
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    jobs = JobRunStore(settings)
+    await jobs.initialize()
+    request = ExecutionRequest.model_validate(
+        {
+            "id": "execution_" + "e" * 32,
+            "kind": "named_job",
+            "status": status,
+            "named_job": "personal/brief",
+            "job_digest": "a" * 64,
+            "profile_scope": SCOPE,
+            "notification_route": "owner",
+            "request_key": "failure-report",
+            "created_at": datetime.now(UTC),
+            "handoff_title": "Check balance",
+            "acknowledgement_outbox_id": "outbox_test",
+            "acknowledgement_delivered_at": datetime.now(UTC),
+            "error": error,
+            "run_id": "jobrun_failure_report",
+        }
+    )
+    run = JobRun.model_validate(
+        {
+            "id": request.run_id,
+            "provider": "openrouter",
+            "model": "test",
+            "profile_scope": SCOPE,
+            "session_id": "session",
+            "outcome": outcome,
+            "started_at": datetime.now(UTC),
+            "error": None if outcome == "succeeded" else error,
+            "final_message": report,
+        }
+    )
+    await jobs.insert(run, scope=SCOPE)
+    await dispatcher._notify(request, run)
+    await dispatcher._notify(request, run)
+    [record] = await dispatcher.notifications.store.list(scope=SCOPE)
+    assert record.request.title == "Check balance"
+    assert record.request.body.startswith(f"Execution {status}.\n\n{error}")
+    assert record.request.urgency == "attention"
+    assert record.request.route == "owner"
+    assert record.request.dedupe_key == f"result:{status}"
+    if report and report.strip():
+        assert record.request.body.endswith(f"Agent report (unverified):\n> {report}")
+    else:
+        assert "Agent report" not in record.request.body
+
+
+@pytest.mark.parametrize("limit", [100, 400, 4000])
+async def test_failure_notification_bounds_long_cause_and_report(
+    tmp_path: Path, limit: int
+) -> None:
+    settings = _settings(tmp_path)
+    settings.executions.result_text_limit = limit
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    await JobRunStore(settings).initialize()
+    request = ExecutionRequest(
+        id="execution_" + "f" * 32,
+        kind="named_job",
+        status="uncertain",
+        named_job="personal/brief",
+        job_digest="a" * 64,
+        profile_scope=SCOPE,
+        notification_route="owner",
+        request_key="long-failure",
+        created_at=datetime.now(UTC),
+    )
+    run = JobRun(
+        id="jobrun_long_failure",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="session",
+        outcome="uncertain",
+        started_at=datetime.now(UTC),
+        error="Receipt missing. " * 100,
+        final_message="A useful detail.\n" * 1000,
+    )
+    await JobRunStore(settings).insert(run, scope=SCOPE)
+    await dispatcher._notify(request, run)
+    [record] = await dispatcher.notifications.store.list(scope=SCOPE)
+    assert len(record.request.body) <= limit
+    assert record.request.body.startswith("Execution uncertain.\n\nReceipt missing.")
+    if limit == 4000:
+        assert "Agent report (unverified):\n> A" in record.request.body
+    else:
+        assert "Agent report" not in record.request.body
+
+
+@pytest.mark.parametrize("status", ["failed", "uncertain", "cancelled", "blocked"])
+async def test_failure_notification_without_job_run(tmp_path: Path, status: str) -> None:
+    dispatcher = ExecutionDispatcher(_settings(tmp_path), project_root=tmp_path)
+    request = ExecutionRequest.model_validate(
+        {
+            "id": "execution_" + "f" * 32,
+            "kind": "named_job",
+            "status": status,
+            "named_job": "personal/brief",
+            "job_digest": "a" * 64,
+            "profile_scope": SCOPE,
+            "notification_route": "owner",
+            "request_key": "no-run",
+            "created_at": datetime.now(UTC),
+            "error": "Worker unavailable",
+        }
+    )
+    await dispatcher._notify(request, None)
+    [record] = await dispatcher.notifications.store.list(scope=SCOPE)
+    assert record.request.body == f"Execution {status}.\n\nWorker unavailable"
+
+
+@pytest.mark.parametrize("limit", [100, 400])
+async def test_failure_notification_prioritizes_receipts_over_long_report(
+    tmp_path: Path, limit: int
+) -> None:
+    from ricky.tools.base import EffectIdentity
+
+    settings = _settings(tmp_path)
+    settings.executions.result_text_limit = limit
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    jobs = JobRunStore(settings)
+    await jobs.initialize()
+    run = JobRun(
+        id="jobrun_mixed_receipts",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="session",
+        outcome="uncertain",
+        started_at=datetime.now(UTC),
+        error="Receipt missing. " * 100,
+        final_message="Everything succeeded. " * 1000,
+    )
+    await jobs.insert(run.model_copy(update={"outcome": None}), scope=SCOPE)
+    for index, status in enumerate(("performed", "in_doubt")):
+        action = await jobs.reserve_action(
+            job_name="personal/brief",
+            run_id=run.id,
+            effect_budget=2,
+            scope=SCOPE,
+            identity=EffectIdentity(
+                action_key=str(index) * 64,
+                operation="browser.commit",
+                target="checkout",
+                occurrence=str(index),
+                summary="Commit checkout",
+            ),
+        )
+        await jobs.resolve_action(action.id, status, scope=SCOPE, provider_reference=None)
+    await jobs.finish(run.model_copy(update={"finished_at": datetime.now(UTC)}), scope=SCOPE)
+    request = ExecutionRequest(
+        id="execution_" + "f" * 32,
+        kind="named_job",
+        status="uncertain",
+        named_job="personal/brief",
+        job_digest="a" * 64,
+        profile_scope=SCOPE,
+        notification_route="owner",
+        request_key="mixed-receipts",
+        created_at=datetime.now(UTC),
+        error="Recovery requires review",
+    )
+    await dispatcher._notify(request, run)
+    [record] = await dispatcher.notifications.store.list(scope=SCOPE)
+    assert len(record.request.body) <= limit
+    assert record.request.body.startswith("Execution uncertain.")
+    assert "Confirmed effects: 1 performed." in record.request.body
+    assert "Unresolved: 1; review required." in record.request.body
+    assert "Everything succeeded" not in record.request.body

@@ -211,6 +211,8 @@ class DurableBrowserExecutionGuard:
         facts: BrowserGuardFacts,
     ) -> None:
         await self.check(facts)
+        if facts.phase != "dispatch":
+            raise BrowserExecutionGuardError("browser preparation cannot reserve dispatch budgets")
         if kind == "created_pages":
             raise BrowserExecutionGuardError(
                 "popup-capable work must use a settleable created-page reservation"
@@ -255,6 +257,8 @@ class DurableBrowserExecutionGuard:
         """Check worst-case capacity before work without overcharging known outcomes."""
 
         await self.check(facts)
+        if facts.phase != "dispatch":
+            raise BrowserExecutionGuardError("browser preparation cannot reserve page effects")
         if (
             facts.controlled_page_count + maximum_creation_count
             > self.browser_scope.budget.controlled_pages
@@ -315,6 +319,8 @@ class DurableBrowserExecutionGuard:
 
     async def record(self, evidence: BrowserRuntimeEvidence) -> None:
         facts = evidence.facts
+        if facts.phase != "dispatch":
+            raise BrowserExecutionGuardError("browser preparation cannot record dispatch evidence")
         occurrence_digest = _facts_digest(facts)
         reservation_id: str | None = None
         async with self._possible_page_lock:
@@ -409,7 +415,8 @@ class DurableBrowserExecutionGuard:
         if self.browser_scope.mode == "read_only" and facts.tool_name in mutation_tools:
             raise BrowserExecutionGuardError("named/read-only execution cannot mutate a browser")
         if facts.tool_name in {"browser_commit", "browser_coordinate_commit"} and (
-            self.browser_scope.mode != "transaction" or facts.transaction is None
+            self.browser_scope.mode != "transaction"
+            or (facts.phase == "dispatch" and facts.transaction is None)
         ):
             raise BrowserExecutionGuardError(
                 "browser commit requires transaction mode and exact envelope evidence"

@@ -45,6 +45,7 @@ from ricky.browser.policy import (
     provider_safe_url,
     sanitize_aria_snapshot,
 )
+from ricky.browser.recovery import BrowserReferenceError, SessionReferences
 from ricky.browser.resources import (
     ResolvedBrowserResource,
     browser_resource_configuration_digest,
@@ -387,12 +388,7 @@ class BrowserService:
         async with self._registry_lock:
             self._ensure_open()
             if len(self._sessions) >= self._settings.browser.max_sessions:
-                raise BrowserError(
-                    BrowserFailure(
-                        code="session_limit",
-                        message="the configured live browser session limit has been reached",
-                    )
-                )
+                raise self._reference_error("session_limit")
             session_id = f"browser_session_{uuid.uuid4().hex}"
             ephemeral_resource = ProfileResourceRef(
                 profile=self._scope.primary,
@@ -510,12 +506,7 @@ class BrowserService:
         async with self._registry_lock:
             self._ensure_open()
             if len(self._sessions) >= self._settings.browser.max_sessions:
-                raise BrowserError(
-                    BrowserFailure(
-                        code="session_limit",
-                        message="the configured live browser session limit has been reached",
-                    )
-                )
+                raise self._reference_error("session_limit")
             session_id = f"browser_session_{uuid.uuid4().hex}"
             session_mode: Literal["owned_persistent", "attached_cdp"] = (
                 "owned_persistent"
@@ -739,9 +730,7 @@ class BrowserService:
             self._ensure_open()
             entry = self._sessions.get(session_id)
             if entry is None:
-                raise BrowserError(
-                    BrowserFailure(code="unknown_session", message="unknown browser session id")
-                )
+                raise self._reference_error("unknown_session")
             if entry.closing:
                 raise BrowserError(
                     BrowserFailure(code="session_closed", message="browser session is closing")
@@ -1129,6 +1118,7 @@ class BrowserService:
             )
             guard_facts = self._guard_facts(
                 "browser_commit",
+                phase="prepare",
                 entry=entry,
                 page=page,
                 target_frame_origin=cached.frame_origin,
@@ -1175,6 +1165,7 @@ class BrowserService:
             await self._check_guard(
                 self._guard_facts(
                     "browser_commit",
+                    phase="prepare",
                     entry=entry,
                     page=page,
                     target_frame_origin=preflight.target.frame_origin,
@@ -1523,8 +1514,7 @@ class BrowserService:
                 target=cached,
                 value=material.value,
             )
-            await self._reserve_guard("navigations", 1, guard_facts)
-            await self._reserve_possible_pages(entry, guard_facts)
+            await self._reserve_action_budgets(entry, guard_facts, ())
             before_page_ids = frozenset(item.id for item in entry.pages_by_key.values())
             try:
                 outcome = await page.handle.perform_protected_fill(backend_request)
@@ -1821,6 +1811,7 @@ class BrowserService:
                         snapshot_id=target.screenshot_id,
                         target_ref=preflight.target.ref,
                         action_kind=("coordinate_commit" if transaction else "coordinate_click"),
+                        phase="prepare" if transaction else "dispatch",
                         coordinate_fallback=fallback,
                     )
                 )
@@ -2103,14 +2094,9 @@ class BrowserService:
                 attachment_sha256=tuple(item.sha256 for item in files),
                 byte_count=sum(item.size_bytes for item in files),
             )
-            await self._reserve_guard("uploads", 1, guard_facts)
-            await self._reserve_guard(
-                "upload_bytes",
-                guard_facts.byte_count,
-                guard_facts,
+            await self._reserve_action_budgets(
+                entry, guard_facts, (("uploads", 1), ("upload_bytes", guard_facts.byte_count))
             )
-            await self._reserve_guard("navigations", 1, guard_facts)
-            await self._reserve_possible_pages(entry, guard_facts)
             before_page_ids = frozenset(item.id for item in entry.pages_by_key.values())
             try:
                 outcome = await page.handle.perform_upload(
@@ -2231,9 +2217,7 @@ class BrowserService:
                 target_ref=target.ref,
                 action_kind="download",
             )
-            await self._reserve_guard("downloads", 1, guard_facts)
-            await self._reserve_guard("navigations", 1, guard_facts)
-            await self._reserve_possible_pages(entry, guard_facts)
+            await self._reserve_action_budgets(entry, guard_facts, (("downloads", 1),))
             before_page_ids = frozenset(item.id for item in entry.pages_by_key.values())
             try:
                 backend = await page.handle.perform_download(backend_request)
@@ -2534,13 +2518,18 @@ class BrowserService:
                 transaction=transaction,
                 coordinate_fallback=expected_fallback,
             )
-            await self._reserve_guard(
-                "transaction_commits" if action_kind == "coordinate_commit" else "interactions",
-                1,
+            await self._reserve_action_budgets(
+                entry,
                 guard_facts,
+                (
+                    (
+                        "transaction_commits"
+                        if action_kind == "coordinate_commit"
+                        else "interactions",
+                        1,
+                    ),
+                ),
             )
-            await self._reserve_guard("navigations", 1, guard_facts)
-            await self._reserve_possible_pages(entry, guard_facts)
             before_page_ids = frozenset(item.id for item in entry.pages_by_key.values())
             try:
                 outcome = await page.handle.perform_coordinate_commit(
@@ -2849,13 +2838,11 @@ class BrowserService:
                 action_kind=request.kind,
                 transaction=transaction,
             )
-            await self._reserve_guard(
-                "transaction_commits" if request.kind == "commit" else "interactions",
-                1,
+            await self._reserve_action_budgets(
+                entry,
                 guard_facts,
+                (("transaction_commits" if request.kind == "commit" else "interactions", 1),),
             )
-            await self._reserve_guard("navigations", 1, guard_facts)
-            await self._reserve_possible_pages(entry, guard_facts)
 
             before_pages = {item.id: key for key, item in entry.pages_by_key.items()}
             try:
@@ -3293,6 +3280,7 @@ class BrowserService:
         self,
         tool_name: BrowserToolName,
         *,
+        phase: Literal["prepare", "dispatch"] = "dispatch",
         entry: _SessionEntry | None = None,
         page: _PageEntry | None = None,
         resource: ProfileResourceRef | None = None,
@@ -3334,6 +3322,7 @@ class BrowserService:
                     destination_origins.append(origin)
         return BrowserGuardFacts(
             tool_name=tool_name,
+            phase=phase,
             resource=resource or (entry.resource if entry is not None else None),
             resource_configuration_digest=(
                 entry.resource_configuration_digest
@@ -3378,6 +3367,39 @@ class BrowserService:
     async def _check_guard(self, facts: BrowserGuardFacts) -> None:
         if self._runtime_guard is not None:
             await self._runtime_guard.check(facts)
+
+    async def _reserve_action_budgets(
+        self,
+        entry: _SessionEntry,
+        facts: BrowserGuardFacts,
+        operations: tuple[tuple[BrowserBudgetKind, int], ...],
+    ) -> None:
+        """Reserve local capacity before calling any external action backend.
+
+        A failed reservation proves this action was not dispatched even if earlier
+        local counters advanced. Never use this boundary around post-dispatch work.
+        """
+        kind: BrowserBudgetKind = "navigations"
+        reservations: tuple[tuple[BrowserBudgetKind, int], ...] = (*operations, ("navigations", 1))
+        try:
+            for kind, amount in reservations:
+                await self._reserve_guard(kind, amount, facts)
+            kind = "created_pages"
+            await self._reserve_possible_pages(entry, facts)
+        except BrowserError:
+            raise
+        except Exception as exc:
+            # Guard/storage exceptions are not necessarily safe model-facing text.
+            raise BrowserError(
+                BrowserFailure(
+                    code="unattended_denied",
+                    message=(
+                        f"browser pre-dispatch reservation failed for {kind}; "
+                        "no browser action was dispatched. Check the execution's "
+                        "remaining budgets and ownership before continuing."
+                    ),
+                )
+            ) from exc
 
     async def _reserve_guard(
         self,
@@ -4265,15 +4287,34 @@ class BrowserService:
         for page in entry.pages_by_key.values():
             if page.id == selected:
                 return entry, page
-        raise BrowserError(BrowserFailure(code="unknown_page", message="unknown browser page id"))
+        raise self._reference_error("unknown_page", entry=entry)
+
+    def _reference_error(
+        self,
+        code: Literal["unknown_session", "unknown_page", "session_limit"],
+        *,
+        entry: _SessionEntry | None = None,
+    ) -> BrowserReferenceError:
+        entries = [entry] if entry is not None else list(self._sessions.values())
+        references = tuple(
+            SessionReferences(
+                session_id=item.id,
+                resource=item.resource.qualified,
+                selected_page_id=item.selected_page_id,
+                page_ids=tuple(sorted(page.id for page in item.pages_by_key.values())),
+            )
+            for item in sorted(entries, key=lambda item: item.id)
+            if not item.closing and not item.cleanup_failed and item.handle.connected
+        )
+        return BrowserReferenceError(
+            code, references, session_limit=self._settings.browser.max_sessions
+        )
 
     def _require_session(self, session_id: str) -> _SessionEntry:
         self._ensure_open()
         entry = self._sessions.get(session_id)
         if entry is None:
-            raise BrowserError(
-                BrowserFailure(code="unknown_session", message="unknown browser session id")
-            )
+            raise self._reference_error("unknown_session")
         self._ensure_session_active(entry)
         return entry
 

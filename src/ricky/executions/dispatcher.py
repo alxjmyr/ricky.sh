@@ -22,6 +22,7 @@ from ricky.executions.browser import (
     ParkedBrowserApproval,
     ParkedBrowserTransaction,
 )
+from ricky.executions.browser_review import browser_approval_body as _browser_approval_body
 from ricky.executions.contracts import (
     ExecutionContract,
     load_contract_snapshot,
@@ -1073,16 +1074,17 @@ class ExecutionDispatcher:
             raise ExecutionDispatchError("durable task baton currently belongs to the user")
         return task
 
-    async def _result_summary(self, run: JobRun) -> str:
+    async def _result_summary(self, run: JobRun, *, limit: int | None = None) -> str:
         from ricky.jobs.reporting import failure_summary
         from ricky.jobs.store import JobRunStore
 
+        limit = self.settings.executions.result_text_limit if limit is None else limit
         return await failure_summary(
             run,
-            _bounded_result(run, self.settings.executions.result_text_limit),
+            _bounded_result(run, limit),
             store=JobRunStore(self.settings),
             scope=run.profile_scope,
-            limit=self.settings.executions.result_text_limit,
+            limit=limit,
         )
 
     async def _update_task(
@@ -1142,11 +1144,14 @@ class ExecutionDispatcher:
         if request.handoff_title is not None and request.acknowledgement_delivered_at is None:
             return
         profile_label = request.profile_scope.label()
-        summary = (
-            await self._result_summary(run)
-            if run is not None
-            else (request.error or f"Execution {request.status}")
-        )
+        if request.status != "succeeded":
+            summary = await self._failure_notification_summary(request, run)
+        else:
+            summary = (
+                await self._result_summary(run)
+                if run is not None
+                else (request.error or f"Execution {request.status}")
+            )
         if request.handoff_title is not None:
             if (
                 request.status == "succeeded"
@@ -1203,6 +1208,36 @@ class ExecutionDispatcher:
             scope=request.profile_scope,
         )
 
+    async def _failure_notification_summary(
+        self, request: ExecutionRequest, run: JobRun | None
+    ) -> str:
+        """Keep runtime evidence authoritative and worker prose explicitly unverified."""
+
+        limit = self.settings.executions.result_text_limit
+        heading = f"Execution {request.status}."
+        report = (run.final_message or "").strip() if run is not None else ""
+        report_heading = "\n\nAgent report (unverified):\n"
+        # Runtime evidence has priority over the optional model report, including
+        # at the minimum configured limit. Never reserve report space up front.
+        available = limit - len(heading) - 2
+        if run is not None and run.outcome != "succeeded":
+            reason = await self._result_summary(run, limit=limit)
+            # The execution heading already states the authoritative outcome.
+            # Avoid spending scarce space on the receipt helper's duplicate label.
+            reason = reason.removeprefix(f"Run {run.outcome}. ")
+            if request.error and request.error != run.error:
+                reason += "\nExecution cause: " + request.error
+        else:
+            # Cancellation/recovery may override an otherwise successful run.
+            # Its model output remains a report, never the authoritative reason.
+            reason = request.error or "Review required."
+        result = heading + "\n\n" + _truncate_result(reason, available)
+        report_budget = max(0, limit - len(result) - len(report_heading))
+        if report and report_budget > 2:
+            quoted = "\n".join(f"> {line}" for line in report.splitlines())
+            result += report_heading + _truncate_result(quoted, report_budget)
+        return result[:limit]
+
 
 def _execution_outcome(run: JobRun) -> tuple[ExecutionStatus, str | None]:
     if run.outcome == "succeeded":
@@ -1224,123 +1259,10 @@ def _bounded_result(run: JobRun, limit: int) -> str:
     return text[:limit]
 
 
-def _browser_approval_body(challenge: BrowserTransactionChallenge) -> str:
-    approval = challenge.approval
-    binding = approval.binding
-    lines = [
-        "Action required: approve or cancel this exact live browser occurrence.",
-        f"Approval id: `{approval.id}`",
-        f"Expires: {approval.expires_at.isoformat()}",
-    ]
-    if isinstance(approval, ParkedBrowserTransaction):
-        assert binding.resource_digest is not None
-        assert binding.resource_kind is not None
-        assert binding.provider is not None
-        assert binding.session_digest is not None
-        assert binding.page_digest is not None
-        assert binding.budget_ceiling is not None
-        if binding.resource is None:
-            lines.append(f"Browser resource: ephemeral (`sha256:{binding.resource_digest}`)")
-        else:
-            lines.append(
-                f"Browser resource: `{binding.resource.qualified}` ({binding.resource_kind}, "
-                f"identity sha256 `{binding.resource_digest}`)"
-            )
-        if binding.resource_configuration_digest is not None:
-            lines.append(
-                f"Browser resource configuration sha256: `{binding.resource_configuration_digest}`"
-            )
-        lines.extend(
-            [
-                f"Pinned model provider: `{binding.provider}`",
-                f"Session occurrence sha256: `{binding.session_digest}`",
-                f"Page occurrence sha256: `{binding.page_digest}`",
-                f"Page generation: {binding.page_generation}",
-                f"Snapshot occurrence sha256: `{binding.snapshot_digest}`",
-                f"Target occurrence sha256: `{binding.target_digest}`",
-                f"Live occurrence sha256: `{binding.occurrence_digest}`",
-                "Browser execution budget ceiling:",
-                "```json",
-                binding.budget_ceiling.model_dump_json(indent=2),
-                "```",
-            ]
-        )
-    lines.extend(
-        [
-            f"Top-level origin: `{binding.top_level_origin}`",
-            f"Target-frame origin: `{binding.target_frame_origin}`",
-            f"Target: {binding.target_description}",
-        ]
-    )
-    if binding.destination_projections:
-        lines.append("Known destinations:")
-        lines.extend(f"- `{item}`" for item in binding.destination_projections)
-    if isinstance(approval, ParkedBrowserTransaction):
-        lines.extend(
-            [
-                (
-                    "Commit target: last-resort visual coordinate fallback"
-                    if approval.target_mode == "coordinate"
-                    else "Commit target: semantic browser target"
-                ),
-                "Proposed transaction details (derived from untrusted page/model content):",
-                "```json",
-                approval.envelope.model_dump_json(indent=2),
-                "```",
-            ]
-        )
-        if approval.coordinate is not None:
-            coordinate = approval.coordinate
-            lines.extend(
-                [
-                    f"Masked screenshot disclosed to: `{binding.provider}`",
-                    f"Coordinate fallback reason: `{coordinate.reason}`",
-                    (f"Exact CSS coordinate: ({coordinate.x}, {coordinate.y})"),
-                    (
-                        "Viewport (CSS pixels): "
-                        f"{coordinate.viewport_width} × {coordinate.viewport_height}"
-                    ),
-                    f"Scroll position (CSS pixels): ({coordinate.scroll_x}, {coordinate.scroll_y})",
-                    (f"Image pixels per CSS pixel: {coordinate.coordinate_scale}"),
-                    f"Masked image sha256: `{coordinate.masked_image_digest}`",
-                    (f"Visual snapshot occurrence sha256: `{coordinate.visual_snapshot_digest}`"),
-                    (f"Semantic resolution sha256: `{coordinate.semantic_resolution_digest}`"),
-                    (f"Nested hit-target sha256: `{coordinate.nested_hit_target_digest}`"),
-                ]
-            )
-        if approval.protected_uses:
-            lines.append("Protected values used (aliases only):")
-            lines.extend(
-                f"- `{item.resource.qualified}` revision {item.revision}, field `{item.field}`"
-                for item in approval.protected_uses
-            )
-        if approval.attachments:
-            lines.append("Submitted task artifacts:")
-            lines.extend(
-                f"- `{item.id}` ({item.byte_count} bytes, sha256 {item.sha256})"
-                for item in approval.attachments
-            )
-    else:
-        lines.extend(
-            [
-                "Protected destination authorization for this execution only:",
-                (
-                    f"- `{approval.protected_use.resource.qualified}` revision "
-                    f"{approval.protected_use.revision}, field "
-                    f"`{approval.protected_use.field}`"
-                ),
-                "This does not create a durable protected-destination approval.",
-            ]
-        )
-    lines.extend(
-        [
-            "",
-            f"Approve: `/approve {approval.id} {challenge.code}`",
-            f"Deny: `/deny {approval.id} {challenge.code}`",
-            f"Cancel execution: `/cancel {approval.request_id}`",
-        ]
-    )
-    return "\n".join(lines)
+def _truncate_result(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)] + ("…" if limit else "")
 
 
 def _route_project_root(configured_root: str | None) -> str | None:

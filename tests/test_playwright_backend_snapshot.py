@@ -113,3 +113,77 @@ async def test_snapshot_preserves_untruncated_content(
 
     assert snapshot.content == content
     assert snapshot.character_truncated is False
+
+
+async def test_snapshot_keeps_refs_for_nonstandard_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page, _ = _page(
+        '- heading "Purchase credits" [ref=e1]\n'
+        '- paragraph "Saved payment" [ref=e2]\n'
+        '- generic "Custom control" [ref=e3] [cursor=pointer]\n'
+        '- spinbutton "Credit amount" [ref=e4]\n'
+    )
+    resolved = []
+
+    async def resolve(ref: str, *, allow_ambiguous: bool = False) -> None:
+        resolved.append(ref)
+        return None
+
+    monkeypatch.setattr(page, "_resolve_target", resolve)
+    snapshot = await page.snapshot(depth=7, character_limit=4_000)
+    assert resolved == ["e1", "e2", "e3", "e4"]
+    assert len(snapshot.targets) == 4
+    assert not snapshot.targets[0].consequential
+
+
+@pytest.mark.parametrize("modal", [True, False])
+async def test_only_verified_modal_omits_background(
+    monkeypatch: pytest.MonkeyPatch, modal: bool
+) -> None:
+    content = (
+        '- heading "Background" [ref=e1]\n'
+        '- dialog "Checkout" [ref=e2]:\n'
+        '  - button "Pay" [ref=e3]\n'
+        '- button "Background action" [ref=e4]\n'
+    )
+    page, _ = _page(content)
+
+    class Locator:
+        async def evaluate(self, expression: str) -> bool:
+            assert "aria-modal" in expression
+            return modal
+
+    async def resolve(ref: str, *, allow_ambiguous: bool = False):
+        return None, Locator()
+
+    monkeypatch.setattr(page, "_resolve_target", resolve)
+    result = await page._focus_modal_snapshot(content)
+    assert ("Background" not in result) == modal
+    assert 'button "Pay"' in result
+
+
+@pytest.mark.parametrize(
+    ("label", "autocomplete", "input_type", "protected"),
+    [
+        ("Credit amount", "transaction-amount", "number", False),
+        ("Debit amount", "transaction-amount", "number", False),
+        ("Currency", "transaction-currency", "text", False),
+        ("Use one-time payment method", "", "checkbox", False),
+        ("Credit card number", "", "text", True),
+        ("Card security code", "cc-csc", "text", True),
+        ("One-time code", "", "text", True),
+        ("Verification", "one-time-code", "text", True),
+        ("Sign in", "", "password", True),
+    ],
+)
+def test_amount_fields_are_not_credentials(
+    label: str, autocomplete: str, input_type: str, protected: bool
+) -> None:
+    from ricky.browser.playwright_backend import _coordinate_target_descriptor
+
+    target = _coordinate_target_descriptor(
+        {"tag": "input", "aria": label, "autocomplete": autocomplete, "type": input_type},
+    )
+    assert target.protected is protected
+    assert (target.protected_kind is not None) is protected

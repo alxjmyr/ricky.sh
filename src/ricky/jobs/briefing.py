@@ -29,7 +29,19 @@ def browser_system_sections(scope: BrowserExecutionScope | None) -> dict[str, st
             "Resource discovery is not required; these identities are already pinned "
             "by this execution's contract. Use only exposed tools within its guards.\n"
             f"Ephemeral browser sessions permitted: {scope.allow_ephemeral}. "
-            "An ephemeral session does not contain the configured browser's login."
+            "An ephemeral session does not contain the configured browser's login.\n"
+            "Read each fresh snapshot and match the control's label, role, and kind before "
+            "copying its ref. Labels, headings, and account details are not form controls. "
+            "Use browser_fill for editable amount inputs, browser_select for selects, and "
+            "ordinary clicks for preparation. If content is offloaded, read the artifact "
+            "before guessing a target.\n"
+            "For transactions, finish preparation before browser_commit: select the amount "
+            "and payment method, inspect the resulting total including fees/taxes and any "
+            "recurrence, then commit only the final submit/purchase/reservation control. "
+            "Never spend a transaction approval merely to select an amount or open a dialog. "
+            "The envelope must describe the actual final action and total charge, not an "
+            "intended future action. After commit, verify the website's confirmation and "
+            "resulting state; a performed click alone does not prove transaction success."
         )
     }
 

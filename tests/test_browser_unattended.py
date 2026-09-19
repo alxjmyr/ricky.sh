@@ -7,12 +7,14 @@ import json
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from PIL import Image
 from pydantic import TypeAdapter, ValidationError
 
 from browser_support import FakeBrowserBackend, FakeBrowserPage, FakeBrowserSession, fake_executable
+from ricky.agent import AgentSession
 from ricky.browser import background_browser_tools, browser_tool_descriptors
 from ricky.browser.backend import (
     BackendBoundingBox,
@@ -28,6 +30,7 @@ from ricky.browser.runtime_guard import (
     BrowserRuntimeEvidence,
 )
 from ricky.browser.service import BrowserService
+from ricky.browser.tools import BrowserClickTool
 from ricky.browser.types import (
     BrowserCoordinateTarget,
     BrowserDialogPolicy,
@@ -35,8 +38,111 @@ from ricky.browser.types import (
     CoordinateFallbackEvidence,
 )
 from ricky.config import RickySettings
+from ricky.jobs.browser_store import BrowserBudgetExceededError
+from ricky.tools import ToolContext
 
 _ORIGIN = "https://127.0.0.1:9443"
+
+
+@pytest.mark.parametrize("operation", ["interactions", "navigations", "created_pages"])
+async def test_action_budget_rejection_returns_not_performed_before_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    from ricky.authority.engine import DelegatedEffectTool
+    from ricky.authority.registry import AuthorityRegistry
+    from ricky.authority.types import AuthorityScope
+    from ricky.browser.authority import BrowserInteractAuthorityEvaluator
+    from ricky.browser.guardrails import BrowserGuardrailConstraints
+    from ricky.tools import Tool
+    from test_authority_engine import _grant, _Harness
+
+    service, guard, page = _service(tmp_path)
+    page.snapshot_text = '- button "Continue" [ref=e1]'
+    page.targets = (
+        BackendTargetDescriptor(
+            ref="e1", role="button", name="Continue", control_kind="button", frame_origin=_ORIGIN
+        ),
+    )
+    try:
+        opened = await service.open_session()
+        snapshot = await service.snapshot(opened.session_id, page_id=None)
+        original = guard.reserve
+
+        async def reserve(kind: BrowserBudgetKind, amount: int, facts: BrowserGuardFacts) -> None:
+            if kind == operation:
+                raise BrowserBudgetExceededError("browser budget exhausted: " + operation)
+            await original(kind, amount, facts)
+
+        monkeypatch.setattr(guard, "reserve", reserve)
+        if operation == "created_pages":
+            monkeypatch.setattr(
+                guard,
+                "reserve_possible_pages",
+                AsyncMock(
+                    side_effect=BrowserBudgetExceededError(
+                        "browser budget exhausted: created_pages"
+                    )
+                ),
+            )
+        tool = BrowserClickTool(service)
+        settings = service._settings
+        harness = _Harness(settings)
+        constraints = BrowserGuardrailConstraints(
+            capability_id="builtin.browser.interact",
+            mode="transaction",
+            allowed_tools=("browser_click",),
+        )
+        grant = _grant(
+            settings,
+            scopes=(
+                AuthorityScope(
+                    capability="browser_interact",
+                    schema_id="browser.interact",
+                    schema_version=1,
+                    constraints=constraints.model_dump(mode="json"),
+                ),
+            ),
+        )
+        registry = AuthorityRegistry([BrowserInteractAuthorityEvaluator()])
+        await harness.start(grant=grant, registry=registry)
+        delegated = DelegatedEffectTool(
+            cast(Tool, tool),
+            grant=grant,
+            registry=registry,
+            authority=harness.authority,
+            jobs=harness.jobs,
+            run_id=harness.run_id,
+            effect_budget=1,
+        )
+        ctx = ToolContext(
+            settings=settings,
+            cwd=tmp_path,
+            session=AgentSession.create(settings, profile_scope=settings.resolve_profile_scope()),
+        )
+        result = await delegated.run(
+            tool.Params.model_validate(
+                {
+                    "target": {
+                        "session_id": opened.session_id,
+                        "page_id": opened.selected_page_id,
+                        "snapshot_id": snapshot.snapshot_id,
+                        "ref": "e1",
+                    }
+                }
+            ),
+            ctx,
+        )
+        assert result.is_error
+        assert result.effect_receipt is not None
+        assert result.effect_receipt.disposition == "not_performed"
+        assert operation in result.content
+        assert not page.actions
+        receipts = await harness.jobs.actions_for_run(harness.run_id, scope=harness.scope)
+        assert [receipt.status for receipt in receipts] == ["not_performed"]
+        assert (await harness.authority.get(grant.id, scope=harness.scope)).status == "active"
+        assert not (tmp_path / "project").exists()
+    finally:
+        await service.aclose()
 
 
 class RecordingBrowserGuard:
@@ -419,6 +525,12 @@ async def test_coordinate_commit_uses_harness_fallback_and_exact_binding(tmp_pat
     prepared = await service.prepare_coordinate_commit(target, dialog=BrowserDialogPolicy())
     assert prepared.fallback is not None
     assert prepared.fallback.reason == "custom_rendered_target"
+    preparation_checks = [
+        facts for facts in guard.checks if facts.tool_name == "browser_coordinate_commit"
+    ]
+    assert preparation_checks
+    assert all(facts.phase == "prepare" for facts in preparation_checks)
+    assert not page.coordinates
     transaction = service.transaction_evidence(
         prepared,
         envelope_kind="browser",
@@ -437,6 +549,7 @@ async def test_coordinate_commit_uses_harness_fallback_and_exact_binding(tmp_pat
         facts for kind, _amount, facts in guard.reservations if kind == "transaction_commits"
     )
     assert commit_reservation.provider == "openrouter"
+    assert commit_reservation.phase == "dispatch"
     assert commit_reservation.coordinate_fallback == prepared.fallback
     assert commit_reservation.transaction == transaction
     assert any(kind == "navigations" for kind, _amount, _facts in guard.reservations)

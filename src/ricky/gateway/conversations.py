@@ -1361,7 +1361,12 @@ class ConversationCoordinator:
         pieces = command.split()
         verb = "approve" if approve else "deny"
         if len(pieces) != 3 or pieces[0] != f"/{verb}":
-            return f"Usage: /{verb} browser_<approval-id> <one-time-code>"
+            return (
+                f"Copy and send the entire /{verb} command from Ricky's approval message, "
+                "including the one-time code after the approval ID. Ricky already included "
+                "that code in the message; it does not come from the website.\n\n"
+                f"Format: `/{verb} APPROVAL_ID ONE_TIME_CODE`"
+            )
         principal = f"{inbound.transport}:{inbound.account}:{inbound.sender_id}"
         try:
             approval = await self.dispatcher.decide_browser_approval(

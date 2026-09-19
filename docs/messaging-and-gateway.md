@@ -221,6 +221,11 @@ the result or an actionable failure separately; the foreground agent does not wa
 Required questions and approvals still happen before work is accepted.
 Delegated work uses the durable task's short title in acknowledgements and result notifications;
 the full execution instructions are supplied to the worker.
+Failed or uncertain results state the execution status and runtime cause first.
+When available, the worker's explanation follows as an unverified agent report;
+it does not establish that a purchase or other external action succeeded.
+Confirmed effects come from recorded receipts. Long causes and reports are bounded
+by `[executions].result_text_limit`.
 
 Routine acknowledgements and results omit internal task and execution IDs. Use
 `/status` to inspect those details, including work waiting for acknowledgement

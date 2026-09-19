@@ -67,6 +67,7 @@ class BrowserGuardFacts(BrowserModel):
     """Bounded safe live facts checked independently of model arguments."""
 
     tool_name: BrowserToolName
+    phase: Literal["prepare", "dispatch"] = "dispatch"
     resource: ProfileResourceRef | None = None
     resource_configuration_digest: str | None = Field(
         default=None,
@@ -121,6 +122,11 @@ class BrowserGuardFacts(BrowserModel):
 
     @model_validator(mode="after")
     def _coherent_coordinate_fallback(self) -> BrowserGuardFacts:
+        if self.phase == "prepare" and self.tool_name not in {
+            "browser_commit",
+            "browser_coordinate_commit",
+        }:
+            raise ValueError("preparation guard facts belong only to browser commits")
         if self.coordinate_fallback is not None and self.tool_name not in {
             "browser_coordinate_click",
             "browser_coordinate_commit",
