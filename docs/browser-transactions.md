@@ -40,6 +40,94 @@ If the gateway, browser, worker, resource lease, or in-memory preparation is los
 invalid. Ricky does not rebuild the cart or form and apply the old approval after restart. Expiry,
 denial, and cancellation also drop the prepared effect without dispatch.
 
+## Continue through verification
+
+A website can request verification after a purchase click or during login. Ricky
+can keep the browser open and ask for a one-time code or an action on your device.
+In Telegram, reply directly to the verification message with the code, or with
+`done` after a requested device action. In CLI chat, use the terminal prompt;
+code input is hidden and a blank response cancels it. When automatic email
+verification is enabled, Ricky checks an authorized Gmail account first and only
+asks you if it cannot identify an eligible code.
+
+The reply resumes only the matching live challenge. It does not approve a
+transaction. Code entry can submit a form automatically, so Ricky prepares that
+submission through the browser transaction review. A payment verification step
+can therefore require a second exact approval. The worker must have remaining
+interaction, transaction, and financial budgets for that step. Currently each
+financial commit reserves its reviewed total, including a verification commit for
+an already pending purchase; the earlier reservation is not refunded. A ceiling
+sufficient for one charge may consequently be insufficient for both reviewed
+actions. No additional purchase is authorized by supplying a code.
+
+Some sites accept a code and then require a separate final submit. Ricky must inspect
+that step and obtain any required fresh approval. Other sites finish asynchronously.
+Ricky can wait with `browser_snapshot`'s `wait_seconds` argument (up to 30 seconds per
+observation) without refreshing the page or repeating the purchase. These waits count
+against the execution's active time budget.
+
+Code entry, a closed verification dialog, and a performed click do not prove the
+purchase completed. Background agents report the task outcome separately, with
+observed evidence. An unconfirmed purchase is reported as uncertain; a known blocker
+is reported as failed. Neither outcome authorizes an automatic purchase retry.
+
+The installation setting `browser.challenge_timeout_seconds` defaults to 900
+seconds. Background waits also respect the execution's approval TTL and parked
+browser capacity. Waiting pauses the active job timer within a cumulative bound;
+it retains the browser and execution claim. Use the supplied `/cancel` command
+to stop a gateway execution.
+
+Expired, duplicate, or unrelated replies cannot submit a code. Restarting the
+gateway loses the live challenge; old replies cannot resume it. Ricky records
+safe challenge metadata under `browser.challenge_dir` (default
+`browser/challenges` in the installation data directory), without storing the
+code there. Ordinary Telegram history may retain your reply.
+
+A performed click or accepted code is not proof that a purchase or login
+completed. Ricky must inspect the resulting page. If dispatch becomes uncertain,
+it stops further mutations and reports that reconciliation is needed.
+
+### Enable automatic email verification
+
+Configure the installation's `ricky.toml` with the qualified Google accounts that
+Ricky may use for verification:
+
+```toml
+[browser.verification]
+enabled = true
+allow_background = true
+gmail_accounts = ["personal/mail"]
+```
+
+The account must already be connected to Gmail. Set `allow_background = false`
+to allow automatic retrieval only in CLI chat. Background executions pin this
+permission when admitted; changing configuration does not add access to an
+existing execution. Restart the gateway and submit a new task after changing it.
+The worker does not need general Gmail tools for this narrow verification access.
+
+By default Ricky polls for up to 30 seconds and considers messages received in
+the preceding 120 seconds. It checks the authenticated mailbox identity, exact
+recipient, server receipt time, and sender domain against the website. Account
+aliases must be explicitly configured with `verification_aliases` under that
+profile's `[google.accounts.mail]` section. `allowed_origins` can restrict automatic
+retrieval further, for example `["https://openrouter.ai"]`.
+
+Ricky extracts straightforward codes locally. For other formats, the ordinary
+agent may interpret the eligible message content. This can send the message and
+short-lived code to your configured model provider. Vault passwords and payment
+credentials remain on the protected-values path.
+
+Multiple matching messages, a sender domain that does not match the website,
+missing account permissions, or an unrecognized code cause user assistance.
+Ricky does not follow verification links through this code path. It never marks
+messages read or changes the mailbox. A message claimed by one challenge cannot
+be reused by another, including after restart.
+
+Before requesting a replacement code, Ricky cancels the pending challenge and
+discards its response. A resend remains a separate browser action under the
+existing permissions and budgets. The replacement ignores emails received before
+the cancellation. A code with an uncertain submission outcome is never retried.
+
 ## Understand the two approval types
 
 Ricky uses one of two envelopes for every browser commit.

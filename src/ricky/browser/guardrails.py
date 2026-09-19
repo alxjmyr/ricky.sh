@@ -58,6 +58,7 @@ BROWSER_READ_TOOLS = frozenset(
 )
 BROWSER_INTERACT_TOOLS = frozenset(
     {
+        "browser_request_challenge",
         "browser_session_open_resource",
         "browser_click",
         "browser_fill",

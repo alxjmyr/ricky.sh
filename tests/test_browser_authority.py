@@ -135,9 +135,7 @@ async def test_persisted_browser_scope_call_identity_and_receipts(
         receipt = EffectReceipt(disposition=disposition)
         result = ToolResult(content="Effect result", effect_receipt=receipt)
         assert evaluator.receipt(scope, result) == receipt
-        assert evaluator.consumes_grant(scope, receipt) == (
-            evaluator.capability == "browser_commit" and disposition != "not_performed"
-        )
+        assert evaluator.consumes_grant(scope, receipt) == (disposition == "in_doubt")
     assert (
         evaluator.receipt(scope, ToolResult(content="Failed", is_error=True)).disposition
         == "not_performed"

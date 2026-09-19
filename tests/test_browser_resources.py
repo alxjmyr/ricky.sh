@@ -17,6 +17,7 @@ from browser_support import (
     FakeBrowserSession,
     fake_executable,
 )
+from ricky.agent import AgentSession
 from ricky.browser.backend import (
     BackendActionOutcome,
     BackendActionRequest,
@@ -34,14 +35,16 @@ from ricky.browser.playwright_backend import (
 )
 from ricky.browser.resources import persistent_browser_path
 from ricky.browser.service import BrowserService
+from ricky.browser.tools import BrowserResourcesTool, BrowserSessionOpenResourceTool
 from ricky.browser.types import (
     BrowserActionRequest,
     BrowserActionTarget,
     BrowserError,
     BrowserFailure,
 )
-from ricky.config import RickySettings
+from ricky.config import PersistentBrowserResourceSettings, RickySettings
 from ricky.profiles import ProfileResourceRef
+from ricky.tools import ToolContext, ToolRegistry
 
 
 class _FakeNavigationCDP:
@@ -402,6 +405,98 @@ async def test_resource_catalog_is_scope_qualified_and_provider_safe(tmp_path: P
     assert inaccessible.value.failure.code == "unknown_resource"
     await service.aclose()
     assert not Path(settings.user_data_dir).exists()
+
+
+@pytest.mark.parametrize("name", [None, "main", "personal/main"])
+@pytest.mark.parametrize("configured_headless", [False, True])
+@pytest.mark.parametrize("headless", [None, False, True])
+async def test_foreground_open_resolves_default_and_alias_before_launch(
+    tmp_path: Path, name: str | None, configured_headless: bool, headless: bool | None
+) -> None:
+    settings = _settings(tmp_path, include_work=True)
+    browser = settings.profile_configs["personal"].browser
+    assert browser is not None
+    browser.default_resource = "main"
+    configured_resource = browser.resources["main"]
+    assert isinstance(configured_resource, PersistentBrowserResourceSettings)
+    configured_resource.headless = configured_headless
+    service, _backend = _service(settings, tmp_path)
+    try:
+        catalog = await service.resources()
+        assert catalog.default_resource == ProfileResourceRef(profile="personal", name="main")
+        tool = BrowserSessionOpenResourceTool(service)
+        ctx = ToolContext(
+            cwd=tmp_path,
+            settings=settings,
+            session=AgentSession.create(settings, profile_scope=settings.resolve_profile_scope()),
+        )
+        args: dict[str, object] = {} if name is None else {"resource": name}
+        if headless is not None:
+            args["headless"] = headless
+        expected_headless = configured_headless if headless is None else headless
+        visibility = "headless" if expected_headless else "headed"
+        assert f"Visibility: {visibility}" in tool.summarize_permission(args, ctx)
+        assert "personal/main" in tool.summarize_permission(args, ctx)
+        registry = ToolRegistry([cast(Any, tool), cast(Any, BrowserResourcesTool(service))])
+        listing = await registry.dispatch("browser_resources", {}, ctx)
+        assert not listing.is_error, listing.content
+        assert isinstance(listing.data, dict)
+        assert listing.data["default_resource"] == {"profile": "personal", "name": "main"}
+        result = await registry.dispatch(tool.name, args, ctx)
+        assert not result.is_error, result.content
+        assert isinstance(result.data, dict)
+        assert result.data["resource"] == {"profile": "personal", "name": "main"}
+        assert result.data["headless"] is expected_headless
+        [options] = _backend.options
+        assert isinstance(options, BrowserLaunchOptions)
+        assert options.headless is expected_headless
+        assert options.user_data_dir == persistent_browser_path(
+            settings, ProfileResourceRef(profile="personal", name="main")
+        )
+        assert configured_resource.headless is configured_headless
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.parametrize("headless", [False, True])
+async def test_attached_browser_tool_cannot_override_external_visibility(
+    tmp_path: Path, headless: bool
+) -> None:
+    settings = _settings(tmp_path)
+    service, backend = _service(settings, tmp_path)
+    try:
+        tool = BrowserSessionOpenResourceTool(service)
+        ctx = ToolContext(
+            cwd=tmp_path,
+            settings=settings,
+            session=AgentSession.create(settings, profile_scope=settings.resolve_profile_scope()),
+        )
+        args: dict[str, object] = {"resource": "personal/debug", "headless": headless}
+        assert "Cannot change visibility" in tool.summarize_permission(args, ctx)
+        result = await ToolRegistry([cast(Any, tool)]).dispatch(tool.name, args, ctx)
+        assert result.is_error
+        assert "do not accept a headless override" in result.content
+        assert not backend.options
+        assert "9222" not in result.content
+    finally:
+        await service.aclose()
+
+
+async def test_foreground_default_requires_primary_profile_choice(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    service, backend = _service(settings, tmp_path)
+    try:
+        assert (await service.resources()).default_resource is None
+        with pytest.raises(BrowserError, match="Which browser"):
+            service.resource()
+        browser = settings.profile_configs["personal"].browser
+        assert browser is not None
+        del browser.resources["debug"]
+        assert service.resource().resource.qualified == "personal/main"
+        assert (await service.resources()).default_resource == service.resource().resource
+        assert not Path(settings.user_data_dir).exists()
+    finally:
+        await service.aclose()
 
 
 async def test_persistent_resource_state_survives_close_and_can_be_reset(

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
+from ricky.browser.challenges import LiveBrowserChallenge
 from ricky.capabilities.policy import policy_digest
 from ricky.config import RickySettings, find_project_root
 from ricky.durable_tasks.scoped import ScopedDurableTaskStore, ScopedTaskArtifactStore
@@ -23,6 +24,7 @@ from ricky.executions.browser import (
     ParkedBrowserTransaction,
 )
 from ricky.executions.browser_review import browser_approval_body as _browser_approval_body
+from ricky.executions.challenges import ExecutionBrowserChallenges
 from ricky.executions.contracts import (
     ExecutionContract,
     load_contract_snapshot,
@@ -35,6 +37,7 @@ from ricky.executions.types import (
     is_retryable_execution_status,
 )
 from ricky.llm import Provider
+from ricky.messaging.store import MessagingStore
 from ricky.notifications import NotificationService
 from ricky.notifications.routes import RoutePolicy
 from ricky.notifications.types import CorrelationRef, NotificationRequest
@@ -109,6 +112,9 @@ class ExecutionDispatcher:
         self._runner_factory = runner_factory
         self._provider_factory = provider_factory
         self.notifications = notifications or NotificationService(settings)
+        self.browser_challenges = ExecutionBrowserChallenges(
+            self.notifications, MessagingStore(settings)
+        )
         self.routes = routes or RoutePolicy(settings)
         self._authority: AuthorityStore | None = authority
         self._authority_registry = authority_registry
@@ -623,6 +629,7 @@ class ExecutionDispatcher:
                         execution_request=started,
                         browser_scope=contract.browser,
                         browser_principal_id=contract.principal_id,
+                        browser_verification=contract.verification,
                     )
                 )
             else:
@@ -779,7 +786,18 @@ class ExecutionDispatcher:
             browser_approval_notifier=lambda challenge, profile_scope: self.notify_browser_approval(
                 challenge, scope=profile_scope
             ),
+            browser_challenge_responder=self._request_browser_challenge,
         )
+
+    async def _request_browser_challenge(
+        self,
+        owner: LiveBrowserChallenge,
+        request_id: str,
+        principal_id: str,
+        scope: ProfileScope,
+    ) -> None:
+        request = await self.store.get(request_id, scope=scope)
+        await self.browser_challenges.request(owner, request, principal_id)
 
     @staticmethod
     def _scope_for_request(

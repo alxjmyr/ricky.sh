@@ -202,7 +202,7 @@ async def test_named_job_runs_existing_loop_with_bounds_and_audit(tmp_path: Path
     assert len(provider.requests) == 1
     request = provider.requests[0]
     assert request.max_tokens == 123
-    assert [tool.name for tool in request.tools] == ["read_file"]
+    assert [tool.name for tool in request.tools] == ["read_file", "report_task_outcome"]
     assert any(
         "job: brief" in getattr(part, "text", "")
         for message in request.messages
@@ -534,7 +534,7 @@ async def test_job_transcript_keeps_expanded_context_event(tmp_path: Path) -> No
     ]
     context_event = next(record for record in records if record["kind"] == "context_assembled")
     assert context_event["report"]["estimated_input_tokens"] > 0
-    assert context_event["report"]["tool_count"] == 1
+    assert context_event["report"]["tool_count"] == 2
     assert any(
         section["name"] == "advertised_tool_definitions"
         for section in context_event["report"]["sections"]

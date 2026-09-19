@@ -27,7 +27,10 @@ cross-component boundary.
    points exist only at interface edges.
 6. **Serializable boundaries.** Cross-component state uses strict Pydantic
    models that survive a JSON round trip. Secrets use `SecretStr` and never
-   enter prompts, events, logs, or user-visible output.
+   enter prompts, events, logs, or user-visible output. User-supplied short-lived
+   browser OTP replies and authorized verification messages may use ordinary
+   authenticated messaging and provider context, as specified in
+   the protected-values contract; this does not expose vault material.
 
 ## Component ownership
 
@@ -321,6 +324,16 @@ durable evidence shows nothing observable; otherwise it becomes `uncertain` or
   identifiers, which remain available through status and diagnostics. Later user
   status requests remain supported. Execution success records task progress but
   does not independently prove durable-task closure criteria were satisfied.
+- Ordinary job agents receive a run-local `report_task_outcome` tool independent of
+  their external capability grant. It records a bounded, explicit model assessment
+  (`completed`, `blocked`, or `uncertain`) and observed evidence, without granting
+  external access or performing an effect. Any subsequent tool request invalidates
+  the report. For browser transaction-capable jobs, a missing current report is
+  uncertain, not successful. Runtime failures and unresolved external receipts take
+  precedence over a claimed completed task. Blocked reports map to failed executions;
+  uncertain reports remain uncertain. Reports are audited through ordinary tool
+  transcripts and terminal run records and remain model assessments, not merchant
+  receipts. Workflows retain their existing checkpoint-owned terminal outcomes.
 - Linked task context is explicitly a historical snapshot at dispatch. Later
   task reads and mutation results supersede its mutable state; the contract's
   pinned task revision continues to identify the authorization boundary. A

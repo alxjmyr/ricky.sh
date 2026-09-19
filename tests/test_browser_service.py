@@ -31,6 +31,46 @@ _SECURE_LOCAL_ORIGIN = "https://127.0.0.1:9443"
 _PROTECTED_SENTINEL = "browser-protected-sentinel-5927"
 
 
+async def test_observation_wait_reads_later_state_without_replaying_actions(tmp_path):
+    page = FakeBrowserPage(snapshot="- heading Pending")
+    backend = FakeBrowserBackend()
+    backend.pending_sessions.append(FakeBrowserSession([page]))
+    service, _, _ = _service(tmp_path, backend)
+    try:
+        opened = await service.open_session()
+        waiting = asyncio.create_task(
+            service.snapshot(opened.session_id, page_id=None, wait_seconds=0.05)
+        )
+        await asyncio.sleep(0)
+        page.snapshot_text = "- heading Purchase confirmed"
+        result = await waiting
+        assert "Purchase confirmed" in result.content
+        assert page.navigations == [] and page.actions == []
+        assert len(page.snapshot_depths) == 1
+    finally:
+        await service.aclose()
+
+
+async def test_observation_wait_cancellation_releases_page_without_dispatch(tmp_path):
+    page = FakeBrowserPage()
+    backend = FakeBrowserBackend()
+    backend.pending_sessions.append(FakeBrowserSession([page]))
+    service, _, _ = _service(tmp_path, backend)
+    try:
+        opened = await service.open_session()
+        waiting = asyncio.create_task(
+            service.snapshot(opened.session_id, page_id=None, wait_seconds=30)
+        )
+        await asyncio.sleep(0)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert page.snapshot_depths == [] and page.actions == []
+        await asyncio.wait_for(service.snapshot(opened.session_id, page_id=None), timeout=1)
+    finally:
+        await service.aclose()
+
+
 def _settings(
     tmp_path: Path,
     *,

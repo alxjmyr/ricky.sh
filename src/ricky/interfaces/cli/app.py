@@ -776,6 +776,7 @@ async def _chat(
         browser_factory=BrowserService.create,
         unlock_responder=renderer.request_protected_unlock,
         secure_value_responder=renderer.request_secure_value,
+        browser_challenge_responder=renderer.request_browser_challenge,
         destination_responder=renderer.request_protected_destination,
         skill_factory=discover_skills,
         registry_factory=ToolRegistry,

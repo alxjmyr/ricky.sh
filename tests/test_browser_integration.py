@@ -112,6 +112,22 @@ class _FixtureHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if path == "/checkout-verification-stack":
+            body = (
+                b"<h1>Account information</h1>"
+                + b"<p>Background account detail</p>" * 300
+                + b'<div role="dialog" aria-modal="true"><h2>Purchase credits</h2>'
+                b'<p role="status">Finishing your purchase</p></div>'
+                b'<div role="dialog" aria-modal="true"><h2>Verification required</h2>'
+                b'<label>Email code<input autocomplete="one-time-code"></label></div>'
+                b'<div role="alert">Verification has not completed</div>'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/start":
             self.send_response(302)
             self.send_header("Location", "/page?token=server-secret&source=fixture")
@@ -1674,6 +1690,55 @@ async def test_real_chrome_rejects_oversized_download_before_publication(
                 / settings.browser.download_dir
             )
             assert not durable.exists()
+        finally:
+            await service.aclose()
+
+
+async def test_real_chrome_modal_stack_keeps_verification_and_status(
+    installed_browser: _InstalledBrowser, tmp_path: Path
+) -> None:
+    from ricky.browser.tools import BrowserSnapshotTool
+
+    with _fixture_server() as (origin, _requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "browser": {"enabled": True, "allowed_private_origins": [origin]},
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        try:
+            opened = await service.open_session(headless=True)
+            await service.navigate(
+                opened.session_id, page_id=None, url=f"{origin}/checkout-verification-stack"
+            )
+            snapshot = await service.snapshot(opened.session_id, page_id=None)
+            assert "Account information" not in snapshot.content
+            assert "Background account detail" not in snapshot.content
+            for text in (
+                "Purchase credits",
+                "Finishing your purchase",
+                "Verification required",
+                "Verification has not completed",
+            ):
+                assert text in snapshot.content
+            assert any(d.protected_kind == "one_time_code" for d in snapshot.descriptors)
+            ctx = ToolContext(
+                cwd=tmp_path,
+                settings=settings,
+                session=AgentSession.create(
+                    settings, profile_scope=settings.resolve_profile_scope()
+                ),
+            )
+            tool = BrowserSnapshotTool(service)
+            result = await tool.run(tool.Params(session_id=opened.session_id), ctx)
+            assert len(result.content) < settings.context.tool_results.offload_threshold_chars
         finally:
             await service.aclose()
 

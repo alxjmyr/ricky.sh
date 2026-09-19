@@ -74,10 +74,10 @@ ricky browser reset personal/ricky-personal
 Reset permanently deletes that resource's cookies, local storage, cache, and other Chrome state
 after confirmation. It leaves the resource configuration in place.
 
-## Select a browser from Telegram
+## Select a browser in chat or Telegram
 
 You can name a browser naturally: "Use ricky-personal to check my OpenRouter balance."
-The gateway sees only browsers in its allowed Ricky profiles. Short names prefer a match in the
+CLI chat and the gateway see only browsers in their allowed Ricky profiles. Short names prefer a match in the
 current primary profile; an exact `profile/name` reference selects that resource explicitly.
 
 To make a browser the default, add this to its owning profile's `ricky.toml`:
@@ -91,6 +91,18 @@ The named resource must be defined in the same profile. Without an explicit defa
 sole eligible browser is selected automatically. You can then ask "Check my OpenRouter balance"
 without naming a browser. Multiple eligible browsers without a default require clarification.
 Ricky never silently defaults to a different profile's browser.
+
+CLI chat discovers the same default and can open it without a resource name. It can also select
+headed or attached browsers. Opening a fresh ephemeral browser is a separate operation and does
+not reuse saved account logins. If the default is busy or unavailable, Ricky reports that problem
+instead of silently choosing another browser.
+
+For persistent browsers in interactive chat, `headless` is a default, not a restriction. Ask for a
+"visible" or "headed" browser to open the same saved profile with a window, or ask for headless
+operation. Without a preference, Ricky uses the resource's configured setting. The approval
+prompt shows the selected visibility. A visible browser requires a working graphical display;
+it stays open while the owning chat runtime remains open. Attached browsers keep their externally
+managed visibility, and background executions remain headless-only.
 
 Gateway background work requires a persistent resource with `headless = true`. Headed and CDP
 resources are not offered for background selection. A configured but ineligible default is not

@@ -332,6 +332,17 @@ class GoogleAccountSettings(BaseModel):
     """Expected identity for one named Google account."""
 
     email: str
+    verification_aliases: list[str] = Field(default_factory=list, max_length=30)
+
+    @field_validator("verification_aliases")
+    @classmethod
+    def _verification_aliases(cls, values: list[str]) -> list[str]:
+        normalized = [value.strip().casefold() for value in values]
+        if any(not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) for value in normalized):
+            raise ValueError("verification aliases must be complete email addresses")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("verification aliases must be unique")
+        return normalized
 
 
 class GoogleSettings(BaseModel):
@@ -1359,6 +1370,56 @@ class BackgroundBrowserSettings(BaseModel):
         return self
 
 
+class BrowserVerificationSettings(BaseModel):
+    """Explicit ceiling for challenge-only mailbox reads, separate from Gmail tools."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    allow_background: bool = False
+    gmail_accounts: list[str] = Field(default_factory=list, max_length=30)
+    allowed_origins: list[str] = Field(default_factory=list, max_length=100)
+    poll_timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    poll_interval_seconds: float = Field(default=2.0, ge=0.1, le=30)
+    lookback_seconds: int = Field(default=120, ge=0, le=600)
+    max_messages: int = Field(default=10, ge=1, le=20)
+
+    @field_validator("gmail_accounts")
+    @classmethod
+    def _qualified_accounts(cls, values: list[str]) -> list[str]:
+        for value in values:
+            ProfileResourceRef.from_qualified(value)
+        if len(values) != len(set(values)):
+            raise ValueError("verification accounts must be unique")
+        return values
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _https_origins(cls, values: list[str]) -> list[str]:
+        for value in values:
+            parsed = urlsplit(value)
+            port = parsed.port
+            host = (parsed.hostname or "").encode("idna").decode("ascii").lower().rstrip(".")
+            netloc = f"[{host}]" if ":" in host else host
+            if port not in {None, 443}:
+                netloc += f":{port}"
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.path
+                or parsed.query
+                or parsed.fragment
+                or port == 0
+                or value != f"https://{netloc}"
+            ):
+                raise ValueError("verification origins must be exact HTTPS origins")
+        if len(values) != len(set(values)):
+            raise ValueError("verification origins must be unique")
+        return values
+
+
 class BrowserSettings(BaseModel):
     """Installation-owned browser runtime, storage, and disclosure limits."""
 
@@ -1370,6 +1431,9 @@ class BrowserSettings(BaseModel):
     ephemeral_dir: str = "browser/ephemeral"
     persistent_dir: str = "browser/persistent"
     lease_dir: str = "browser/leases"
+    challenge_dir: str = "browser/challenges"
+    challenge_timeout_seconds: float = Field(default=900.0, gt=0, le=3600)
+    verification: BrowserVerificationSettings = Field(default_factory=BrowserVerificationSettings)
     download_dir: str = "downloads/browser"
     navigation_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
     operation_timeout_seconds: float = Field(default=10.0, gt=0, le=300)
@@ -1398,7 +1462,9 @@ class BrowserSettings(BaseModel):
             raise ValueError("browser.executable_path must be an absolute path")
         return value
 
-    @field_validator("ephemeral_dir", "persistent_dir", "lease_dir", "download_dir")
+    @field_validator(
+        "ephemeral_dir", "persistent_dir", "lease_dir", "download_dir", "challenge_dir"
+    )
     @classmethod
     def _confined_data_dir(cls, value: str, info: Any) -> str:
         return _user_data_relative_path(value, setting=f"browser.{info.field_name}")

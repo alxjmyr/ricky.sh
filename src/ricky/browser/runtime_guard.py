@@ -17,6 +17,7 @@ from ricky.browser.types import (
 from ricky.profiles import ProfileResourceRef
 
 BrowserToolName = Literal[
+    "browser_request_challenge",
     "browser_resources",
     "browser_session_open",
     "browser_session_open_resource",

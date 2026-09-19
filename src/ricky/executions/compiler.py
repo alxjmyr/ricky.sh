@@ -20,6 +20,7 @@ from ricky.browser.resources import (
     browser_resource_configuration_digest,
     require_browser_resource,
 )
+from ricky.browser.verification import compile_verification_ceiling
 from ricky.capabilities import (
     AuthenticatedSource,
     CapabilityPolicyDecision,
@@ -495,8 +496,13 @@ class ExecutionContractCompiler:
         )
         execution = self.settings.agents.ad_hoc_background.execution
         browser = await self._compile_browser_scope(draft.guardrails)
+        verification = (
+            compile_verification_ceiling(self.settings, draft.profile_scope, background=True)
+            if browser is not None and "browser_request_challenge" in browser.allowed_tools
+            else None
+        )
         contract = build_execution_contract(
-            version=3 if browser is not None else 2,
+            version=4 if verification is not None else 3 if browser is not None else 2,
             id=_contract_id(draft),
             parent_request_id=draft.retry_of,
             task_id=draft.task_id,
@@ -523,6 +529,7 @@ class ExecutionContractCompiler:
             inventory_digest=draft.inventory_digest,
             authority_policy_digest=self.settings.authority.digest(),
             browser=browser,
+            verification=verification,
             created_at=draft.updated_at,
             expires_at=(
                 min(draft.expires_at, draft.confirmation.expires_at)

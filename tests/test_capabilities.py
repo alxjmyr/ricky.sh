@@ -91,6 +91,7 @@ APPROVED_BUILTIN_TOOL_MAP = {
         "browser_visual_snapshot",
     },
     "builtin.browser.interact": {
+        "browser_request_challenge",
         "browser_session_open_resource",
         "browser_click",
         "browser_fill",

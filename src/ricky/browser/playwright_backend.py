@@ -1149,6 +1149,11 @@ class _PlaywrightPage:
     ) -> BackendActionOutcome:
         self._ensure_open()
         state_before = await self.state()
+        if request.action.activation == "challenge" and request.challenge_code is None:
+            return _not_performed_outcome(
+                state_before,
+                BrowserFailure(code="protected_field", message="challenge response is unavailable"),
+            )
         try:
             locator, preflight = await self._preflight_semantic_action(request)
         except BrowserError as exc:
@@ -2141,7 +2146,7 @@ class _PlaywrightPage:
         tag = facts.get("tag")
         activates_form = effective_type in {"submit", "image"} or (
             request.action.kind == "commit"
-            and request.action.activation == "enter"
+            and request.action.activation in {"enter", "challenge"}
             and tag in {"INPUT", "TEXTAREA"}
         )
         destinations = await self._validate_destination_facts(
@@ -2243,35 +2248,46 @@ class _PlaywrightPage:
         )
 
     async def _focus_modal_snapshot(self, content: str) -> str:
-        """Focus a single locally verified modal, retaining its original ARIA refs."""
+        """Keep modal stacks and live status evidence without the inert background."""
         dialogs = [
             match
             for match in _TARGET_LINE.finditer(content)
             if match.group("role") in {"dialog", "alertdialog"}
         ]
-        if len(dialogs) != 1:
+        if not dialogs or len(dialogs) > 10:
             return content
-        match = dialogs[0]
-        resolved = await self._resolve_target(match.group("ref"), allow_ambiguous=True)
-        if resolved is None:
+        verified_modal = False
+        for match in dialogs:
+            resolved = await self._resolve_target(match.group("ref"), allow_ambiguous=True)
+            if resolved is None:
+                return content
+            _, locator = resolved
+            modal = await locator.evaluate(
+                "element => element.getAttribute('aria-modal') === 'true' "
+                "|| element.matches(':modal')"
+            )
+            verified_modal = verified_modal or modal is True
+        if not verified_modal:
             return content
-        _, locator = resolved
-        modal = await locator.evaluate(
-            "element => element.getAttribute('aria-modal') === 'true' || element.matches(':modal')"
+        # A verification dialog may overlay checkout. Keep both, plus status and
+        # alert subtrees: a transient error outside the modal is still evidence.
+        ranges: list[tuple[int, int]] = []
+        for match in _TARGET_LINE.finditer(content):
+            if match.group("role") not in {"dialog", "alertdialog", "alert", "status"}:
+                continue
+            start = match.start()
+            if ranges and start < ranges[-1][1]:
+                continue
+            indent = len(match.group("indent"))
+            end = start
+            for index, line in enumerate(content[start:].splitlines(keepends=True)):
+                if index and line.strip() and len(line) - len(line.lstrip()) <= indent:
+                    break
+                end += len(line)
+            ranges.append((start, end))
+        return "Visible modal dialog(s) and live status (background page omitted):\n" + "\n".join(
+            content[start:end].rstrip() for start, end in ranges
         )
-        if modal is not True:
-            return content
-        lines = content[match.start() :].splitlines()
-        indent = len(match.group("indent"))
-        end = next(
-            (
-                index
-                for index, line in enumerate(lines[1:], start=1)
-                if line.strip() and len(line) - len(line.lstrip()) <= indent
-            ),
-            len(lines),
-        )
-        return "Visible modal dialog (background page omitted):\n" + "\n".join(lines[:end])
 
     async def _snapshot_targets(self, content: str) -> tuple[BackendTargetDescriptor, ...]:
         targets: list[BackendTargetDescriptor] = []
@@ -2873,6 +2889,10 @@ def _validate_action_compatibility(
     target: BackendTargetDescriptor,
 ) -> None:
     kind = request.action.kind
+    if request.action.activation == "challenge" and (
+        kind != "commit" or not target.editable or target.protected_kind != "one_time_code"
+    ):
+        _raise_incompatible("one-time verification code submission")
     if target.file:
         raise BrowserError(
             BrowserFailure(code="file_control", message="file controls require user handoff")
@@ -2969,7 +2989,11 @@ async def _dispatch_action(locator: Locator, request: BackendActionRequest) -> N
         await locator.press(action.key)
         return
     assert action.activation is not None
-    if action.activation == "click":
+    if action.activation == "challenge":
+        if request.challenge_code is None:
+            raise ValueError("challenge response is unavailable")
+        await locator.fill(request.challenge_code.get_secret_value())
+    elif action.activation == "click":
         await locator.click()
     elif action.activation == "enter":
         await locator.press("Enter")

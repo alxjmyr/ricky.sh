@@ -27,6 +27,12 @@ Named version 3 jobs support two execution modes:
 - A workflow job resolves omitted workflow arguments from its goal and context, then runs one named
   workflow through the workflow runner.
 
+Agent jobs also receive a runner-owned `report_task_outcome` tool. It reports
+completion, a known blocker, or an uncertain result with observed evidence; it
+does not grant access to additional resources. For browser transaction work, the
+agent must provide this report before the run can succeed. Action receipts and
+runtime failures still take precedence over the agent's assessment.
+
 Both modes can use explicitly authorized Ricky-state mutations or guarded external effects. Risk
 class does not determine unattended eligibility: a mutating or destructive tool can run when its
 tool contract allows unattended use and the job lists it in `permissions.allow_mutating`.

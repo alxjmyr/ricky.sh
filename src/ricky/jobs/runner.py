@@ -18,6 +18,7 @@ from ricky.agent.events import (
     LlmResponseFinishedEvent,
     ToolCallFinishedEvent,
     ToolCallRejectedEvent,
+    ToolCallRequestedEvent,
     TurnFinishedEvent,
     WorkflowEvent,
 )
@@ -25,12 +26,16 @@ from ricky.agent.loop import AgentLoop
 from ricky.agent.session import AgentSession
 from ricky.agent.workflow import WorkflowService
 from ricky.attachments import AttachmentInput, LoadedAttachment, load_attachments
+from ricky.authority.store import AuthorityStore
+from ricky.browser.challenge_wait import ChallengeWaitBudget
+from ricky.browser.challenges import ChallengeError, LiveBrowserChallenge
 from ricky.browser.guardrails import BROWSER_READ_TOOLS
 from ricky.browser.resources import (
     browser_resource_configuration_digest,
     require_browser_resource,
 )
 from ricky.browser.tools import browser_tool_descriptors
+from ricky.browser.verification import VerificationCeiling
 from ricky.capabilities import CapabilityRegistryError, tool_contract_digest, validate_tool_contract
 from ricky.capabilities.enforcement import build_guardrailed_tools
 from ricky.config import PersistentBrowserResourceSettings, RickySettings
@@ -58,6 +63,7 @@ from ricky.jobs.effects import GuardedEffectTool, is_guardable
 from ricky.jobs.escalation import escalate_blocked
 from ricky.jobs.lock import FileLock, browser_worker_identity, job_lock
 from ricky.jobs.notifications import enqueue_job_notification, project_job_notifications
+from ricky.jobs.outcome import ReportTaskOutcomeTool
 from ricky.jobs.registry import JobRegistry, LoadedJob, context_definition_digest
 from ricky.jobs.sources import JobStreamAdapter, JobStreamRegistry, PersistedBatch
 from ricky.jobs.spec import JobBudget, JobSpec, PinnedExecutionRuntime, ad_hoc_job_spec
@@ -131,6 +137,7 @@ class _ObservedRun:
     external_effect_attempts: list[_ExternalEffectAttempt] = field(default_factory=list)
     workflow_run_id: str | None = None
     workflow_status: str | None = None
+    task_outcome: ReportTaskOutcomeTool = field(default_factory=ReportTaskOutcomeTool)
 
 
 @dataclass(frozen=True)
@@ -180,6 +187,10 @@ class JobRunner:
         execution_store: ExecutionStore | None = None,
         protected_value_registry: ResidentProtectedValueRegistry | None = None,
         browser_approval_notifier: BrowserApprovalNotifier | None = None,
+        browser_challenge_responder: Callable[
+            [LiveBrowserChallenge, str, str, ProfileScope], Awaitable[None]
+        ]
+        | None = None,
     ) -> None:
         self.settings = settings
         self.project_scope = project_scope or (
@@ -194,6 +205,7 @@ class JobRunner:
         self.execution_store = execution_store
         self.protected_value_registry = protected_value_registry
         self.browser_approval_notifier = browser_approval_notifier
+        self.browser_challenge_responder = browser_challenge_responder
         self.notification_service = (
             NotificationService(settings) if settings.messaging.job_route is not None else None
         )
@@ -257,6 +269,7 @@ class JobRunner:
         execution_request: ExecutionRequest | None = None,
         browser_scope: BrowserExecutionScope | None = None,
         browser_principal_id: str | None = None,
+        browser_verification: VerificationCeiling | None = None,
     ) -> JobRun:
         """Execute one immutable execution contract through the shared run path."""
 
@@ -281,6 +294,7 @@ class JobRunner:
             execution_request=execution_request,
             browser_scope=browser_scope,
             browser_principal_id=browser_principal_id,
+            browser_verification=browser_verification,
             profile_scope=profile_scope,
         )
 
@@ -446,6 +460,7 @@ class JobRunner:
         execution_request: ExecutionRequest | None = None,
         browser_scope: BrowserExecutionScope | None = None,
         browser_principal_id: str | None = None,
+        browser_verification: VerificationCeiling | None = None,
         profile_scope: ProfileScope,
     ) -> JobRun:
         await self.store.initialize()
@@ -533,6 +548,7 @@ class JobRunner:
                 loaded=loaded,
                 execution_request=execution_request,
                 browser_principal_id=browser_principal_id,
+                browser_verification=browser_verification,
                 trigger_id=trigger_id,
             )
             run = setup.run
@@ -659,11 +675,14 @@ class JobRunner:
                         permission_engine,
                         system_sections={
                             **(system_sections or {}),
-                            **browser_system_sections(browser_scope),
+                            **browser_system_sections(browser_scope, browser_verification),
                         },
                         pinned_runtime=pinned_runtime,
                         workflow_plan=workflow_plan,
                         run_seeded=run_seeded,
+                        challenge_wait=background_browser.challenge_wait
+                        if background_browser is not None
+                        else None,
                     )
                 browser_cleanup_confirmed = True
             except asyncio.CancelledError:
@@ -777,6 +796,7 @@ class JobRunner:
         loaded: LoadedJob | None,
         execution_request: ExecutionRequest | None,
         browser_principal_id: str | None,
+        browser_verification: VerificationCeiling | None = None,
         trigger_id: str | None,
     ) -> _BackgroundBrowserSetup:
         """Create durable browser ownership and either hand it off or terminalize it."""
@@ -975,13 +995,61 @@ class JobRunner:
                     attachment_ids=attachment_ids,
                 )
 
+            async def respond_challenge(owner: LiveBrowserChallenge) -> None:
+                assert coordinator is not None and self.browser_challenge_responder is not None
+                await self.browser_challenge_responder(
+                    owner,
+                    coordinator.context.request_id,
+                    coordinator.context.principal_id,
+                    profile_scope,
+                )
+                await owner.wait(consume=False)
+
+            async def check_verification_authority() -> None:
+                if execution_request is None or self.execution_store is None:
+                    raise ChallengeError("verification requires a live execution owner")
+                current = await self.execution_store.get(execution_request.id, scope=profile_scope)
+                if (
+                    current.status != "running"
+                    or current.claim_token != execution_request.claim_token
+                    or current.claim_fence != execution_request.claim_fence
+                    or current.run_id != run.id
+                    or current.claim_expires_at is None
+                    or current.claim_expires_at <= datetime.now(UTC)
+                ):
+                    raise ChallengeError("execution no longer authorizes verification access")
+                if current.grant_id is not None:
+                    grant = await AuthorityStore(self.settings).get(
+                        current.grant_id, scope=profile_scope
+                    )
+                    if grant.status != "active" or grant.expires_at <= datetime.now(UTC):
+                        raise ChallengeError("delegated verification authority is no longer active")
+
             runtime = BackgroundBrowserRuntime(
                 mode=browser_scope.mode,
                 allowed_tools=frozenset(browser_scope.allowed_tools),
                 guard=guard,
+                verification=browser_verification,
+                verification_check=check_verification_authority
+                if browser_verification is not None
+                else None,
+                challenge_wait=ChallengeWaitBudget(
+                    min(
+                        self.settings.browser.challenge_timeout_seconds,
+                        browser_scope.budget.approval_ttl_seconds,
+                    ),
+                    park=coordinator.park_challenge,
+                )
+                if coordinator is not None
+                else None,
                 tool_wrapper=coordinator.wrap if coordinator is not None else None,
                 attachment_resolver=(
                     resolve_browser_attachments if browser_scope.attachments else None
+                ),
+                challenge_responder=(
+                    respond_challenge
+                    if coordinator is not None and self.browser_challenge_responder is not None
+                    else None
                 ),
             )
             return _BackgroundBrowserSetup(
@@ -1081,6 +1149,7 @@ class JobRunner:
         pinned_runtime: PinnedExecutionRuntime | None = None,
         workflow_plan: WorkflowJobPlan | None = None,
         run_seeded: bool = False,
+        challenge_wait: ChallengeWaitBudget | None = None,
     ) -> JobRun:
         transcript_path = self.store.root / "transcripts" / f"{run.id}.jsonl"
         live = run.model_copy(
@@ -1158,6 +1227,7 @@ class JobRunner:
                     )
                 )
             else:
+                filtered = ToolRegistry([*filtered.tools(), cast(Tool, observed.task_outcome)])
                 loop = AgentLoop(
                     provider=runtime.provider,
                     registry=filtered,
@@ -1194,7 +1264,14 @@ class JobRunner:
                         sections=sections,
                     )
                 )
-            done, _ = await asyncio.wait({task}, timeout=spec.budget.wall_clock_seconds)
+            if challenge_wait is None:
+                done, _ = await asyncio.wait({task}, timeout=spec.budget.wall_clock_seconds)
+            else:
+                completed = await challenge_wait.wait_for_task(
+                    task,
+                    active_seconds=spec.budget.wall_clock_seconds,
+                )
+                done = {task} if completed else set()
             if not done:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -1218,6 +1295,17 @@ class JobRunner:
                         live.id,
                         profile_scope=live.profile_scope,
                         observed=observed,
+                    )
+                if outcome == "succeeded" and workflow_plan is None:
+                    outcome, error = observed.task_outcome.outcome(
+                        required=bool(
+                            {"browser_commit", "browser_coordinate_commit"} & set(spec.tools.allow)
+                        )
+                        or any(
+                            attempt.tool_name in {"browser_commit", "browser_coordinate_commit"}
+                            and attempt.disposition == "performed"
+                            for attempt in observed.external_effect_attempts
+                        )
                     )
                 if outcome == "succeeded" and batches:
                     try:
@@ -1682,6 +1770,9 @@ class JobRunner:
                 observed.completion_tokens = event.usage.completion_tokens
             elif isinstance(event, LlmResponseFinishedEvent):
                 observed.current_iteration = event.iteration
+                observed.task_outcome.begin_batch()
+            elif isinstance(event, ToolCallRequestedEvent):
+                observed.task_outcome.tool_requested(event.tool_name)
             self._observe_effect_event(event, observed)
 
     @staticmethod

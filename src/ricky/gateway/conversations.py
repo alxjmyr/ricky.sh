@@ -769,6 +769,18 @@ class ConversationCoordinator:
         inbound: InboundMessage,
         conversation: Conversation,
     ) -> tuple[str, int]:
+        if self.dispatcher is not None and inbound.reply_to_platform_message_id is not None:
+            response = await self.dispatcher.browser_challenges.respond(
+                inbound,
+                conversation_id=conversation.id,
+                scope=conversation.profile_scope,
+            )
+            if response is not None:
+                current = await self.sessions.get(
+                    conversation.session_id,
+                    scope=conversation.profile_scope,
+                )
+                return response, current.revision
         if inbound.image_error:
             current = await self.sessions.get(
                 conversation.session_id, scope=conversation.profile_scope

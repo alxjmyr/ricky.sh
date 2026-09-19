@@ -20,6 +20,8 @@ from ricky.browser import (
     browser_tool_descriptors,
     browser_tools,
 )
+from ricky.browser.challenge_wait import ChallengeWaitBudget
+from ricky.browser.challenges import ChallengeError, LiveBrowserChallenge
 from ricky.browser.guardrails import (
     BROWSER_COMMIT_TOOLS,
     BROWSER_INTERACT_TOOLS,
@@ -29,6 +31,9 @@ from ricky.browser.guardrails import (
     browser_guardrail_evaluators,
 )
 from ricky.browser.tools import BrowserAttachmentResolver
+from ricky.browser.verification import VerificationCeiling, compile_verification_ceiling
+from ricky.browser.verification_resolver import BrowserVerificationResolver
+from ricky.browser.verification_store import VerificationClaimStore
 from ricky.capabilities import (
     CapabilityRegistry,
     CapabilitySpec,
@@ -72,6 +77,8 @@ from ricky.tools.builtin import builtin_tools
 from ricky.tools.builtin.artifacts import ReadToolArtifactTool
 from ricky.tools.integrations.gcal import gcal_toolset
 from ricky.tools.integrations.gmail import gmail_toolset
+from ricky.tools.integrations.gmail.client import GmailClient
+from ricky.tools.integrations.gmail.verification import GmailVerificationReader
 from ricky.tools.integrations.google import (
     ALL_SERVICE_SCOPES,
     GoogleAuth,
@@ -112,6 +119,10 @@ class BackgroundBrowserRuntime:
     guard: BrowserExecutionGuard
     tool_wrapper: Callable[[Tool], Tool] | None = None
     attachment_resolver: BrowserAttachmentResolver | None = None
+    challenge_responder: Callable[[LiveBrowserChallenge], Awaitable[None]] | None = None
+    challenge_wait: ChallengeWaitBudget | None = None
+    verification: VerificationCeiling | None = None
+    verification_check: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -242,6 +253,7 @@ async def build_capability_runtime(
     protected_value_broker: ProtectedValueBroker | None = None,
     unlock_responder: UnlockResponder = deny_unlock,
     secure_value_responder: SecureValueResponder = deny_secure_value,
+    browser_challenge_responder: Callable[[LiveBrowserChallenge], Awaitable[None]] | None = None,
     destination_responder: DestinationApprovalResponder = deny_destination,
     google_auth_factory: Callable[..., GoogleAuth] = GoogleAuth,
     skill_factory: Callable[..., SkillRegistry] = discover_skills,
@@ -377,6 +389,42 @@ async def build_capability_runtime(
         if browser_factory is not None and background_browser is not None:
             raise ValueError("foreground and background browser composition are exclusive")
         browser_runtime_tools: list[Tool] = []
+        verification = (
+            background_browser.verification
+            if background_browser is not None
+            else compile_verification_ceiling(settings, session.profile_scope, background=False)
+        )
+        verification_resolver = None
+        if verification is not None and google_auth is not None:
+
+            async def validate_verification_policy() -> None:
+                if (
+                    background_browser is not None
+                    and background_browser.verification_check is not None
+                ):
+                    await background_browser.verification_check()
+                current = compile_verification_ceiling(
+                    settings,
+                    session.profile_scope,
+                    background=background_browser is not None,
+                )
+                if current != verification:
+                    raise ChallengeError(
+                        "Verification policy changed; start a new task under the current policy."
+                    )
+
+            verification_client = GmailClient(
+                auth=google_auth,
+                base_url=runtime_settings.gmail.api_base_url,
+                timeout_seconds=runtime_settings.request_timeout_seconds,
+            )
+            resources.push_async_callback(verification_client.aclose)
+            verification_resolver = BrowserVerificationResolver(
+                verification,
+                GmailVerificationReader(verification_client),
+                VerificationClaimStore(runtime_settings),
+                validate_verification_policy,
+            )
         if background_browser is not None:
             if not (
                 runtime_settings.browser.enabled
@@ -388,6 +436,7 @@ async def build_capability_runtime(
                 runtime_settings,
                 scope=session.profile_scope,
                 runtime_guard=background_browser.guard,
+                challenge_wait=background_browser.challenge_wait,
             )
             resources.push_async_callback(browser.aclose)
             browser_runtime_tools.extend(
@@ -398,6 +447,8 @@ async def build_capability_runtime(
                     media=session_media,
                     protected_values=protected_values,
                     attachment_resolver=background_browser.attachment_resolver,
+                    challenge_responder=background_browser.challenge_responder,
+                    verification_resolver=verification_resolver,
                 )
             )
             if background_browser.tool_wrapper is not None:
@@ -407,7 +458,15 @@ async def build_capability_runtime(
         elif browser_factory is not None and runtime_settings.browser.enabled:
             browser = await browser_factory(runtime_settings, scope=session.profile_scope)
             resources.push_async_callback(browser.aclose)
-            browser_runtime_tools.extend(browser_tools(browser, session_media, protected_values))
+            browser_runtime_tools.extend(
+                browser_tools(
+                    browser,
+                    session_media,
+                    protected_values,
+                    challenge_responder=browser_challenge_responder,
+                    verification_resolver=verification_resolver,
+                )
+            )
         runtime_tools = [*tools, *browser_runtime_tools]
         full_registry = registry_factory(runtime_tools if background_browser is not None else tools)
         capability_inventory_tools = list(runtime_tools)
@@ -530,6 +589,7 @@ async def build_session_runtime(
     protected_value_broker: ProtectedValueBroker | None = None,
     unlock_responder: UnlockResponder = deny_unlock,
     secure_value_responder: SecureValueResponder = deny_secure_value,
+    browser_challenge_responder: Callable[[LiveBrowserChallenge], Awaitable[None]] | None = None,
     destination_responder: DestinationApprovalResponder = deny_destination,
     google_auth_factory: Callable[..., GoogleAuth] = GoogleAuth,
     skill_factory: Callable[..., SkillRegistry] = discover_skills,
@@ -557,6 +617,7 @@ async def build_session_runtime(
             protected_value_broker=protected_value_broker,
             unlock_responder=unlock_responder,
             secure_value_responder=secure_value_responder,
+            browser_challenge_responder=browser_challenge_responder,
             destination_responder=destination_responder,
             google_auth_factory=google_auth_factory,
             skill_factory=skill_factory,

@@ -2289,6 +2289,16 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
                     "browser_click" if self.step == 4 else "browser_commit",
                     args,
                 )
+            elif purchase and self.step == 8 and not denied:
+                yield _tool(
+                    "outcome",
+                    "report_task_outcome",
+                    {
+                        "status": "completed",
+                        "summary": final_report,
+                        "evidence": ["The account page shows the ending balance $26.65."],
+                    },
+                )
             elif purchase:
                 assert ("$6.65" if denied else "$26.65") in results
                 if budget_denied:
@@ -2349,7 +2359,9 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert completed[0].run_id is not None
     run = await JobRunStore(settings).get(completed[0].run_id, scope=_SCOPE)
     assert run.final_message == final_report
-    assert len(worker.requests) == (8 if purchase else 5 if selection == "recover_id" else 4)
+    assert len(worker.requests) == (
+        9 if purchase and not denied else 8 if purchase else 5 if selection == "recover_id" else 4
+    )
     if purchase:
         assert len(approvals) == (0 if budget_denied else 1)
         assert [action.target.ref for action in page.actions] == (
@@ -2374,7 +2386,9 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
         if not denied:
             assert completed[0].grant_id is not None
             grant = await AuthorityStore(settings).get(completed[0].grant_id, scope=_SCOPE)
-            assert grant.status == "consumed"
+            # A confirmed commit spends its approval/budget, while the remaining
+            # grant stays available for bounded verification of the result.
+            assert grant.status == "active"
     assert page.navigations == ["https://openrouter.ai/settings/credits"]
     assert page.snapshot_depths
     assert backend.closed

@@ -187,7 +187,7 @@ selections can be omitted or empty; both grant no access. A signed-in account on
 does not require private-network access.
 Short browser names resolve within the gateway's accessible profiles, preferring its primary
 profile. Configure `[browser] default_resource` in the owning profile, or leave one eligible
-browser there, to omit the browser name. See [browser selection](browser-control.md#select-a-browser-from-telegram).
+browser there, to omit the browser name. See [browser selection](browser-control.md#select-a-browser-in-chat-or-telegram).
 An authority error naming `('shared', 'personal')` means the capability's `allowed_profiles`
 must include both profiles; `shared` is always part of that execution scope.
 

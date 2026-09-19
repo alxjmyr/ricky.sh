@@ -725,6 +725,7 @@ async def test_background_runner_exposes_only_exact_contract_tools_and_rejects_d
             "grep_search",
             "list_dir",
             "read_file",
+            "report_task_outcome",
         }
 
         drifted = pinned.model_copy(

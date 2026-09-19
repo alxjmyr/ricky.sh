@@ -15,6 +15,7 @@ from ricky.runtime import build_capability_runtime
 from ricky.tools import ToolRegistry
 
 _BROWSER_TOOLS = {
+    "browser_request_challenge",
     "browser_resources",
     "browser_session_open",
     "browser_session_open_resource",

@@ -30,7 +30,7 @@ from ricky.browser.runtime_guard import (
     BrowserRuntimeEvidence,
 )
 from ricky.browser.service import BrowserService
-from ricky.browser.tools import BrowserClickTool
+from ricky.browser.tools import BrowserClickTool, BrowserSessionOpenResourceTool
 from ricky.browser.types import (
     BrowserCoordinateTarget,
     BrowserDialogPolicy,
@@ -39,7 +39,7 @@ from ricky.browser.types import (
 )
 from ricky.config import RickySettings
 from ricky.jobs.browser_store import BrowserBudgetExceededError
-from ricky.tools import ToolContext
+from ricky.tools import ToolContext, ToolRegistry
 
 _ORIGIN = "https://127.0.0.1:9443"
 
@@ -637,6 +637,55 @@ async def test_ordinary_coordinate_click_cannot_bypass_transaction_commit(
     assert rejected.value.failure.code == "consequential_target"
     assert page.coordinates == []
     await service.aclose()
+
+
+async def test_background_open_tool_rejects_visible_override_before_launch(tmp_path: Path) -> None:
+    settings = RickySettings.model_validate(
+        {
+            "user_data_dir": str(tmp_path / "user"),
+            "project_data_dir": str(tmp_path / "project"),
+            "browser": {"enabled": True},
+            "profile_configs": {
+                "personal": {
+                    "browser": {
+                        "resources": {
+                            "main": {
+                                "kind": "persistent",
+                                "description": "Saved account",
+                                "headless": True,
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    )
+    backend = FakeBrowserBackend()
+    guard = RecordingBrowserGuard()
+    service = BrowserService(
+        settings,
+        scope=settings.resolve_profile_scope(),
+        backend=backend,
+        executable_path=fake_executable(tmp_path),
+        runtime_guard=guard,
+    )
+    try:
+        ctx = ToolContext(
+            cwd=tmp_path,
+            settings=settings,
+            session=AgentSession.create(settings, profile_scope=settings.resolve_profile_scope()),
+        )
+        registry = ToolRegistry([cast(Any, BrowserSessionOpenResourceTool(service))])
+        result = await registry.dispatch(
+            "browser_session_open_resource", {"resource": "personal/main", "headless": False}, ctx
+        )
+        assert result.is_error
+        assert "background browser resources must use Ricky-owned headless Chrome" in result.content
+        assert not backend.options
+        assert not guard.reservations
+        assert not (tmp_path / "user").exists()
+    finally:
+        await service.aclose()
 
 
 async def test_background_persistent_open_enforces_restored_page_ceiling(

@@ -48,6 +48,7 @@ from ricky.agent.events import (
 )
 from ricky.agent.session import AgentSession, PermissionGrant
 from ricky.agent.workflow import ApprovalRequest, ApprovalResponse
+from ricky.browser.challenges import ChallengeResponse, ChallengeSource, LiveBrowserChallenge
 from ricky.config import RickySettings, user_data_path
 from ricky.interfaces.cli.input import CHAT_COMMANDS, CliInputSession
 from ricky.memory.types import MemoryLoadError
@@ -252,6 +253,36 @@ class CliRenderer:
         return await self.read_secret(
             f"Enter {request.label} for {request.ref.qualified} on {request.top_level_origin}: "
         )
+
+    async def request_browser_challenge(self, owner: LiveBrowserChallenge) -> None:
+        """Supply one local OTP to the shared browser owner without echoing it."""
+        record = owner.record
+        source = ChallengeSource(
+            principal_id="local-cli",
+            conversation_id=record.binding.owner_id,
+            prompt_message_id=record.id,
+        )
+        await owner.bind_source(source)
+        if record.kind == "manual":
+            answer = await self.read_line(
+                f"{record.binding.top_level_origin}: {record.instruction}\n"
+                "Complete the action in your browser/device, then type done (blank cancels): "
+            )
+            if answer.strip().lower() != "done":
+                await owner.finish("cancelled")
+                return
+            await owner.respond(ChallengeResponse(), source=source)
+            return
+        code = await self.read_secret(
+            f"{record.binding.top_level_origin} needs a verification code. "
+            f"{record.instruction}\n"
+            + (f"{owner.assistance_reason}\n" if owner.assistance_reason else "")
+            + "Code (blank cancels): "
+        )
+        if code is None:
+            await owner.finish("cancelled")
+            return
+        await owner.respond(ChallengeResponse(code=code), source=source)
 
     async def request_protected_destination(
         self, request: DestinationApprovalRequest

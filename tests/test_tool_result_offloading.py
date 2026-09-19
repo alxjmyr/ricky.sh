@@ -570,9 +570,13 @@ async def test_job_loop_uses_same_offload_projection_and_bounded_transcript(
     )
 
     assert run.outcome == "succeeded"
-    assert [tool.name for tool in provider.requests[0].tools] == ["read_file"]
+    assert [tool.name for tool in provider.requests[0].tools] == [
+        "read_file",
+        "report_task_outcome",
+    ]
     assert [tool.name for tool in provider.requests[1].tools] == [
         "read_file",
+        "report_task_outcome",
         "read_tool_artifact",
     ]
     result = next(

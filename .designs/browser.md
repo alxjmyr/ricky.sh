@@ -86,7 +86,17 @@ preference; Ricky derives its directory and never accepts an arbitrary Chrome pr
 resource contains an exact loopback HTTP endpoint with an explicit port. Endpoints and paths are
 local configuration and never model arguments or provider-facing output.
 
-Gateway browser selection uses only the issued profile scope. Its prompt catalog contains safe
+Foreground chat and gateway browser selection share the same resolver and use only the issued
+profile scope. Foreground discovery identifies the resolved primary-profile default, and the
+configured-resource open tool accepts an omitted name or a short name. It resolves to an exact
+qualified resource for permission review and opening. Ambiguity requires clarification; it never
+falls back to an ephemeral session. Foreground selection also permits headed and CDP resources.
+The foreground configured-resource tool accepts an optional `headless` override for persistent
+resources. Omission uses configuration; explicit visibility changes neither resource identity nor
+saved browser state. Fresh permission review displays the effective visibility. CDP attachment
+rejects visibility overrides, and background execution still enforces headless mode before launch.
+Workers continue to require exact contract-pinned identities, without implicit default selection.
+The gateway prompt catalog contains safe
 qualified names and descriptions for background-eligible persistent headless resources, never
 paths or CDP endpoints. Short names prefer an exact match in the primary profile, then a unique
 match elsewhere in the issued scope. A named but ineligible primary resource never silently falls
@@ -184,8 +194,9 @@ text, accessible names, attributes, and instructions are untrusted external cont
 Provider observations lead with compact actionable-control metadata, omitting default fields
 and redundant descriptors for static text. Full structured descriptors remain available to
 local consumers. Enrichment batches attribute reads and retains nonstandard editable targets
-without relying on an ARIA-role whitelist. A single dialog verified as modal may focus the snapshot on its
-subtree before truncation, preserving original refs and excluding the inert background.
+without relying on an ARIA-role whitelist. A locally verified modal may focus the snapshot on
+the visible dialog stack before truncation, preserving original refs and excluding the inert
+background. Alert and status subtrees remain visible, including messages outside the dialogs.
 Purchase amount and currency fields are ordinary inputs, while identifiable card and credential
 fields retain protected-fill requirements.
 
@@ -345,6 +356,66 @@ and remaining effect and financial budgets. It repeats those checks after approv
 reservation remains the final authority boundary. Before parking, the browser owner also checks
 remaining navigation, transaction, and worst-case page capacity without reserving an effect.
 An approval cannot restore exhausted capacity or revive a retired grant.
+
+Browser verification mailbox access is explicit installation policy under
+`browser.verification`. It names qualified Google accounts, filters them through
+the issued profile scope, and distinguishes interactive use from background
+delegation. Configured aliases expand only the recipient identities of that
+specific account. Connector-authenticated primary identity, recipient and server
+receipt time must match before a message becomes eligible; headers and body remain
+untrusted. The Gmail adapter performs bounded reads and no mail mutations.
+
+Executions with verification access pin a version-4 contract ceiling. Older
+version-2/3 contracts retain their original digest representation and acquire no
+verification access when configuration changes. Verification operations must
+remain inside this pinned ceiling and current owner policy; they do not grant
+general mailbox tools or modify an immutable execution in place. Resolution
+prefers an authorized automatic method, then uses the shared user-response path
+when the source is unavailable or cannot be identified safely.
+
+Browser challenges are browser-owned live occurrences shared by CLI chat and
+gateway-owned ad hoc executions. `browser_request_challenge` binds a recognized
+OTP control or manual-action indicator to the runtime owner, profile scope,
+resource revision, page generation, target, and exact HTTPS origins. It retains
+the live page while an injected interface responder obtains one response.
+Telegram responses require a confirmed prompt delivery receipt, the owning
+principal and conversation, and direct reply correlation. CLI responses use
+local input. Neither interface owns browser submission logic.
+
+The browser-owned versioned challenge store persists safe metadata and revisions
+under installation `browser.challenge_dir`; it never persists response codes or
+live handles. A pending durable record cannot reconstruct a resident response.
+Loss of the live owner prevents resumption; interruption after submission may
+have begun is `in_doubt`. Source-bound responses are claimed once and expire.
+Gateway waits share parked-browser capacity with approvals, retain heartbeat and
+execution claims, and pause active job time only within the cumulative configured
+challenge/approval wait ceiling. Reservation and release are joined on cancellation.
+
+An OTP response stays wrapped until the browser outbound boundary. Submitting it
+uses `browser_commit` activation `challenge`, an exact prepared occurrence and
+fresh review, because filling an OTP can auto-submit. Manual completion replies
+only request browser observation; disappearance of the challenge indicator is
+separate from proof of the task's business outcome. Optional mailbox retrieval
+uses only the issued verification ceiling; eligible message content may enter the
+ordinary agent loop when local extraction is insufficient. A model selects a
+token from that eligible message, never an arbitrary mailbox query or destination.
+Source claims persist message identity, not code material, and prevent reuse
+across tasks and restarts. Named jobs and workflows gain no browser scope.
+
+Semantic snapshots support a bounded, cancellable read-only wait before observation,
+shared by CLI and background runtimes. Waiting never refreshes, navigates, or replays
+an action. The resulting observation revalidates live ownership and execution authority
+and consumes the usual observation budget. It counts against active execution time.
+The agent interprets pending, rejected, verified, and completed states from fresh page
+evidence; the harness never equates disappearance of a challenge with transaction success.
+
+A performed browser commit consumes its exact approval and effect, transaction,
+and financial reservations, but leaves the task's remaining delegated authority
+active for verification and subsequent authorized work. Every later consequential
+occurrence requires fresh approval and remaining budget. No reservation is reset
+because verification is pending. An ambiguous browser mutation consumes the grant
+to prevent further delegated mutations; read-only inspection does not acquire
+authority to retry that effect.
 
 Dialog handling is fixed before the action that may create the dialog. Ordinary interaction
 dismisses unexpected dialogs. A commit may explicitly predeclare accept or dismiss, including

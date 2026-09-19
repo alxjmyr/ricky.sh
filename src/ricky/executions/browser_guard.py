@@ -400,6 +400,7 @@ class DurableBrowserExecutionGuard:
 
     def _check_mode(self, facts: BrowserGuardFacts) -> None:
         mutation_tools = {
+            "browser_request_challenge",
             "browser_click",
             "browser_fill",
             "browser_fill_protected",

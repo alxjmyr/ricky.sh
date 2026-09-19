@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
 
+from ricky.browser.verification import VerificationCeiling
 from ricky.capabilities.guardrails import CompiledGuardrail
 from ricky.capabilities.registry import skill_bundle_digest
 from ricky.capabilities.types import CapabilityResource
@@ -93,7 +94,7 @@ class ConfirmationRef(_FrozenModel):
 class ExecutionContract(_FrozenModel):
     """The exact immutable technical and authority ceiling for one request."""
 
-    version: Literal[2, 3] = 2
+    version: Literal[2, 3, 4] = 2
     id: str
     parent_request_id: str | None = Field(default=None, pattern=r"^execution_[0-9a-f]{32}$")
     task_id: str
@@ -114,6 +115,7 @@ class ExecutionContract(_FrozenModel):
     context_sources: tuple[ContextSourceContract, ...] = Field(max_length=20)
     budget: ExecutionBudget
     browser: BrowserExecutionScope | None = None
+    verification: VerificationCeiling | None = None
     guardrails: tuple[CompiledGuardrail, ...] = Field(max_length=20)
     confirmations: tuple[ConfirmationRef, ...] = Field(max_length=20)
     agent_policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -135,6 +137,16 @@ class ExecutionContract(_FrozenModel):
                 raise ValueError("contract expiry must follow creation")
         if self.version == 2 and self.browser is not None:
             raise ValueError("browser execution scopes require contract version 3")
+        if self.verification is not None:
+            if self.version < 4 or self.browser is None:
+                raise ValueError("verification access requires a version-4 browser contract")
+            if "browser_request_challenge" not in self.browser.allowed_tools:
+                raise ValueError("verification access requires the browser challenge tool")
+            if any(
+                source.account.profile not in self.profile_scope.profiles
+                for source in self.verification.sources
+            ):
+                raise ValueError("verification account is outside the execution profile scope")
         if self.browser is not None:
             selected_tools = {item.id for item in self.tools}
             if set(self.browser.allowed_tools) != selected_tools & set(self.browser.allowed_tools):
@@ -279,6 +291,8 @@ def contract_digest(contract: ExecutionContract | dict[str, object]) -> str:
     # not change merely because the version-3 field exists in the model.
     if payload.get("version") == 2 and payload.get("browser") is None:
         payload.pop("browser", None)
+    if payload.get("version", 2) in {2, 3} and payload.get("verification") is None:
+        payload.pop("verification", None)
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -289,7 +303,7 @@ def build_execution_contract(**values: Any) -> ExecutionContract:
     payload = TypeAdapter(dict[str, Any]).dump_python(values, mode="json")
     payload["digest"] = "0" * 64
     payload["digest"] = contract_digest(payload)
-    return ExecutionContract.model_validate(payload)
+    return ExecutionContract.model_validate_json(json.dumps(payload, allow_nan=False))
 
 
 def context_source_digest(kind: str, enabled: bool, config: dict[str, JsonValue]) -> str:

@@ -126,6 +126,9 @@ headless = false
 ephemeral_dir = "browser/ephemeral"
 persistent_dir = "browser/persistent"
 lease_dir = "browser/leases"
+challenge_dir = "browser/challenges"
+# Maximum time to retain a live browser while awaiting a verification response.
+challenge_timeout_seconds = 900
 download_dir = "downloads/browser"
 navigation_timeout_seconds = 30.0
 operation_timeout_seconds = 10.0
@@ -153,6 +156,20 @@ allowed_private_origins = []
 # execution still needs an exact contract, guardrail, authority grant, and (for
 # a commit) a live transaction approval. Background uploads accept only exact
 # digest-pinned durable-task artifacts. Named jobs can use only read access.
+[browser.verification]
+enabled = false
+allow_background = false
+gmail_accounts = [] # Qualified accounts, for example ["personal/main"]
+allowed_origins = [] # Optional exact HTTPS restriction; browser policy still applies
+poll_timeout_seconds = 30.0
+poll_interval_seconds = 2.0
+lookback_seconds = 120
+max_messages = 10
+# Recipient aliases belong to the owning profile's Google account configuration:
+# [google.accounts.main]
+# email = "owner@example.com"
+# verification_aliases = ["alias@example.com"]
+
 [browser.background]
 enabled = false
 read_enabled = false

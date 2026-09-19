@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Awaitable
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -243,6 +243,25 @@ class BackgroundBrowserApprovalCoordinator:
                         f"browser budget exhausted: {operation}; transaction was not "
                         "dispatched and approval cannot restore exhausted capacity"
                     )
+        await self.reserve_challenge()
+
+    @asynccontextmanager
+    async def park_challenge(self):
+        """Join reservation and release even when the waiting worker is cancelled."""
+        reservation = asyncio.create_task(self.reserve_challenge())
+        try:
+            await _join_on_cancel(reservation)
+            yield
+        finally:
+            if (
+                reservation.done()
+                and not reservation.cancelled()
+                and reservation.exception() is None
+            ):
+                await _join_on_cancel(self.release_park())
+
+    async def reserve_challenge(self) -> None:
+        """Share the live parked-browser ceiling with non-transaction verification waits."""
         await self.ledger.reserve_budget(
             self.context.attempt_id,
             "parked_browsers",
@@ -268,7 +287,9 @@ class BackgroundBrowserApprovalCoordinator:
             )
             raise
 
-    async def release_park(self, _approval: BrowserApprovalDraft | ParkedBrowserApproval) -> None:
+    async def release_park(
+        self, _approval: BrowserApprovalDraft | ParkedBrowserApproval | None = None
+    ) -> None:
         transition_error: BaseException | None = None
         try:
             await self.ledger.transition(

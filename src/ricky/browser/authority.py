@@ -166,10 +166,12 @@ class _BrowserAuthorityEvaluator:
 
     def consumes_grant(self, scope: AuthorityScope, receipt: EffectReceipt) -> bool:
         self._scope(scope)
-        return self.capability == "browser_commit" and receipt.disposition in {
-            "performed",
-            "in_doubt",
-        }
+        # Successful dispatch spends the occurrence's reservations, not the
+        # entire task's remaining authority. A checkout may still require
+        # verification or a final observation. Exact approval and transaction,
+        # effect, and financial ceilings independently constrain later commits.
+        # Any ambiguous browser mutation freezes further delegated mutations.
+        return receipt.disposition == "in_doubt"
 
     def _scope(self, scope: AuthorityScope) -> BrowserGuardrailConstraints:
         if (
@@ -191,8 +193,13 @@ class _BrowserAuthorityEvaluator:
 class BrowserInteractAuthorityEvaluator(_BrowserAuthorityEvaluator):
     capability: ClassVar[str] = "browser_interact"
     schema_id: ClassVar[str] = _SCHEMA[capability]
-    tools: ClassVar[frozenset[str]] = BROWSER_INTERACT_TOOLS - {"browser_session_open_resource"}
-    scope_only_tools: ClassVar[frozenset[str]] = frozenset({"browser_session_open_resource"})
+    scope_only_tools: ClassVar[frozenset[str]] = frozenset(
+        {
+            "browser_session_open_resource",
+            "browser_request_challenge",
+        }
+    )
+    tools: ClassVar[frozenset[str]] = BROWSER_INTERACT_TOOLS - scope_only_tools
 
 
 class ProtectedValueUseAuthorityEvaluator(_BrowserAuthorityEvaluator):

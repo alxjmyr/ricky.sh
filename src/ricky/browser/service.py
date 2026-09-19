@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import mimetypes
 import os
 import re
@@ -11,11 +12,15 @@ import shutil
 import stat
 import tempfile
 import uuid
-from contextlib import suppress
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable
+from contextlib import nullcontext, suppress
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Literal
 from urllib.parse import urlsplit
+
+from pydantic import SecretStr
 
 from ricky.attachments import BrowserDownloadRef, LoadedAttachment, browser_download_path
 from ricky.browser.backend import (
@@ -35,6 +40,15 @@ from ricky.browser.backend import (
     BrowserPageHandle,
     BrowserSessionHandle,
 )
+from ricky.browser.challenge_store import BrowserChallengeStore
+from ricky.browser.challenge_wait import ChallengeWaitBudget
+from ricky.browser.challenges import (
+    BrowserChallenge,
+    ChallengeBinding,
+    ChallengeError,
+    ChallengeResponse,
+    LiveBrowserChallenge,
+)
 from ricky.browser.chrome import browser_status
 from ricky.browser.lease import BrowserResourceLease
 from ricky.browser.playwright_backend import PlaywrightBrowserBackend
@@ -53,6 +67,7 @@ from ricky.browser.resources import (
     prepare_persistent_browser,
     require_browser_resource,
     resolve_browser_resources,
+    select_browser_resource,
 )
 from ricky.browser.runtime_guard import (
     BrowserBudgetKind,
@@ -96,6 +111,11 @@ from ricky.browser.types import (
     BrowserViewport,
     BrowserVisualCandidate,
     CoordinateFallbackEvidence,
+)
+from ricky.browser.verification_resolver import (
+    BrowserVerificationResolver,
+    VerificationAnswer,
+    VerificationResolution,
 )
 from ricky.browser.visual import ComposedVisual, compose_numbered_visual
 from ricky.config import (
@@ -253,6 +273,7 @@ class BrowserPreparedCommit:
     payment_sources: tuple[ProfileResourceRef, ...]
     protected_uses: tuple[BrowserProtectedUseBinding, ...] = ()
     attachments: tuple[BrowserAttachmentUseBinding, ...] = ()
+    challenge_code: SecretStr | None = None
 
     @property
     def financial_signal(self) -> bool:
@@ -315,12 +336,14 @@ class BrowserService:
         backend: BrowserBackend,
         executable_path: Path | None,
         runtime_guard: BrowserExecutionGuard | None = None,
+        challenge_wait: ChallengeWaitBudget | None = None,
     ) -> None:
         self._settings = settings
         self._scope = scope
         self._backend = backend
         self._executable_path = executable_path
         self._runtime_guard = runtime_guard
+        self._challenge_wait = challenge_wait
         allowed_private_origins = set(settings.browser.allowed_private_origins)
         if runtime_guard is not None:
             allowed_private_origins &= set(runtime_guard.private_origin_ceiling)
@@ -336,6 +359,316 @@ class BrowserService:
         self._registry_lock = asyncio.Lock()
         self._closed = False
         self._close_complete = False
+        self._challenges: dict[str, tuple[LiveBrowserChallenge, ChallengeResponse]] = {}
+        self._submitted_challenges: dict[str, LiveBrowserChallenge] = {}
+        self._interpreting_challenges: dict[
+            str, tuple[LiveBrowserChallenge, BrowserVerificationResolver]
+        ] = {}
+        self._challenge_store = BrowserChallengeStore(settings)
+        self._challenge_not_before: dict[tuple[str, str], datetime] = {}
+        self._challenge_resolvers: dict[str, BrowserVerificationResolver] = {}
+
+    async def request_challenge(
+        self,
+        target: BrowserActionTarget,
+        *,
+        instruction: str,
+        purpose: Literal["authentication", "transaction", "verification"],
+        responder: Callable[[LiveBrowserChallenge], Awaitable[None]] | None,
+        kind: Literal["otp", "manual"] = "otp",
+        resolver: BrowserVerificationResolver | None = None,
+        recipient: str | None = None,
+        account: str | None = None,
+    ) -> tuple[BrowserChallenge, VerificationResolution | None]:
+        """Retain the exact live page while asking the owning interface for an OTP."""
+
+        entry, page = await self._require_page(target.session_id, target.page_id)
+        async with entry.action_lock, page.lock:
+            self._ensure_session_active(entry)
+            await self._page_model(entry, page, state=await page.handle.state())
+            cached = self._cached_target(page, target)
+            if kind == "otp" and (cached.protected_kind != "one_time_code" or not cached.editable):
+                raise ChallengeError("select a recognized one-time verification code field")
+            await self._validate_transaction_origins(
+                canonical_origin(page.exact_url), cached.frame_origin
+            )
+            await self._check_guard(
+                self._guard_facts(
+                    "browser_request_challenge",
+                    entry=entry,
+                    page=page,
+                    target_frame_origin=cached.frame_origin,
+                )
+            )
+            if kind == "otp":
+                live_target = await page.handle.preflight_protected_target(cached)
+                if live_target != cached:
+                    raise ChallengeError("verification field changed; observe the page again")
+            for challenge_id, (pending, _) in tuple(self._challenges.items()):
+                if datetime.now(UTC) >= pending.record.expires_at:
+                    await pending.finish("expired")
+                    self._challenges.pop(challenge_id, None)
+            if self._challenges:
+                raise ChallengeError("this browser already owns a pending verification response")
+            for challenge_id, (pending, pending_resolver) in tuple(
+                self._interpreting_challenges.items()
+            ):
+                if datetime.now(UTC) >= pending.record.expires_at:
+                    await pending.finish("expired")
+                    pending_resolver.discard(challenge_id)
+                    self._interpreting_challenges.pop(challenge_id, None)
+            if self._interpreting_challenges:
+                raise ChallengeError(
+                    "interpret the pending verification message before requesting another"
+                )
+            timeout_seconds = float(self._settings.browser.challenge_timeout_seconds)
+            if self._challenge_wait is not None:
+                timeout_seconds = min(timeout_seconds, self._challenge_wait.remaining_seconds)
+            if timeout_seconds <= 0:
+                raise ChallengeError("browser challenge wait allowance exhausted")
+            now = datetime.now(UTC)
+            record = BrowserChallenge(
+                id=f"browser_challenge_{uuid.uuid4().hex}",
+                binding=self._challenge_binding(entry, page, cached, purpose),
+                kind=kind,
+                instruction=instruction,
+                created_at=now,
+                expires_at=now + timedelta(seconds=timeout_seconds),
+            )
+            await self._challenge_store.create(record, scope=self._scope)
+            owner = LiveBrowserChallenge(
+                record,
+                writer=lambda updated, revision: self._challenge_store.update(
+                    updated,
+                    revision,
+                    scope=self._scope,
+                ),
+            )
+            try:
+                async with (
+                    self._challenge_wait.waiting()
+                    if self._challenge_wait is not None
+                    else nullcontext()
+                ):
+                    async with asyncio.timeout(timeout_seconds):
+                        resolution = None
+                        if kind == "otp" and resolver is not None:
+                            resolution = await resolver.resolve(
+                                owner,
+                                recipient=recipient,
+                                account=account,
+                                not_before=self._challenge_not_before.get((entry.id, page.id)),
+                            )
+                            if resolution.state == "interpretation":
+                                self._interpreting_challenges[record.id] = (owner, resolver)
+                                return owner.record, resolution
+                        if resolution is None or resolution.state != "answered":
+                            if resolver is not None:
+                                resolver.discard(record.id)
+                            if kind == "otp":
+                                owner.assistance_reason = (
+                                    resolution.reason
+                                    if resolution is not None
+                                    else "Automatic email verification is unavailable; "
+                                    "this task needs an authorized account and verification policy."
+                                )
+                            if responder is None:
+                                raise ChallengeError(
+                                    resolution.reason
+                                    if resolution
+                                    else "This interface has no browser verification responder."
+                                )
+                            await responder(owner)
+                        response = await owner.wait()
+                await self._page_model(entry, page, state=await page.handle.state())
+                if kind == "manual":
+                    observed = await self._snapshot_locked(entry, page)
+                    still_present = any(
+                        item.name == cached.name
+                        and item.role == cached.role
+                        and item.control_kind == cached.control_kind
+                        and item.frame_origin == cached.frame_origin
+                        for item in observed.descriptors
+                    )
+                    await owner.finish(
+                        "blocked" if still_present or observed.character_truncated else "resolved"
+                    )
+                    return owner.record, None
+                refreshed = await page.handle.preflight_protected_target(cached)
+                if self._challenge_binding(entry, page, refreshed, purpose) != record.binding:
+                    raise ChallengeError("browser verification occurrence changed while waiting")
+                self._challenges[record.id] = (owner, response)
+                if (
+                    resolver is not None
+                    and resolution is not None
+                    and resolution.state == "answered"
+                ):
+                    self._challenge_resolvers[record.id] = resolver
+                return owner.record, resolution
+            except TimeoutError:
+                if resolver is not None:
+                    resolver.discard(record.id)
+                await owner.finish("expired")
+                raise ChallengeError("challenge expired; no response was submitted") from None
+            except BaseException:
+                if resolver is not None:
+                    resolver.discard(record.id)
+                await owner.finish("invalidated")
+                raise
+
+    async def answer_verification(
+        self,
+        target: BrowserActionTarget,
+        answer: VerificationAnswer,
+        *,
+        responder: Callable[[LiveBrowserChallenge], Awaitable[None]] | None = None,
+    ) -> BrowserChallenge:
+        pair = self._interpreting_challenges.get(answer.challenge_id)
+        if pair is None:
+            raise ChallengeError("verification interpretation is unavailable in this live browser")
+        owner, resolver = pair
+        if datetime.now(UTC) >= owner.record.expires_at:
+            await owner.finish("expired")
+            resolver.discard(answer.challenge_id)
+            self._interpreting_challenges.pop(answer.challenge_id, None)
+            raise ChallengeError("verification interpretation expired; request a fresh challenge")
+        entry, page = await self._require_page(target.session_id, target.page_id)
+        async with entry.action_lock, page.lock:
+            await self._page_model(entry, page, state=await page.handle.state())
+            cached = self._cached_target(page, target)
+            live = await page.handle.preflight_protected_target(cached)
+            if (
+                self._challenge_binding(entry, page, live, owner.record.binding.purpose)
+                != owner.record.binding
+            ):
+                await owner.finish("invalidated")
+                self._interpreting_challenges.pop(answer.challenge_id, None)
+                resolver.discard(answer.challenge_id)
+                raise ChallengeError("verification occurrence changed during interpretation")
+            await self._check_guard(
+                self._guard_facts(
+                    "browser_request_challenge",
+                    entry=entry,
+                    page=page,
+                    target_frame_origin=live.frame_origin,
+                )
+            )
+            if answer.token_index is None:
+                if responder is None:
+                    raise ChallengeError("This interface has no browser verification responder.")
+                resolver.discard(owner.record.id)
+                owner.assistance_reason = (
+                    "The verification email did not contain an identifiable code."
+                )
+                try:
+                    async with (
+                        self._challenge_wait.waiting()
+                        if self._challenge_wait is not None
+                        else nullcontext()
+                    ):
+                        async with asyncio.timeout(
+                            max(0, (owner.record.expires_at - datetime.now(UTC)).total_seconds())
+                        ):
+                            await responder(owner)
+                            response = await owner.wait()
+                    await self._page_model(entry, page, state=await page.handle.state())
+                    refreshed = await page.handle.preflight_protected_target(cached)
+                    if (
+                        self._challenge_binding(
+                            entry, page, refreshed, owner.record.binding.purpose
+                        )
+                        != owner.record.binding
+                    ):
+                        raise ChallengeError("verification occurrence changed while waiting")
+                except BaseException:
+                    await owner.finish("invalidated")
+                    self._interpreting_challenges.pop(answer.challenge_id, None)
+                    raise
+            else:
+                if not await resolver.answer(owner, answer):
+                    raise ChallengeError("verification email was already claimed by another task")
+                response = await owner.wait()
+                self._challenge_resolvers[owner.record.id] = resolver
+            self._challenges[owner.record.id] = (owner, response)
+            self._interpreting_challenges.pop(answer.challenge_id, None)
+            return owner.record
+
+    async def cancel_challenge(self, target: BrowserActionTarget, challenge_id: str) -> None:
+        """Discard a resident candidate before a separately authorized resend or replacement."""
+        pair = self._interpreting_challenges.get(challenge_id) or self._challenges.get(challenge_id)
+        if pair is None:
+            raise ChallengeError("challenge is not pending in this live browser")
+        owner = pair[0]
+        if (target.session_id, target.page_id) != (
+            owner.record.binding.session_id,
+            owner.record.binding.page_id,
+        ):
+            raise ChallengeError("challenge belongs to another browser page")
+        entry, page = await self._require_page(target.session_id, target.page_id)
+        async with entry.action_lock, page.lock:
+            await owner.finish("cancelled")
+            interpreted = self._interpreting_challenges.pop(challenge_id, None)
+            if interpreted is not None:
+                interpreted[1].discard(challenge_id)
+            self._challenges.pop(challenge_id, None)
+            self._challenge_resolvers.pop(challenge_id, None)
+            self._challenge_not_before[(entry.id, page.id)] = datetime.now(UTC)
+
+    async def _revalidate_challenge_source(self, challenge_id: str) -> None:
+        resolver = self._challenge_resolvers.get(challenge_id)
+        if resolver is None:
+            return
+        try:
+            await resolver.validate()
+        except BaseException:
+            pair = self._challenges.pop(challenge_id, None)
+            if pair is not None:
+                await pair[0].finish("invalidated")
+            self._challenge_resolvers.pop(challenge_id, None)
+            raise
+
+    def _challenge_binding(
+        self,
+        entry: _SessionEntry,
+        page: _PageEntry,
+        target: BackendTargetDescriptor,
+        purpose: Literal["authentication", "transaction", "verification"],
+    ) -> ChallengeBinding:
+        return ChallengeBinding(
+            owner_id=self._instance_id,
+            profile_scope=self._scope,
+            resource=entry.resource if entry.resource_configuration_digest is not None else None,
+            resource_configuration_digest=entry.resource_configuration_digest,
+            session_id=entry.id,
+            page_id=page.id,
+            page_generation=page.generation,
+            top_level_origin=canonical_origin(page.exact_url),
+            frame_origin=target.frame_origin or "",
+            occurrence_digest=hashlib.sha256(
+                json.dumps(asdict(target), sort_keys=True).encode()
+            ).hexdigest(),
+            purpose=purpose,
+        )
+
+    def _challenge_response(
+        self,
+        challenge_id: str,
+        entry: _SessionEntry,
+        page: _PageEntry,
+        target: BackendTargetDescriptor,
+    ) -> tuple[LiveBrowserChallenge, ChallengeResponse]:
+        pair = self._challenges.get(challenge_id)
+        if pair is None:
+            raise ChallengeError("verification response is unavailable in this live browser")
+        owner, _ = pair
+        binding = self._challenge_binding(entry, page, target, owner.record.binding.purpose)
+        if (
+            owner.record.state != "responded"
+            or binding != owner.record.binding
+            or datetime.now(UTC) >= owner.record.expires_at
+        ):
+            raise ChallengeError("verification response expired or its browser occurrence changed")
+        return pair
 
     @classmethod
     async def create(
@@ -345,6 +678,7 @@ class BrowserService:
         scope: ProfileScope,
         backend: BrowserBackend | None = None,
         runtime_guard: BrowserExecutionGuard | None = None,
+        challenge_wait: ChallengeWaitBudget | None = None,
     ) -> BrowserService:
         """Construct without starting Chrome or creating profile state."""
 
@@ -357,6 +691,7 @@ class BrowserService:
             backend=selected_backend,
             executable_path=executable,
             runtime_guard=runtime_guard,
+            challenge_wait=challenge_wait,
         )
 
     @property
@@ -478,7 +813,12 @@ class BrowserService:
         self._ensure_open()
         guard_facts = self._guard_facts("browser_resources")
         await self._check_guard(guard_facts)
+        try:
+            default = self.resource().resource
+        except BrowserError:
+            default = None
         result = BrowserResourceList(
+            default_resource=default,
             resources=tuple(
                 self._resource_model(resource)
                 for resource in resolve_browser_resources(self._settings, scope=self._scope)
@@ -487,10 +827,20 @@ class BrowserService:
         await self._record_guard(guard_facts, disposition="completed")
         return result
 
-    def resource(self, qualified: str) -> BrowserResource:
-        """Resolve one provider-safe resource synchronously for permission review."""
+    def resource(self, qualified: str | None = None) -> BrowserResource:
+        """Resolve foreground names/defaults before exact resource permission review."""
 
-        return self._resource_model(self._require_resource(qualified))
+        self._ensure_open()
+        if self._runtime_guard is not None:
+            # Workers use contract-pinned identities, never implicit defaults.
+            return self._resource_model(self._require_resource(qualified or ""))
+        try:
+            resolved = select_browser_resource(self._settings, scope=self._scope, name=qualified)
+        except ValueError as exc:
+            raise BrowserError(
+                BrowserFailure(code="unknown_resource", message=str(exc))
+            ) from exc
+        return self._resource_model(resolved)
 
     async def open_resource(
         self,
@@ -743,12 +1093,32 @@ class BrowserService:
         except asyncio.CancelledError:
             await close_task
             raise
+        await self._invalidate_session_challenges(session_id)
         async with self._registry_lock:
             if self._sessions.get(session_id) is entry:
                 self._sessions.pop(session_id)
         result = BrowserSessionClosed(session_id=session_id)
         await self._record_guard(guard_facts, disposition="completed")
         return result
+
+    async def _invalidate_session_challenges(self, session_id: str) -> None:
+        for challenge_id, (owner, resolver) in tuple(self._interpreting_challenges.items()):
+            if owner.record.binding.session_id == session_id:
+                await owner.finish("invalidated")
+                resolver.discard(challenge_id)
+                self._interpreting_challenges.pop(challenge_id, None)
+        for challenge_id, (owner, _) in tuple(self._challenges.items()):
+            if owner.record.binding.session_id == session_id:
+                await owner.finish("invalidated")
+                self._challenges.pop(challenge_id, None)
+                self._challenge_resolvers.pop(challenge_id, None)
+        for challenge_id, owner in tuple(self._submitted_challenges.items()):
+            if owner.record.binding.session_id == session_id:
+                await owner.finish("invalidated")
+                self._submitted_challenges.pop(challenge_id, None)
+        for key in tuple(self._challenge_not_before):
+            if key[0] == session_id:
+                self._challenge_not_before.pop(key, None)
 
     async def pages(self, session_id: str) -> BrowserPageList:
         entry = self._require_session(session_id)
@@ -895,10 +1265,30 @@ class BrowserService:
         session_id: str,
         *,
         page_id: str | None,
+        wait_seconds: float = 0,
     ) -> BrowserSnapshot:
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError("browser observation wait must be between 0 and 30 seconds")
         entry, page = await self._require_page(session_id, page_id)
         async with page.lock:
-            return await self._snapshot_locked(entry, page)
+            if wait_seconds:
+                # Waiting is observation, never a reload or an effect retry. The
+                # subsequent snapshot revalidates the owner and execution guard.
+                await asyncio.sleep(wait_seconds)
+            snapshot = await self._snapshot_locked(entry, page)
+            for challenge_id, owner in tuple(self._submitted_challenges.items()):
+                if (
+                    owner.record.binding.page_id == page.id
+                    and not snapshot.character_truncated
+                    and not any(
+                        item.protected_kind == "one_time_code" for item in snapshot.descriptors
+                    )
+                ):
+                    # Resolution means the observed code challenge is gone, not
+                    # that an account login or financial task succeeded.
+                    await owner.finish("resolved")
+                    self._submitted_challenges.pop(challenge_id, None)
+            return snapshot
 
     def screenshot_source_owner(self, session_id: str) -> ProfileName:
         """Return the already-authorized browser resource owner for screenshot policy."""
@@ -1111,6 +1501,11 @@ class BrowserService:
             cached = self._cached_target(page, target)
             if failure := self._validate_action(cached, request):
                 raise BrowserError(failure)
+            challenge_code = None
+            if request.challenge_id is not None:
+                await self._revalidate_challenge_source(request.challenge_id)
+                _, response = self._challenge_response(request.challenge_id, entry, page, cached)
+                challenge_code = response.code
             context = self.action_context(target)
             await self._validate_transaction_origins(
                 context.origin,
@@ -1183,6 +1578,7 @@ class BrowserService:
                 payment_sources=self._current_payment_sources(page),
                 protected_uses=self._current_protected_uses(page),
                 attachments=self._current_attachments(page),
+                challenge_code=challenge_code,
             )
 
     async def commit_prepared(
@@ -1198,15 +1594,53 @@ class BrowserService:
             envelope_sha256=transaction.envelope_sha256,
         ):
             raise ValueError("transaction evidence does not match the prepared browser commit")
-        return await self.action(
-            prepared.target,
-            prepared.request,
-            expected_preflight=prepared.preflight,
-            expected_payment_sources=prepared.payment_sources,
-            expected_protected_uses=prepared.protected_uses,
-            expected_attachments=prepared.attachments,
-            transaction=transaction,
-        )
+        owner = None
+        if prepared.request.challenge_id is not None:
+            await self._revalidate_challenge_source(prepared.request.challenge_id)
+            entry, page = await self._require_page(
+                prepared.target.session_id, prepared.target.page_id
+            )
+            owner, response = self._challenge_response(
+                prepared.request.challenge_id,
+                entry,
+                page,
+                prepared.preflight.target,
+            )
+            if response.code is not prepared.challenge_code:
+                raise ChallengeError(
+                    "prepared verification response no longer belongs to this challenge"
+                )
+            await owner.begin_submission(owner.record.binding)
+        try:
+            result = await self.action(
+                prepared.target,
+                prepared.request,
+                expected_preflight=prepared.preflight,
+                expected_payment_sources=prepared.payment_sources,
+                expected_protected_uses=prepared.protected_uses,
+                expected_attachments=prepared.attachments,
+                transaction=transaction,
+                challenge_code=prepared.challenge_code,
+            )
+            if owner is not None:
+                await owner.finish(
+                    "submitted"
+                    if result.disposition == "performed"
+                    else "blocked"
+                    if result.disposition == "not_performed"
+                    else "in_doubt"
+                )
+                if result.disposition == "performed":
+                    self._submitted_challenges[owner.record.id] = owner
+            return result
+        except BaseException:
+            if owner is not None:
+                await owner.finish("in_doubt")
+            raise
+        finally:
+            if prepared.request.challenge_id is not None:
+                self._challenges.pop(prepared.request.challenge_id, None)
+                self._challenge_resolvers.pop(prepared.request.challenge_id, None)
 
     async def revalidate_prepared_commit(
         self,
@@ -2624,8 +3058,12 @@ class BrowserService:
         expected_protected_uses: tuple[BrowserProtectedUseBinding, ...] | None = None,
         expected_attachments: tuple[BrowserAttachmentUseBinding, ...] | None = None,
         transaction: BrowserTransactionEvidence | None = None,
+        challenge_code: SecretStr | None = None,
     ) -> BrowserActionResult:
         """Validate and dispatch one browser action without automatic replay."""
+
+        if (challenge_code is not None) != (request.activation == "challenge"):
+            raise ValueError("challenge submission requires its resident response")
 
         if request.kind == "commit":
             if transaction is None or expected_preflight is None:
@@ -2826,6 +3264,7 @@ class BrowserService:
                 action=request,
                 target=cached,
                 expected_preflight=expected_preflight or preflight,
+                challenge_code=challenge_code,
             )
             guard_facts = self._guard_facts(
                 _ACTION_TO_TOOL[request.kind],
@@ -3199,6 +3638,27 @@ class BrowserService:
 
         async def cleanup() -> None:
             failure: Exception | None = None
+            for owner, resolver in self._interpreting_challenges.values():
+                try:
+                    await owner.finish("invalidated")
+                    resolver.discard(owner.record.id)
+                except Exception as exc:
+                    failure = failure or exc
+            self._interpreting_challenges.clear()
+            for owner, _ in self._challenges.values():
+                try:
+                    await owner.finish("invalidated")
+                except Exception as exc:
+                    failure = failure or exc
+            self._challenges.clear()
+            self._challenge_resolvers.clear()
+            self._challenge_not_before.clear()
+            for owner in self._submitted_challenges.values():
+                try:
+                    await owner.finish("invalidated")
+                except Exception as exc:
+                    failure = failure or exc
+            self._submitted_challenges.clear()
             for entry in reversed(entries):
                 try:
                     await self._close_entry_when_idle(entry)
@@ -3365,6 +3825,63 @@ class BrowserService:
         )
 
     async def _check_guard(self, facts: BrowserGuardFacts) -> None:
+        for challenge_id, (owner, _) in tuple(self._challenges.items()):
+            if datetime.now(UTC) >= owner.record.expires_at:
+                await owner.finish("expired")
+                self._challenges.pop(challenge_id, None)
+                self._challenge_resolvers.pop(challenge_id, None)
+                self._challenge_not_before[
+                    (owner.record.binding.session_id, owner.record.binding.page_id)
+                ] = datetime.now(UTC)
+                if (
+                    facts.session_id == owner.record.binding.session_id
+                    and facts.tool_name == "browser_commit"
+                ):
+                    raise BrowserError(
+                        BrowserFailure(
+                            code="protected_field",
+                            message="Verification response expired before dispatch.",
+                        )
+                    )
+                continue
+            if facts.session_id == owner.record.binding.session_id and facts.tool_name not in {
+                "browser_request_challenge",
+                "browser_resources",
+                "browser_pages",
+                "browser_snapshot",
+                "browser_visual_snapshot",
+                "browser_session_close",
+                "browser_commit",
+            }:
+                raise BrowserError(
+                    BrowserFailure(
+                        code="resource_busy",
+                        message="Submit or cancel the pending code before changing this browser.",
+                    )
+                )
+        for challenge_id, (owner, resolver) in tuple(self._interpreting_challenges.items()):
+            if datetime.now(UTC) >= owner.record.expires_at:
+                await owner.finish("expired")
+                resolver.discard(challenge_id)
+                self._interpreting_challenges.pop(challenge_id, None)
+                self._challenge_not_before[
+                    (owner.record.binding.session_id, owner.record.binding.page_id)
+                ] = datetime.now(UTC)
+                continue
+            if facts.session_id == owner.record.binding.session_id and facts.tool_name not in {
+                "browser_request_challenge",
+                "browser_resources",
+                "browser_pages",
+                "browser_snapshot",
+                "browser_visual_snapshot",
+                "browser_session_close",
+            }:
+                raise BrowserError(
+                    BrowserFailure(
+                        code="resource_busy",
+                        message="Resolve the verification message before changing this browser.",
+                    )
+                )
         if self._runtime_guard is not None:
             await self._runtime_guard.check(facts)
 
@@ -3966,6 +4483,15 @@ class BrowserService:
         target: BackendTargetDescriptor,
         request: BrowserActionRequest,
     ) -> BrowserFailure | None:
+        if request.activation == "challenge" and (
+            request.kind != "commit"
+            or not target.editable
+            or target.protected_kind != "one_time_code"
+        ):
+            return BrowserFailure(
+                code="incompatible_target",
+                message="challenge submission requires a one-time code field",
+            )
         if target.file:
             return BrowserFailure(
                 code="file_control",

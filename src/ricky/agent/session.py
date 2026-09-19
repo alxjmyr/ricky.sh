@@ -297,7 +297,7 @@ class AgentSession(BaseModel):
                 "profile_definitions": profile_definitions,
                 "profile_data_roots": profile_data_roots,
                 "google_accounts": {
-                    name: account.model_dump(mode="json")
+                    name: account.model_dump(mode="json", exclude={"verification_aliases"})
                     for name, account in runtime_settings.google.accounts.items()
                 },
             },

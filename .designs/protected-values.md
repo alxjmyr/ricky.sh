@@ -16,6 +16,15 @@ arguments or results, ordinary context, session history, events, logs, traces, a
 permission summaries, effect identities, or audit records. Authenticated encryption separately
 protects copied durable storage while locked.
 
+Short-lived browser challenge OTPs supplied through ordinary chat or retrieved
+from explicitly authorized verification accounts are separate from vault material.
+Eligible verification-message content may enter the ordinary agent loop for
+interpretation. These OTPs may pass through normal Telegram inbox,
+session history, and configured provider handling. The browser challenge owner
+keeps its own durable records free of code values and uses `SecretStr` at local
+dispatch. This exception provides no reveal path for vault values, passwords,
+payment credentials, authenticator seeds, recovery codes, or session tokens.
+
 The boundary does not claim to protect values after an approved destination receives them, or
 against a compromised local account, OS, browser, approved destination, or authorized Ricky
 process after unlock. Python cannot guarantee process-memory zeroization. Implementations minimize

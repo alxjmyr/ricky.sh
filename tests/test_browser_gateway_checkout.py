@@ -212,8 +212,18 @@ class CheckoutWorker(AdHocProvider):
                 {4: "browser_click", 6: "browser_fill", 8: "browser_commit"}[self.step],
                 args,
             )
-        else:
+        elif self.step == 10:
             assert "26.42" in results[-1]
+            yield _tool(
+                "outcome",
+                "report_task_outcome",
+                {
+                    "status": "completed",
+                    "summary": "Credit purchase completed.",
+                    "evidence": ["The resulting page shows credit balance $26.42."],
+                },
+            )
+        else:
             yield _answer("Starting balance: $6.42. Charged: $21.60. Ending balance: $26.42.")
 
 

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from PIL import Image
@@ -82,6 +82,8 @@ from ricky.browser.types import (
     BrowserViewport,
     BrowserVisualCandidate,
 )
+from ricky.browser.verification import VerificationCeiling, VerificationSource
+from ricky.browser.verification_resolver import BrowserVerificationResolver
 from ricky.config import RickySettings
 from ricky.llm import ToolCallPart
 from ricky.media import SessionMediaStore
@@ -133,7 +135,8 @@ class FakeToolService:
         self._check()
         return BrowserResourceList(resources=(self.resource("personal/main"),))
 
-    def resource(self, qualified: str) -> BrowserResource:
+    def resource(self, qualified: str | None = None) -> BrowserResource:
+        qualified = qualified or "personal/main"
         return BrowserResource(
             resource=ProfileResourceRef.from_qualified(qualified),
             kind="persistent",
@@ -143,14 +146,16 @@ class FakeToolService:
             process_owned=True,
         )
 
-    async def open_resource(self, qualified: str) -> BrowserSession:
+    async def open_resource(
+        self, qualified: str, *, headless: bool | None = None
+    ) -> BrowserSession:
         self.calls.append(("open_resource", qualified))
         self._check()
         return BrowserSession(
             session_id=SESSION_ID,
             resource=ProfileResourceRef.from_qualified(qualified),
             mode="owned_persistent",
-            headless=False,
+            headless=False if headless is None else headless,
             process_owned=True,
             selected_page_id=PAGE_ID,
             pages=(_page(),),
@@ -206,7 +211,9 @@ class FakeToolService:
         self._check()
         return BrowserScroll(page=_page(), direction=direction, amount=amount)  # type: ignore[arg-type]
 
-    async def snapshot(self, session_id: str, *, page_id: str | None) -> BrowserSnapshot:
+    async def snapshot(
+        self, session_id: str, *, page_id: str | None, wait_seconds: float = 0
+    ) -> BrowserSnapshot:
         self.calls.append(("snapshot", (session_id, page_id)))
         self._check()
         target = BrowserTarget(
@@ -472,6 +479,32 @@ def _ctx(tmp_path: Path) -> ToolContext:
     )
 
 
+async def test_browser_resources_with_verification_passes_registry_contract(tmp_path: Path) -> None:
+    source = VerificationSource(
+        account=ProfileResourceRef(profile="personal", name="mail"),
+        primary_email="owner@example.com",
+        recipients=("owner@example.com", "alias@example.com"),
+    )
+    resolver = Mock(spec=BrowserVerificationResolver)
+    resolver.ceiling = VerificationCeiling(
+        sources=(source,),
+        poll_timeout_seconds=10,
+        poll_interval_seconds=1,
+        lookback_seconds=60,
+        max_messages=5,
+        policy_digest="a" * 64,
+    )
+    tool = BrowserResourcesTool(FakeToolService(), resolver)  # type: ignore[arg-type]
+
+    result = await assert_tool_contract(cast(Any, tool), valid_args={}, ctx=_ctx(tmp_path))
+
+    assert not result.is_error
+    assert isinstance(result.data, dict)
+    assert result.data["verification_sources"] == [source.model_dump(mode="json")]
+    assert result.data["resources"]
+    assert source.recipients == ("owner@example.com", "alias@example.com")
+
+
 @pytest.mark.parametrize(
     ("tool_type", "valid_args"),
     [
@@ -509,7 +542,7 @@ async def test_each_browser_tool_passes_the_reusable_contract(
     assert tool.unattended == "allowed"
 
 
-def test_browser_toolset_has_the_exact_phase_four_surface() -> None:
+def test_browser_toolset_has_the_exact_current_surface() -> None:
     names = [tool.name for tool in browser_tools(FakeToolService())]  # type: ignore[arg-type]
 
     assert names == [
@@ -525,6 +558,7 @@ def test_browser_toolset_has_the_exact_phase_four_surface() -> None:
         "browser_visual_snapshot",
         "browser_click",
         "browser_fill",
+        "browser_request_challenge",
         "browser_select",
         "browser_set_checked",
         "browser_press_key",
@@ -1422,17 +1456,24 @@ async def test_page_listing_keeps_page_controlled_url_and_title_untrusted(
     assert '"origin": "https://example.com"' in trusted
 
 
-async def test_browser_error_is_bounded_structured_and_not_retried(tmp_path: Path) -> None:
+@pytest.mark.parametrize("resource_listing", [False, True])
+async def test_browser_error_is_bounded_structured_and_not_retried(
+    tmp_path: Path, resource_listing: bool
+) -> None:
     service = FakeToolService()
     service.failure = BrowserFailure(
         code="destination_blocked",
         message="destination is blocked by browser policy",
     )
-    registry = ToolRegistry([BrowserNavigateTool(service)])  # type: ignore[arg-type]
+    registry = ToolRegistry(
+        [
+            BrowserResourcesTool(service) if resource_listing else BrowserNavigateTool(service)  # type: ignore[arg-type]
+        ]
+    )
 
     result = await registry.dispatch(
-        "browser_navigate",
-        {"session_id": SESSION_ID, "url": "http://127.0.0.1/private"},
+        "browser_resources" if resource_listing else "browser_navigate",
+        {} if resource_listing else {"session_id": SESSION_ID, "url": "http://127.0.0.1/private"},
         _ctx(tmp_path),
     )
 

@@ -113,6 +113,12 @@ inherit this gateway-specific delivery dependency.
 
 ## Deterministic runtime rejections
 
+Job runners also expose `report_task_outcome` as a run-local reporting operation.
+It assesses the requested result separately from action receipts. The report adds
+no capabilities or effect authority and is invalidated by later tool requests.
+Normal transcript and run persistence own its audit; the tool writes no durable
+state itself. Completed model assessments never override unresolved effect evidence.
+
 A tool or state guard may attach `ToolRuntimeFailure` to an error result only
 when it has rejected the call before mutation or external dispatch. The typed
 `state_conflict` classification carries a safe fingerprint of the observed

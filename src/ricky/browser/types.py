@@ -406,6 +406,7 @@ class BrowserResource(BrowserModel):
 
 class BrowserResourceList(BrowserModel):
     resources: tuple[BrowserResource, ...] = Field(default=(), max_length=100)
+    default_resource: ProfileResourceRef | None = None
 
 
 class BrowserResourceReset(BrowserModel):
@@ -563,7 +564,7 @@ BrowserKey = Literal[
     "Backspace",
     "Delete",
 ]
-BrowserCommitActivation = Literal["click", "enter", "space"]
+BrowserCommitActivation = Literal["click", "enter", "space", "challenge"]
 BrowserDialogResponse = Literal["dismiss", "accept"]
 
 
@@ -589,10 +590,15 @@ class BrowserActionRequest(BrowserModel):
     checked: bool | None = None
     key: BrowserKey | None = None
     activation: BrowserCommitActivation | None = None
+    challenge_id: str | None = Field(default=None, pattern=r"^browser_challenge_[0-9a-f]{32}$")
     dialog: BrowserDialogPolicy = Field(default_factory=BrowserDialogPolicy)
 
     @model_validator(mode="after")
     def _validate_action_payload(self) -> BrowserActionRequest:
+        if (self.challenge_id is not None) != (self.activation == "challenge"):
+            raise ValueError("challenge activation requires its exact challenge identity")
+        if self.challenge_id is not None and self.kind != "commit":
+            raise ValueError("challenge submission requires a reviewed commit")
         if self.kind == "protected_fill":
             raise ValueError("protected fills require the dedicated in-process request")
         supplied = {

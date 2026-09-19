@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ricky.authority.upgrade import AuthorityUpgradeAdapter
+from ricky.browser.challenge_upgrade import BrowserChallengesUpgradeAdapter
 from ricky.config import load_settings_at
 from ricky.durable_tasks.upgrade import DurableTasksUpgradeAdapter
 from ricky.executions.upgrade import ExecutionsUpgradeAdapter
@@ -77,6 +78,7 @@ def build_upgrade_registry(
     return UpgradeRegistry(
         (
             AuthorityUpgradeAdapter((_configured(root, settings.authority.store_path),)),
+            BrowserChallengesUpgradeAdapter(_configured(root, settings.browser.challenge_dir)),
             ConfigurationUpgradeAdapter(user_data_dir=root, profile_roots=profiles),
             DurableTasksUpgradeAdapter(durable_task_paths),
             ExecutionContractsUpgradeAdapter(

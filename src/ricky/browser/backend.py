@@ -201,12 +201,15 @@ class BackendActionRequest:
     action: BrowserActionRequest
     target: BackendTargetDescriptor
     expected_preflight: BackendActionPreflight | None = None
+    challenge_code: SecretStr | None = None
 
     def __post_init__(self) -> None:
         if re.fullmatch(r"browser_action_[0-9a-f]{32}", self.action_id) is None:
             raise ValueError("backend action id must be opaque")
         if self.expected_preflight is not None and self.expected_preflight.target != self.target:
             raise ValueError("backend expected preflight must describe the request target")
+        if self.challenge_code is not None and self.action.activation != "challenge":
+            raise ValueError("challenge code requires a challenge commit")
 
 
 @dataclass(frozen=True, repr=False)
