@@ -133,6 +133,8 @@ class UpgradeCoordinator:
         operation_id: str | None = None,
         software: UpgradeSoftwareBinding | None = None,
         managed: UpgradeManagedBinding | None = None,
+        target_plan: MigrationPlan | None = None,
+        target_preflights: tuple[AdapterPreflight, ...] | None = None,
     ) -> UpgradeJournal:
         """Freeze the exact plan before gating the installation as prepared."""
 
@@ -147,12 +149,28 @@ class UpgradeCoordinator:
             or software.target_release.software_version != target_software_version
         ):
             raise UpgradeCoordinatorError("cached release pair does not match upgrade endpoints")
-        plan = self._registry.build_plan(
-            source_data_generation=manifest.data_generation,
-            target_data_generation=target_data_generation,
-        )
-        preflights = self._registry.preflight(user_data_dir=self._root)
-        backup_targets = _backup_targets_for_plan(plan, preflights, managed=managed)
+        if (target_plan is None) != (target_preflights is None):
+            raise UpgradeCoordinatorError("target plan and preflights must be supplied together")
+        if target_plan is None:
+            plan = self._registry.build_plan(
+                source_data_generation=manifest.data_generation,
+                target_data_generation=target_data_generation,
+            )
+            preflights = self._registry.preflight(user_data_dir=self._root)
+        else:
+            plan = target_plan
+            assert target_preflights is not None
+            preflights = target_preflights
+        if (
+            plan.source_data_generation != manifest.data_generation
+            or plan.target_data_generation != target_data_generation
+        ):
+            raise UpgradeCoordinatorError("target migration plan generations do not match")
+        for preflight in preflights:
+            for rendered in (preflight.target.physical_path, *preflight.backup_paths):
+                if not Path(rendered).is_relative_to(self._root):
+                    raise UpgradeCoordinatorError("target migration plan escapes user_data_dir")
+        backup_targets = backup_targets_for_plan(plan, preflights, managed=managed)
         selected_operation = operation_id or uuid4().hex
         backup_manifest = (
             backup_directory(self._root, selected_operation) / BACKUP_MANIFEST_FILENAME
@@ -493,22 +511,20 @@ class UpgradeCoordinator:
         for inspection in self._registry.inspect(user_data_dir=self._root):
             if inspection.state not in {"absent", "current"}:
                 raise UpgradeCoordinatorError(
-                    f"whole-installation verification failed for {inspection.target.adapter_id}"
+                    f"whole-installation verification failed for {inspection.target.adapter_id} "
+                    f"at {inspection.target.path}: found schema "
+                    f"{inspection.found_schema_version}, required "
+                    f"{inspection.target_schema_version}; {inspection.detail}"
                 )
 
     def _verify_source(self, journal: UpgradeJournal) -> None:
         for step in journal.ordered_steps:
             inspection = self._registry.inspect_step(step, user_data_dir=self._root)
-            if step.source_schema_version == step.target_schema_version:
-                valid = (
-                    inspection.state == "current"
-                    and inspection.found_schema_version == step.source_schema_version
-                )
-            else:
-                valid = (
-                    inspection.state == "migration_required"
-                    and inspection.found_schema_version == step.source_schema_version
-                )
+            valid = (
+                inspection.state in {"current", "migration_required"}
+                and inspection.integrity_valid
+                and inspection.found_schema_version == step.source_schema_version
+            )
             if not valid:
                 raise UpgradeCoordinatorError(
                     f"restored source verification failed for {step.adapter_id}:{step.step_id}"
@@ -671,7 +687,7 @@ class UpgradeCoordinator:
         )
 
 
-def _backup_targets_for_plan(
+def backup_targets_for_plan(
     plan: MigrationPlan,
     preflights: tuple[AdapterPreflight, ...],
     *,
@@ -680,8 +696,15 @@ def _backup_targets_for_plan(
     """Bind each mutable physical step target exactly once before preparation."""
 
     kinds_by_path: dict[str, str] = {}
+    identities: set[tuple[str, str, str]] = set()
+    backup_paths: dict[tuple[str, str, str], tuple[str, ...]] = {}
     for preflight in preflights:
         physical = preflight.target.physical_path
+        identity = (preflight.target.adapter_id, preflight.target.target_id, physical)
+        if identity in identities:
+            raise UpgradeCoordinatorError("duplicate migration preflight target")
+        identities.add(identity)
+        backup_paths[identity] = preflight.backup_paths
         observed = kinds_by_path.setdefault(physical, preflight.target.kind)
         if observed != preflight.target.kind:
             raise UpgradeCoordinatorError("co-located upgrade owners disagree on target kind")
@@ -689,6 +712,14 @@ def _backup_targets_for_plan(
     for step in plan.steps:
         if step.physical_path is None:
             raise UpgradeCoordinatorError("migration step has no physical backup target")
+        if (step.adapter_id, step.target_id, step.physical_path) not in identities:
+            raise UpgradeCoordinatorError("migration step has no matching owner preflight")
+        if backup_paths[(step.adapter_id, step.target_id, step.physical_path)] != (
+            step.physical_path,
+        ):
+            raise UpgradeCoordinatorError(
+                "migration preflight must declare exactly its physical backup target"
+            )
         kind = kinds_by_path.get(step.physical_path)
         if kind not in {"sqlite", "file", "tree"}:
             raise UpgradeCoordinatorError("migration step has no backup-capable preflight target")
@@ -711,3 +742,19 @@ def _backup_targets_for_plan(
                     )
                 targets[rendered] = BackupTarget(source_path=rendered, kind="file")
     return tuple(targets[path] for path in sorted(targets))
+
+
+def estimate_backup_bytes(
+    plan: MigrationPlan,
+    preflights: tuple[AdapterPreflight, ...],
+    *,
+    managed: UpgradeManagedBinding | None = None,
+) -> int:
+    """Estimate precisely the selected physical targets, counting shared stores once."""
+
+    selected = backup_targets_for_plan(plan, preflights, managed=managed)
+    estimates: dict[str, int] = {}
+    for preflight in preflights:
+        path = preflight.target.physical_path
+        estimates[path] = max(estimates.get(path, 0), preflight.estimated_backup_bytes)
+    return sum(estimates.get(target.source_path, 0) for target in selected)

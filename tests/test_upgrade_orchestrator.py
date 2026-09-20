@@ -23,8 +23,14 @@ from ricky.upgrades.journal import (
     UpgradeManagedBinding,
     load_upgrade_journal,
 )
+from ricky.upgrades.models import AdapterInspection, MigrationPlan, MigrationStep
 from ricky.upgrades.non_sql import SchedulesUpgradeAdapter
-from ricky.upgrades.orchestrator import UpgradeCoordinator, UpgradeCoordinatorError
+from ricky.upgrades.orchestrator import (
+    UpgradeCoordinator,
+    UpgradeCoordinatorError,
+    backup_targets_for_plan,
+    estimate_backup_bytes,
+)
 from ricky.upgrades.registry import UpgradeRegistry
 from ricky.upgrades.versions import ReleaseVersion
 
@@ -32,6 +38,114 @@ OPERATION_ID = "f" * 32
 PRIOR_OPERATION_ID = "a" * 32
 SOURCE_VERSION = ReleaseVersion.parse("0.6.0")
 TARGET_VERSION = ReleaseVersion.parse("0.7.0")
+
+
+def test_prepare_uses_target_plan_without_source_schema_knowledge(tmp_path: Path) -> None:
+    root, database, target_registry = _old_installation(tmp_path)
+    plan = target_registry.build_plan(source_data_generation=1, target_data_generation=1)
+    preflights = target_registry.preflight(user_data_dir=root)
+    with installation_operation_lock(mode="exclusive", timeout_seconds=1, operation="test") as lock:
+        journal = UpgradeCoordinator(
+            user_data_dir=root,
+            lock=lock,
+            registry=UpgradeRegistry(),
+            software=_Software(),
+        ).prepare(
+            target_software_version=TARGET_VERSION,
+            target_data_generation=1,
+            target_plan=plan,
+            target_preflights=preflights,
+        )
+    assert journal.ordered_steps == plan.steps
+    assert journal.backup_targets == (BackupTarget(source_path=str(database), kind="sqlite"),)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ["generation", "missing_owner", "outside_root", "unpaired", "extra_backup", "missing_backup"],
+)
+def test_prepare_rejects_invalid_target_payload_before_gating(tmp_path: Path, invalid: str) -> None:
+    root, _database, target_registry = _old_installation(tmp_path)
+    plan = target_registry.build_plan(source_data_generation=1, target_data_generation=1)
+    preflights = target_registry.preflight(user_data_dir=root)
+    if invalid == "generation":
+        plan = MigrationPlan.create(
+            source_data_generation=2, target_data_generation=1, steps=plan.steps
+        )
+    elif invalid == "missing_owner":
+        preflights = ()
+    elif invalid == "outside_root":
+        outside = str((tmp_path / "outside.sqlite3").resolve())
+        preflights = (preflights[0].model_copy(update={"backup_paths": (outside,)}),)
+    elif invalid in {"extra_backup", "missing_backup"}:
+        paths = (
+            tuple(sorted((*preflights[0].backup_paths, str(root / "auxiliary.json"))))
+            if invalid == "extra_backup"
+            else ()
+        )
+        preflights = (preflights[0].model_copy(update={"backup_paths": paths}),)
+    with (
+        installation_operation_lock(mode="exclusive", timeout_seconds=1, operation="test") as lock,
+        pytest.raises(UpgradeCoordinatorError),
+    ):
+        UpgradeCoordinator(
+            user_data_dir=root,
+            lock=lock,
+            registry=UpgradeRegistry(),
+            software=_Software(),
+        ).prepare(
+            target_software_version=TARGET_VERSION,
+            target_data_generation=1,
+            target_plan=plan,
+            target_preflights=None if invalid == "unpaired" else preflights,
+        )
+    assert require_installation()[1].migration_state == "clean"
+    assert not (root / "upgrades").exists()
+
+
+def test_backup_estimate_counts_only_selected_physical_targets_once(tmp_path: Path) -> None:
+    root, _database, registry = _old_installation(tmp_path)
+    plan = registry.build_plan(source_data_generation=1, target_data_generation=1)
+    preflights = registry.preflight(user_data_dir=root)
+    owner = preflights[0]
+    shared = owner.model_copy(
+        update={"target": owner.target.model_copy(update={"adapter_id": "other"})}
+    )
+    unrelated = owner.model_copy(
+        update={
+            "target": owner.target.model_copy(
+                update={
+                    "physical_path": str(root / "unrelated.sqlite3"),
+                    "path": str(root / "unrelated.sqlite3"),
+                }
+            ),
+            "estimated_backup_bytes": 10_000_000,
+        }
+    )
+    estimate = estimate_backup_bytes(plan, (*preflights, shared, unrelated))
+    assert estimate == owner.estimated_backup_bytes
+    assert len(backup_targets_for_plan(plan, (*preflights, shared, unrelated))) == 1
+
+
+def test_rollback_accepts_restored_schema_current_to_source_owner(tmp_path: Path) -> None:
+    root, database, target_registry = _old_installation(tmp_path)
+    software = _Software()
+    _crash_forward_at(root, target_registry, software, "step_verified")
+
+    class SourceRegistry(UpgradeRegistry):
+        def inspect_step(self, step: MigrationStep, *, user_data_dir: Path) -> AdapterInspection:
+            inspection = target_registry.inspect_step(step, user_data_dir=user_data_dir)
+            if inspection.found_schema_version == step.source_schema_version:
+                return inspection.model_copy(
+                    update={"state": "current", "target_schema_version": step.source_schema_version}
+                )
+            return inspection
+
+    _drive_rollback(root, SourceRegistry(), software, None)
+    assert inspect_durable_tasks_database(database).found_schema_version == 1
+    assert software.version == SOURCE_VERSION
+    assert require_installation()[1].migration_state == "clean"
+
 
 FORWARD_BOUNDARIES = (
     "journal_created",

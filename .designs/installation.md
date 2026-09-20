@@ -238,7 +238,9 @@ file, but upgrade ownership additionally requires its parsed launch command to
 bind the expected installation and exact installed launcher. A foreign or
 ambiguous surface is never stopped, rewritten, or removed. Reconciliation
 rewrites owned surfaces to the verified target launcher before they can run
-again.
+again. Gateway rendering during upgrade binds the installed unit's single,
+canonical absolute working directory, never the coordinator's current directory.
+Full deterministic unit comparison still validates every other launch setting.
 
 ## Upgrade and recovery
 
@@ -251,9 +253,11 @@ ricky upgrade --resume [--json]
 ricky upgrade --rollback [--yes] [--json]
 ```
 
-`ricky upgrade --check` is read-only apart from bounded release lookup and
-cache behavior. By default it queries stable GitHub Releases over anonymous
-HTTPS and stores no release credential. Apply is available only from a conforming
+`ricky upgrade --check` is read-only for installation data apart from bounded
+release cache behavior. Target planning can download artifacts and dependencies
+into an isolated temporary environment. By default it queries stable GitHub
+Releases over anonymous HTTPS and stores no release credential. Apply normally
+runs from a conforming
 `MAJOR.MINOR.PATCH` release running through its exact console script inside the
 matching uv tool environment. A development checkout may check but may not
 replace an installed tool. Interactive apply selects a stable release and
@@ -265,8 +269,35 @@ nonconforming versions fail before mutation. JSON mode emits exactly one strict
 result or error document with bounded diagnostics and no secrets, credentials,
 or protected values.
 
-The upgrade coordinator plans all changes before writing. It discovers only
-declared configured paths, includes disabled profiles, preserves missing lazy
+An isolated non-editable released wheel may coordinate an older installed tool
+through explicit `--bootstrap-from ABSOLUTE_LAUNCHER`. It verifies both its own
+released-wheel identity and the selected installed uv tool's canonical launcher,
+environment, package, and version. It does not adopt arbitrary executables or
+change installation identity. This bootstrap supports ordinary apply and
+journaled recovery using the same lock, artifacts, and confirmation boundaries.
+Existing incomplete journals must be rolled back before a new target plan is
+prepared; bootstrap does not append migrations or enlarge an existing backup.
+
+The target release owns planning as well as migration. The source coordinator
+verifies the target wheel and constraints, stages that pair in a temporary uv
+environment outside `user_data_dir`, and invokes a versioned strict JSON planning
+protocol. The request binds the installation identity, root, software endpoints,
+and data generations. The response binds inspection, preflight declarations,
+and the ordered plan to that request. The planner uses owner-local read-only
+inspection, never normal runtime startup, store creation, or migration writes.
+The source coordinator does not infer target schema knowledge from its own
+registry or supported target generations.
+
+Apply shows the target-owned plan before confirmation. After stopping the owned
+gateway and taking the exclusive lock, it revalidates installation and release
+identities and repeats target inspection. A changed plan or backup scope fails
+before preparation. Size estimates may change as writers drain; backup space
+checks use the final state. The displayed backup estimate covers the selected
+physical targets only and counts shared stores once. The source coordinator
+freezes the validated target plan without invoking source adapters to rebuild it.
+
+The upgrade coordinator plans all changes before durable mutation. It discovers
+only declared configured paths, includes disabled profiles, preserves missing lazy
 state as missing, groups adapters that share a physical path, orders their
 steps, and records a digest of the complete plan. The manifest carries only the
 compatibility gate. Detailed progress lives separately at
@@ -307,6 +338,15 @@ transitions, an ordinary store open may create a genuinely absent current
 store or validate an existing one, but it never migrates existing state as a
 side effect.
 
+Each migrating owner target supplies one journaled step from its observed schema
+to its final required schema. An owner may perform intermediate version hops
+inside that idempotent migration; the coordinator does not accept separate
+intermediate steps that its final-schema verifier cannot validate. Each step's
+preflight must declare exactly its physical backup target. Additional mutable
+paths require an explicit typed backup contract before an adapter may use them;
+the coordinator rejects rather than silently omits such declarations. The
+planner also checks the descriptor's target generation against its own code.
+
 ## Backup and rollback boundaries
 
 Before the first migration write, upgrade checks every declared SQLite target,
@@ -327,7 +367,11 @@ removes them with the data root. Rollback is a forward recovery operation, not
 a reverse migration: under the exclusive lock it verifies the backup manifest,
 restores the exact declared files and modes, verifies their schema versions and
 source data generation, and finally reinstalls the prior exact wheel with its
-verified dependency constraints. It is resumable and refuses to overwrite
+verified dependency constraints. The recovering coordinator retains the lock
+and completes rollback after verifying the restored executable; it does not
+delegate the new journal's migration interpretation to old source code. An
+isolated corrected coordinator can finish recovery if execution was interrupted
+after the older executable was restored. It is resumable and refuses to overwrite
 evidence that a successfully opened post-upgrade runtime could have mutated.
 Resume continues only the exact journaled target and plan. An applied step is
 replayed only when inspection proves its idempotent completion state.

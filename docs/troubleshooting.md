@@ -276,6 +276,22 @@ If apply says it requires a uv-tool-installed release, you are running a source
 checkout, an unrecognized wrapper, or a different console script. A checkout
 can run `ricky upgrade --check`, but apply and recovery must run through the
 exact released `ricky` executable installed by `uv tool`.
+The explicit exception is the [bootstrap procedure](operations.md#bootstrap-an-older-upgrader),
+which runs a verified released coordinator in isolation and binds the exact
+installed launcher with `--bootstrap-from`.
+
+If target planning fails, check access to the release artifacts and dependency
+index. Planning uses a temporary environment before installation replacement;
+a failure at this stage does not require a database migration or journal edit.
+If the plan or backup scope changes after confirmation, close other stateful
+Ricky processes and retry so a new preview can be confirmed.
+
+An upgrade from 0.8.7 to 0.8.8 may have recorded zero migrations and then failed
+whole-installation verification for executions or sessions. That journal lacks
+the required schema transitions. Roll it back before starting a new upgrade
+with the corrected coordinator. Repeating `--resume` cannot repair its plan;
+do not append migrations or change schema versions manually. The bootstrap
+procedure also supports `--rollback --yes` if the installed recovery code fails.
 
 If Ricky refuses the gateway unit, inspect it with:
 

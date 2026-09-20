@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import subprocess
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -16,6 +18,30 @@ _APPLY_REQUIRES_UV_TOOL = (
     "upgrade apply requires a uv-tool-installed Ricky release; "
     "read-only upgrade check remains available"
 )
+_BOOTSTRAP_INVALID = (
+    "upgrade bootstrap requires an isolated, non-editable released Ricky wheel and "
+    "the exact installed uv tool executable"
+)
+_SOURCE_PROBE = """
+import json
+import sys
+from importlib import metadata
+from pathlib import Path
+d = metadata.distribution('ricky')
+direct = json.loads(d.read_text('direct_url.json') or '{}')
+assert not direct.get('dir_info', {}).get('editable', False)
+assert d.read_text('WHEEL') is not None
+print(json.dumps({'version': d.version, 'prefix': str(Path(sys.prefix).resolve()),
+                  'package_root': str(Path(d.locate_file('ricky')).resolve())}))
+"""
+
+
+class _SourceProbe(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    version: str
+    prefix: str
+    package_root: str
 
 
 class UpgradeEnvironmentError(RuntimeError):
@@ -98,6 +124,92 @@ def discover_installed_tool_environment() -> InstalledToolEnvironment:
         package_root=str(package_root),
         current_version=current_version,
     )
+
+
+def discover_bootstrap_tool_environment(installed_executable: Path) -> InstalledToolEnvironment:
+    """Bind an isolated released coordinator to one explicitly selected old tool.
+
+    The source interpreter reads distribution metadata only; it never imports
+    Ricky or opens application data. Its bounded probe is killed and awaited by
+    subprocess.run if the timeout expires.
+    """
+
+    try:
+        distribution = metadata.distribution("ricky")
+        require_installed_release_version(distribution.version)
+        direct = json.loads(distribution.read_text("direct_url.json") or "{}")
+        if direct.get("dir_info", {}).get("editable", False):
+            raise ValueError("editable bootstrap")
+        if distribution.read_text("WHEEL") is None:
+            raise ValueError("bootstrap is not a wheel")
+        prefix = Path(sys.prefix).resolve(strict=True)
+        package = Path(str(distribution.locate_file("ricky"))).resolve(strict=True)
+        entry = _invoked_executable()
+        if (
+            not package.is_dir()
+            or not _is_within(package, prefix)
+            or not _is_within(entry, prefix)
+            or entry != (prefix / "bin" / "ricky").resolve(strict=True)
+            or not entry.is_file()
+            or not os.access(entry, os.X_OK)
+        ):
+            raise ValueError("invalid bootstrap identity")
+        tool_root = _tool_root()
+        bin_root = _tool_bin()
+        environment = (tool_root / "ricky").resolve(strict=True)
+        if prefix == environment:
+            raise ValueError("bootstrap must be isolated")
+        supplied = installed_executable.expanduser()
+        if not supplied.is_absolute():
+            raise ValueError("source executable must be absolute")
+        executable = supplied.resolve(strict=True)
+        if (
+            executable != (environment / "bin" / "ricky").resolve(strict=True)
+            or executable != (bin_root / "ricky").resolve(strict=True)
+            or not _is_within(executable, environment)
+            or not executable.is_file()
+            or not os.access(executable, os.X_OK)
+        ):
+            raise ValueError("invalid source executable")
+        python = environment / "bin" / "python"
+        if not python.is_file() or not os.access(python, os.X_OK):
+            raise ValueError("source Python is unavailable")
+        process = subprocess.run(
+            [str(python), "-I", "-B", "-c", _SOURCE_PROBE],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=20,
+            check=False,
+            env={key: value for key, value in os.environ.items() if not key.startswith("PYTHON")},
+        )
+        if process.returncode != 0 or len(process.stdout) > 16_384:
+            raise ValueError("source metadata probe failed")
+        probe = _SourceProbe.model_validate_json(process.stdout)
+        source_package = Path(probe.package_root)
+        if (
+            probe.prefix != str(environment)
+            or source_package != source_package.resolve(strict=True)
+            or not source_package.is_dir()
+            or not _is_within(source_package, environment)
+        ):
+            raise ValueError("source metadata identity mismatch")
+        return InstalledToolEnvironment(
+            tool_root=str(tool_root),
+            environment=str(environment),
+            bin=str(bin_root),
+            executable=str(executable),
+            package_root=str(source_package),
+            current_version=require_installed_release_version(probe.version),
+        )
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        AttributeError,
+        metadata.PackageNotFoundError,
+        subprocess.TimeoutExpired,
+    ) as exc:
+        raise UpgradeEnvironmentError(_BOOTSTRAP_INVALID) from exc
 
 
 def _tool_root() -> Path:

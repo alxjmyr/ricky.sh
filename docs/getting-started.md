@@ -178,6 +178,9 @@ Unlike `ricky init`, an upgrade check and apply use the network. Apply an
 interactive upgrade with `ricky upgrade`; Ricky shows the exact software and
 data-generation change, data root, targeted-backup estimate, profile-job
 policy, and possible gateway interruption before asking for confirmation.
+The selected release runs its read-only migration planner in a temporary
+environment first, so it can identify schema changes unknown to your installed
+version. This can download dependencies before the confirmation prompt.
 For unattended use, pin the exact stable version:
 
 ```bash
@@ -213,7 +216,9 @@ from your normal login terminal. Do not reinstall Ricky or reset its data to
 recover this failure.
 
 See [Operations](operations.md#upgrade-ricky) for backup scope, recovery, and
-schedule outcomes.
+schedule outcomes. If the installed upgrader predates target-owned planning,
+use the [bootstrap procedure](operations.md#bootstrap-an-older-upgrader) with a
+verified released coordinator containing the fix.
 
 ## Remove Ricky
 

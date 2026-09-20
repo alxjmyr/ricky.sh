@@ -32,7 +32,15 @@ from ricky.upgrades.journal import (
     UpgradeManagedBinding,
     create_upgrade_journal,
 )
-from ricky.upgrades.models import MigrationPlan, MigrationStep
+from ricky.upgrades.models import (
+    AdapterInspection,
+    AdapterPreflight,
+    AdapterTarget,
+    MigrationPlan,
+    MigrationStep,
+)
+from ricky.upgrades.planning import PlanningRequest, PlanningResult
+from ricky.upgrades.software import UpgradeHandoffComplete
 from ricky.upgrades.versions import ReleaseVersion
 
 runner = CliRunner()
@@ -50,6 +58,40 @@ def simulated_upgrade_version(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     monkeypatch.setattr("ricky.upgrades.service.__version__", "0.6.0")
+    _stub_target_planner(monkeypatch)
+
+
+def _stub_target_planner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Grammar and gateway-abort tests do not install the fixture's fake wheel."""
+
+    class Planner:
+        def __init__(self, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def inspect(self, request: PlanningRequest) -> PlanningResult:
+            return PlanningResult(
+                request=request,
+                plan=MigrationPlan.create(
+                    source_data_generation=request.source_data_generation,
+                    target_data_generation=request.target_data_generation,
+                ),
+                inventory=(),
+                preflights=(),
+            )
+
+    monkeypatch.setattr(installation_cli, "TargetReleasePlanner", Planner)
+    monkeypatch.setattr("ricky.upgrades.planning.TargetReleasePlanner", Planner)
+
+    async def cached_artifacts(release: Any, root: Path) -> tuple[Path, Path]:
+        return root / release.wheel.name, root / release.constraints.name
+
+    monkeypatch.setattr("ricky.upgrades.releases.cache_release_artifacts", cached_artifacts)
 
 
 def _initialize(tmp_path: Path) -> tuple[Path, str]:
@@ -240,7 +282,7 @@ def test_upgrade_check_accepts_only_exact_release_version_grammar(
     accepted = runner.invoke(app, ["upgrade", "--check", "--to", "0.6.1", "--json", *source])
     refused = runner.invoke(app, ["upgrade", "--check", "--to", "0.6", "--json", *source])
 
-    assert accepted.exit_code == 0
+    assert accepted.exit_code == 0, accepted.stdout
     assert json.loads(accepted.stdout)["status"] == "update_available"
     assert refused.exit_code == 1
     error = json.loads(refused.stdout)
@@ -289,6 +331,29 @@ def test_upgrade_apply_from_development_environment_refuses_before_mutation(
     assert result.exit_code == 1
     assert "uv-tool-installed Ricky release" in result.stdout
     assert "read-only upgrade check remains available" in result.stdout
+    assert _file_snapshot(root) == before_data
+    assert bootstrap_file().read_bytes() == before_pointer
+
+
+def test_new_apply_does_not_inspect_stores_of_a_failed_operation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _ = _initialize(tmp_path)
+    _set_manifest_state(root, state="failed", operation_id="a" * 32)
+    environment = _tool_environment(tmp_path)
+    monkeypatch.setattr(
+        installation_cli, "discover_installed_tool_environment", lambda: environment,
+    )
+
+    async def forbidden_check(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("opened ordinary stores before the failed-operation gate")
+
+    monkeypatch.setattr(installation_cli, "check_upgrade", forbidden_check)
+    before_data = _file_snapshot(root)
+    before_pointer = bootstrap_file().read_bytes()
+    result = runner.invoke(app, ["upgrade", "--yes", "--to", "0.6.1"])
+    assert result.exit_code == 1
+    assert "upgrade --resume" in result.stdout
     assert _file_snapshot(root) == before_data
     assert bootstrap_file().read_bytes() == before_pointer
 
@@ -434,7 +499,9 @@ def test_aborted_upgrade_reports_the_original_cause_with_any_restore_failure(
     restores: list[str] = []
 
     async def fake_software_binding(**_kwargs: Any) -> object:
-        return SimpleNamespace()
+        return SimpleNamespace(
+            target_wheel_path="/fake-wheel", target_constraints_path="/fake-pins"
+        )
 
     async def fake_prepare(**_kwargs: Any) -> UpgradeManagedBinding:
         return UpgradeManagedBinding(
@@ -498,7 +565,9 @@ def test_aborted_upgrade_restore_failure_is_visible_in_human_output(
     environment = _tool_environment(tmp_path)
 
     async def fake_software_binding(**_kwargs: Any) -> object:
-        return SimpleNamespace()
+        return SimpleNamespace(
+            target_wheel_path="/fake-wheel", target_constraints_path="/fake-pins"
+        )
 
     async def fake_prepare(**_kwargs: Any) -> UpgradeManagedBinding:
         return UpgradeManagedBinding(
@@ -539,6 +608,181 @@ def test_aborted_upgrade_restore_failure_is_visible_in_human_output(
     rendered = " ".join(result.stdout.split())
     assert f"Installation error: {ABORT_CAUSE}" in rendered
     assert f"could not be restarted: {RESTORE_FAILURE}" in rendered
+
+
+@pytest.mark.parametrize("failure", ["changed_plan", "interrupted", "declined"])
+@pytest.mark.usefixtures("simulated_upgrade_version")
+def test_target_plan_revalidation_and_cancellation_preserve_installation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    root, _ = _initialize(tmp_path)
+    _forbid_upgrade_io(monkeypatch)
+    descriptors = [
+        _local_release_descriptor(tmp_path, "0.6.0"),
+        _local_release_descriptor(tmp_path, "0.6.1"),
+    ]
+    before = _file_snapshot(root)
+    events: list[str] = []
+    operation_roots: list[Path] = []
+
+    class Planner:
+        def __init__(self, **kwargs: Any) -> None:
+            self.inspections = 0
+
+        def __enter__(self) -> Any:
+            events.append("stage")
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            events.append("close")
+
+        def inspect(self, request: PlanningRequest) -> PlanningResult:
+            self.inspections += 1
+            events.append("inspect")
+            if self.inspections == 2 and failure == "interrupted":
+                raise KeyboardInterrupt
+            target = AdapterTarget(
+                adapter_id="future",
+                target_id="future-store",
+                path=str(root / "future.sqlite3"),
+                physical_path=str(root / "future.sqlite3"),
+                kind="sqlite",
+            )
+            version = 2 if self.inspections == 1 else 3
+            step = MigrationStep(
+                adapter_id=target.adapter_id,
+                target_id=target.target_id,
+                physical_path=target.physical_path,
+                step_id=f"schema-v1-v{version}",
+                source_schema_version=1,
+                target_schema_version=version,
+            )
+            return PlanningResult(
+                request=request,
+                plan=MigrationPlan.create(
+                    source_data_generation=1,
+                    target_data_generation=1,
+                    steps=(step,),
+                ),
+                inventory=(
+                    AdapterInspection(
+                        target=target,
+                        state="migration_required",
+                        found_schema_version=1,
+                        target_schema_version=version,
+                        integrity_valid=True,
+                        detail="future schema",
+                    ),
+                ),
+                preflights=(
+                    AdapterPreflight(
+                        target=target,
+                        estimated_backup_bytes=12,
+                        backup_paths=(target.path,),
+                    ),
+                ),
+            )
+
+    async def binding(**kwargs: Any) -> object:
+        operation = root / "upgrades" / kwargs["operation_id"]
+        operation.mkdir(parents=True)
+        (operation / "artifact").write_bytes(b"cached")
+        operation_roots.append(operation)
+        return SimpleNamespace(
+            target_wheel_path="/fake-wheel", target_constraints_path="/fake-pins"
+        )
+
+    async def prepare(**kwargs: Any) -> UpgradeManagedBinding:
+        events.append("stop")
+        return UpgradeManagedBinding(
+            gateway_unit_path=str(tmp_path / "gateway.service"),
+            gateway_unit_sha256="d" * 64,
+            gateway_was_enabled=True,
+            gateway_was_active=True,
+        )
+
+    def forbidden_source_registry(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("source release must never produce the target migration plan")
+
+    monkeypatch.setattr(installation_cli, "TargetReleasePlanner", Planner)
+    monkeypatch.setattr(installation_cli, "create_software_binding", binding)
+    monkeypatch.setattr(installation_cli, "prepare_managed_upgrade", prepare)
+    monkeypatch.setattr(installation_cli, "verify_managed_upgrade_prepared", lambda **kwargs: None)
+    monkeypatch.setattr(installation_cli, "build_upgrade_registry", forbidden_source_registry)
+    monkeypatch.setattr(
+        installation_cli,
+        "restore_gateway_after_aborted_prepare",
+        lambda **kwargs: events.append("restore"),
+    )
+    monkeypatch.setattr(
+        installation_cli,
+        "discover_installed_tool_environment",
+        lambda: _tool_environment(tmp_path),
+    )
+    source = [item for path in descriptors for item in ("--release-descriptor", str(path))]
+    if failure == "declined":
+        monkeypatch.setattr(
+            "ricky.interfaces.cli.input.CliInputSession.interactive", property(lambda _: True)
+        )
+        result = runner.invoke(app, ["upgrade", "--to", "0.6.1", *source], input="n\n")
+        assert "migration steps: 1" in result.stdout
+        assert events == ["stage", "inspect", "close"]
+    else:
+        result = runner.invoke(app, ["upgrade", "--yes", "--to", "0.6.1", *source])
+        assert events == ["stage", "inspect", "stop", "inspect", "restore", "close"]
+        if failure == "changed_plan":
+            assert "migration plan changed after confirmation" in " ".join(result.stdout.split())
+    assert result.exit_code != 0
+    assert _file_snapshot(root) == before
+    assert all(not path.exists() for path in operation_roots)
+    assert _manifest(root).migration_state == "clean"
+
+
+@pytest.mark.parametrize("installed_target", [True, False])
+def test_recovery_rejects_wrong_runtime_before_registry_but_allows_source_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed_target: bool
+) -> None:
+    root, _ = _initialize(tmp_path)
+    _set_manifest_state(root, state="failed", operation_id="b" * 32)
+    before = _file_snapshot(root)
+    calls: list[str] = []
+    monkeypatch.setattr(installation_cli, "__version__", "0.7.0")
+    monkeypatch.setattr(
+        installation_cli,
+        "load_upgrade_journal",
+        lambda **kwargs: SimpleNamespace(target_software_version=ReleaseVersion.parse("0.6.1")),
+    )
+    monkeypatch.setattr(
+        installation_cli,
+        "UvToolSoftwareController",
+        lambda **kwargs: SimpleNamespace(
+            inspect_version=lambda: ReleaseVersion.parse("0.6.1" if installed_target else "0.6.0")
+        ),
+    )
+
+    def registry(*args: Any) -> None:
+        calls.append("registry")
+
+    class Coordinator:
+        def __init__(self, **kwargs: Any) -> None:
+            calls.append("coordinator")
+
+        def resume(self) -> None:
+            calls.append("resume")
+            raise UpgradeHandoffComplete(0)
+
+    monkeypatch.setattr(installation_cli, "build_upgrade_registry", registry)
+    monkeypatch.setattr(installation_cli, "UpgradeCoordinator", Coordinator)
+    with pytest.raises(InstallationError if installed_target else UpgradeHandoffComplete) as caught:
+        installation_cli._run_upgrade_recovery(
+            rollback=False, as_json=False, environment=_tool_environment(tmp_path)
+        )
+    if installed_target:
+        assert "exact journaled target release" in str(caught.value)
+        assert calls == []
+    else:
+        assert calls == ["registry", "coordinator", "resume"]
+    assert _file_snapshot(root) == before
 
 
 def _prepared_journal(root: Path) -> UpgradeJournal:

@@ -216,10 +216,11 @@ ricky upgrade --check
 ricky upgrade --check --to X.Y.Z
 ```
 
-The check inspects release compatibility and Ricky-owned durable formats but
-does not replace software or migrate data. A source checkout may run the check.
-Only the exact `ricky` console script from a released `uv tool` installation can
-apply or recover an upgrade.
+The check stages the selected release to inspect compatibility and Ricky-owned
+durable formats without replacing software or migrating data. It can download
+the release and its dependencies. A source checkout may run the check. Apply
+and recovery normally run through the exact installed `ricky` console script;
+older installations can use the explicit bootstrap procedure below.
 
 For an interactive apply, run:
 
@@ -236,8 +237,17 @@ exact version and confirmation:
 ricky upgrade --to X.Y.Z --yes
 ```
 
-The operation downloads and verifies the exact source and target wheel and
-constraints artifacts, then records an immutable journal below
+Before confirmation, Ricky downloads and verifies the exact source and target
+wheel and constraints artifacts. It stages the target in a temporary environment
+outside your data root and runs that release's read-only migration planner
+against your existing stores. The planner neither starts the normal runtime nor
+creates missing stores. The backup estimate counts each selected physical store
+once; it excludes state the plan will not modify.
+
+After confirmation and gateway shutdown, Ricky takes the exclusive lock and
+repeats target planning. A changed migration plan or backup scope aborts before
+preparation. Store sizes can change between preview and exclusive access, so the
+displayed byte count remains an estimate. Ricky records an immutable journal below
 `<user_data_dir>/upgrades/<operation_id>/`. It holds an installation-wide
 exclusive lock across software replacement, data migration, verification, and
 managed-launch reconciliation. Other stateful Ricky commands wait or fail
@@ -249,7 +259,8 @@ If the installed gateway unit is Ricky-owned and binds the exact source
 launcher, upgrade records whether it was enabled and active. It stops an active
 gateway before taking the exclusive lock, rewrites the unit to the verified
 target launcher, preserves enabled state, and restarts it after releasing the
-lock. An inactive gateway remains inactive. Ricky refuses a foreign, edited,
+lock. The installed service's working directory is preserved even when you run
+the upgrade from another directory. An inactive gateway remains inactive. Ricky refuses a foreign, edited,
 or ambiguously bound unit instead of controlling it. A restart failure is
 reported separately from a successful software and data result.
 
@@ -324,6 +335,44 @@ Rollback verifies the backup, restores only its declared paths and modes, and
 reinstalls the exact prior release last. Both recovery operations are
 resumable. A downgrade without this matching journal and backup is unsupported;
 after the commit fence, move forward with resume or a later released upgrade.
+
+### Bootstrap an older upgrader
+
+An already-installed release cannot acquire a corrected upgrade coordinator
+until it has upgraded. Use an isolated released wheel containing the fix to
+coordinate that transition. Obtain its wheel and matching constraints from the
+same release and verify their SHA-256 values against the release descriptor
+before running them. `X.Y.Z` below means that verified release, not a promise
+that a particular fixed release has been published.
+
+```bash
+uv tool run --isolated --no-config \
+  --from /path/to/verified/ricky-X.Y.Z-py3-none-any.whl \
+  --constraints /path/to/verified/ricky-X.Y.Z-constraints.txt \
+  ricky upgrade --bootstrap-from /absolute/path/to/installed/ricky --to X.Y.Z
+```
+
+`--bootstrap-from` identifies the existing installed console script. The
+coordinator verifies that it belongs to the configured `uv tool` installation;
+it does not adopt an arbitrary executable or data root. Keep the installation's
+usual XDG and uv directory settings. Add `--yes` for unattended apply. The
+isolated command stages and verifies its target, shows the plan, and uses the
+same lock, backup, journal, and recovery boundaries as an ordinary upgrade.
+
+If the 0.8.7 → 0.8.8 upgrade already failed after recording zero migrations,
+roll back that operation first. Resume preserves the incomplete journal; it
+cannot add the missing executions and sessions migrations or expand its backup.
+If ordinary rollback cannot complete, use the corrected isolated coordinator:
+
+```bash
+uv tool run --isolated --no-config \
+  --from /path/to/verified/ricky-X.Y.Z-py3-none-any.whl \
+  --constraints /path/to/verified/ricky-X.Y.Z-constraints.txt \
+  ricky upgrade --bootstrap-from /absolute/path/to/installed/ricky --rollback --yes
+```
+
+Then start a new upgrade with the corrected coordinator. Do not edit the old
+journal or install a new wheel over a failed operation.
 
 ## Decommission or remove an installation
 

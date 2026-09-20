@@ -85,11 +85,19 @@ digest-verified `uv tool` replacement. Upgrade artifacts, journals, and
 targeted backups live below `user_data_dir/upgrades`, but installed application
 code does not.
 
+The selected target release supplies the migration plan from an isolated
+temporary environment. It reads existing stores without starting normal
+runtime services or creating absent stores. After acquiring exclusive access,
+the coordinator revalidates that plan and its backup scope before freezing the
+journal. The backup estimate counts only selected physical targets, once each.
+
 Upgrade takes an installation-wide exclusive lock and gates ordinary stateful
 commands whenever the manifest is not clean. Its strict journal binds the
 installation identity, source and target releases, data generations, migration
 plan, backup, and managed-launch choices. Resume and rollback follow that
 record; they do not rebuild intent from changing live configuration.
+An older incomplete journal must be rolled back, not expanded with newly
+discovered migrations whose data was never included in its backup.
 
 The pre-upgrade backup covers only subsystem-declared mutable paths. It is not
 a general backup of browser assets, downloads, attachments, media, or project

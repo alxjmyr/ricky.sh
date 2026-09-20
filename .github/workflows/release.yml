@@ -54,6 +54,11 @@ jobs:
             --python-requirement ">=3.12" \
             --minimum-uv-version "0.6.0"
 
+      - name: Verify cross-release upgrade and recovery
+        # Includes the actual v0.8.7 source/lock, populated old schemas, isolated
+        # bootstrap, interrupted migration recovery, and the direct upgrade path.
+        run: uv run pytest tests/test_upgrade_release_drill.py -v
+
       - name: Publish tagged release
         env:
           GH_TOKEN: ${{ github.token }}

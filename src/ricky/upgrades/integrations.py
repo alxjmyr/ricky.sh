@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shlex
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
@@ -56,8 +57,7 @@ async def prepare_managed_upgrade(
 ) -> UpgradeManagedBinding:
     """Validate and stop an exact owned gateway before the caller asks for EX."""
 
-    unit = GatewayServiceUnit(settings, executable=str(source_executable.resolve()))
-    installed = unit.installed()
+    unit, installed = _bound_gateway_unit(settings, source_executable)
     unit_digest: str | None = None
     enabled = False
     active = False
@@ -107,6 +107,36 @@ async def prepare_managed_upgrade(
         raise
 
 
+def verify_managed_upgrade_prepared(
+    *,
+    settings: RickySettings,
+    source_executable: Path,
+    managed: UpgradeManagedBinding,
+) -> None:
+    """Recheck the stopped launcher after the caller obtains exclusive access."""
+
+    unit, installed = _bound_gateway_unit(settings, source_executable)
+    if managed.gateway_unit_path is None:
+        if installed is not None:
+            raise ManagedIntegrationError("gateway unit appeared while preparing the upgrade")
+    else:
+        if (
+            str(unit.unit_path.resolve()) != managed.gateway_unit_path
+            or installed is None
+            or installed != unit.render()
+            or hashlib.sha256(installed.encode("utf-8")).hexdigest() != managed.gateway_unit_sha256
+        ):
+            raise ManagedIntegrationError("gateway unit changed while preparing the upgrade")
+        if _enabled_state(unit) != managed.gateway_was_enabled:
+            raise ManagedIntegrationError(
+                "gateway enabled state changed while preparing the upgrade"
+            )
+        if _active_state(unit):
+            raise ManagedIntegrationError("gateway restarted while preparing the upgrade")
+    if GatewayLock(settings).is_active():
+        raise ManagedIntegrationError("gateway runtime is active while preparing the upgrade")
+
+
 class ManagedUpgradeController:
     """Idempotently reconcile launch surfaces while the operation holds EX."""
 
@@ -152,10 +182,9 @@ class ManagedUpgradeController:
     ) -> Literal["not_installed", "reconciled", "inactive"]:
         if managed.gateway_unit_path is None:
             return "not_installed"
-        unit = GatewayServiceUnit(settings, executable=str(self._executable))
+        unit, current = _bound_gateway_unit(settings, self._executable)
         if unit.unit_path.resolve() != Path(managed.gateway_unit_path):
             raise ManagedIntegrationError("gateway unit path changed during upgrade")
-        current = unit.installed()
         if current is None or not current.startswith(MARKER):
             raise ManagedIntegrationError("owned gateway unit disappeared during upgrade")
         current_digest = hashlib.sha256(current.encode("utf-8")).hexdigest()
@@ -347,6 +376,36 @@ def _first_usable_project(schedules: list[ScheduleSpec]) -> Path | None:
         if discovered == project_root:
             return project_root
     return None
+
+
+def _bound_gateway_unit(
+    settings: RickySettings, executable: Path
+) -> tuple[GatewayServiceUnit, str | None]:
+    """Bind rendering to the installed project's directory, not the upgrader cwd."""
+
+    unit = GatewayServiceUnit(settings, executable=str(executable.resolve()))
+    installed = unit.installed()
+    if installed is None:
+        return unit, None
+    if not installed.startswith(MARKER):
+        raise ManagedIntegrationError("gateway unit is not owned by Ricky")
+    roots = [
+        line.removeprefix("WorkingDirectory=")
+        for line in installed.splitlines()
+        if line.startswith("WorkingDirectory=")
+    ]
+    try:
+        tokens = shlex.split(roots[0]) if len(roots) == 1 else []
+        if len(tokens) != 1:
+            raise ValueError("ambiguous working directory")
+        root = Path(tokens[0])
+        if not root.is_absolute() or root != root.resolve(strict=True) or not root.is_dir():
+            raise ValueError("invalid working directory")
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ManagedIntegrationError("gateway unit has an invalid working directory") from exc
+    return GatewayServiceUnit(
+        settings, executable=str(executable.resolve()), project_root=root
+    ), installed
 
 
 def _active_state(unit: GatewayServiceUnit) -> bool:

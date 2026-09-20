@@ -7,6 +7,7 @@ import shutil
 import sys
 from contextlib import suppress
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Protocol
 
 from ricky import __version__
@@ -43,7 +44,7 @@ class UpgradeCheckService:
         registry: UpgradeRegistry | None = None,
     ) -> None:
         self._resolver = resolver
-        self._registry = registry or UpgradeRegistry.current()
+        self._registry = registry
 
     async def check(self, request: UpgradeCheckRequest) -> UpgradeCheckResult:
         """Check an optional release source; a missing source performs no I/O."""
@@ -87,7 +88,7 @@ class UpgradeCheckService:
         migration_required = selected.target_data_generation != request.current_data_generation
         reconciliation_required = update_available
         plan = None
-        if not issues:
+        if not issues and self._registry is not None:
             try:
                 plan = self._registry.build_plan(
                     source_data_generation=request.current_data_generation,
@@ -99,7 +100,7 @@ class UpgradeCheckService:
         compatibility = CompatibilityResult(
             compatible=not issues,
             issues=tuple(issues),
-            migration_required=migration_required,
+            migration_required=migration_required or bool(plan and plan.steps),
             managed_reconciliation_required=reconciliation_required,
         )
         if issues:
@@ -126,30 +127,26 @@ class UpgradeCheckService:
 async def check_upgrade(
     descriptor_source: ReleaseResolver | None = None,
     requested_version: str | ReleaseVersion | None = None,
+    *,
+    current_version: ReleaseVersion | None = None,
+    plan_target: bool = True,
 ) -> UpgradeCheckResult:
     """Check the initialized installation through the optional release source.
 
-    With no source this reads only the bootstrap pointer and installation
-    manifest. In particular, it neither invokes uv nor takes the operation lock,
-    so a local current-state check creates no lifecycle files.
+    With no source this inspects local installation metadata and stores only.
+    It neither invokes uv nor takes the operation lock, so a local current-state
+    check creates no lifecycle files. The CLI owns shared authority; a selected
+    newer release supplies the actual plan from a disposable target environment.
     """
 
     # Import the whole-installation composition lazily. Owner adapters depend on
     # the model submodule, and importing them while the package facade itself is
     # initializing would otherwise create an adapter/package cycle.
-    from ricky.upgrades.inventory import (
-        build_upgrade_registry,
-        inspect_upgrade_inventory,
-    )
+    from ricky.upgrades.inventory import inspect_upgrade_inventory
 
     pointer, manifest = require_installation()
     user_data_dir = Path(pointer.user_data_dir)
     inventory = inspect_upgrade_inventory(user_data_dir)
-    registry = (
-        UpgradeRegistry.current()
-        if any(item.state in {"corrupt", "unsupported"} for item in inventory)
-        else build_upgrade_registry(user_data_dir)
-    )
     requested = (
         None
         if requested_version is None
@@ -161,7 +158,7 @@ async def check_upgrade(
     )
     uv_version = None if descriptor_source is None else await _discover_uv_version()
     request = UpgradeCheckRequest(
-        current_software_version=ReleaseVersion.parse(__version__),
+        current_software_version=current_version or ReleaseVersion.parse(__version__),
         current_data_generation=getattr(
             manifest,
             "data_generation",
@@ -172,10 +169,43 @@ async def check_upgrade(
         uv_version=uv_version,
         inventory=inventory,
     )
-    return await UpgradeCheckService(
+    result = await UpgradeCheckService(
         resolver=descriptor_source,
-        registry=registry,
     ).check(request)
+    if not plan_target or result.status != "update_available" or result.selected_release is None:
+        return result
+
+    from ricky.upgrades.planning import PlanningRequest, TargetReleasePlanner
+    from ricky.upgrades.releases import cache_release_artifacts
+
+    release = result.selected_release
+    with TemporaryDirectory(prefix="ricky-upgrade-check-") as temporary:
+        wheel, constraints = await cache_release_artifacts(release, Path(temporary))
+        with TargetReleasePlanner(
+            release=release, wheel=wheel, constraints=constraints, python=Path(sys.executable)
+        ) as planner:
+            planned = planner.inspect(
+                PlanningRequest(
+                    user_data_dir=str(user_data_dir),
+                    installation_id=pointer.installation_id,
+                    source_software_version=request.current_software_version,
+                    target_software_version=release.software_version,
+                    source_data_generation=manifest.data_generation,
+                    target_data_generation=release.target_data_generation,
+                )
+            )
+    return result.model_copy(
+        update={
+            "plan": planned.plan,
+            "inventory": planned.inventory,
+            "compatibility": result.compatibility.model_copy(
+                update={
+                    "migration_required": bool(planned.plan.steps)
+                    or manifest.data_generation != release.target_data_generation,
+                }
+            ),
+        }
+    )
 
 
 async def _discover_uv_version() -> ReleaseVersion | None:
@@ -242,10 +272,6 @@ def _release_compatibility_issues(
     if request.current_data_generation not in release.supported_source_data_generations:
         issues.append(
             f"release does not support source data generation {request.current_data_generation}"
-        )
-    if release.target_data_generation not in SUPPORTED_DATA_GENERATIONS:
-        issues.append(
-            f"this Ricky build cannot migrate to data generation {release.target_data_generation}"
         )
     if request.python_parts < release.minimum_python_parts:
         issues.append(

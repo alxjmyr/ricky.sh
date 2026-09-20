@@ -22,6 +22,7 @@ Running `ricky` without a command starts interactive chat.
 | `ricky upgrade [--to VERSION] [--yes] [--update-jobs] [--json]` | Apply a verified released upgrade with targeted backup, migration, and managed-launch reconciliation. |
 | `ricky upgrade --resume [--json]` | Resume the exact active journal after an interruption or failure. |
 | `ricky upgrade --rollback --yes [--json]` | Restore the verified pre-upgrade software and declared mutable data before the commit fence. |
+| `ricky upgrade --bootstrap-from PATH ...` | Use an isolated released coordinator with the exact existing installed launcher for check, apply, or recovery. |
 | `ricky decommission [--json]` | Stop and remove Ricky-owned gateway service and managed schedules while preserving software, data, and the pointer. |
 | `ricky data purge [--yes --installation-id ID] [--json]` | Irreversibly remove the exact inactive initialized data root and its matching pointer. |
 | `ricky profile add NAME [--json]` | Create and enable one minimal private profile scaffold without changing the default. |
@@ -41,12 +42,16 @@ are ready to make a real verification request.
 
 `upgrade --check` contacts the public GitHub Releases API anonymously. Without
 `--to`, check and interactive apply select the latest stable release. Apply is
-supported only when the running command is the exact console script in a
-conforming `uv tool` installation; a development checkout can check releases
-but cannot replace software. Versions use strict `MAJOR.MINOR.PATCH` form.
+supported through the exact console script in a conforming `uv tool`
+installation, or an isolated released coordinator with `--bootstrap-from`
+binding that installed script. A development checkout can check releases but
+cannot replace software. Versions use strict `MAJOR.MINOR.PATCH` form.
 Prereleases and downgrades are refused.
 
 Interactive apply previews its exact target and asks for confirmation.
+Check and apply stage the selected release and its constrained dependencies to
+run a read-only migration planner. Apply revalidates the plan under exclusive
+access before recording it and backing up its declared mutable state.
 Unattended and JSON apply require both `--yes` and an exact `--to VERSION`.
 `--update-jobs` is valid only when starting a new apply. It permits available
 deterministic profile-job updates and safe schedule refresh; it does not grant
@@ -55,6 +60,10 @@ prompt. `--resume` reuses the immutable journaled target and choices.
 `--rollback` requires `--yes` and is available only before the commit fence.
 JSON mode emits one result or error document, including separate managed
 gateway and schedule outcomes after a completed recovery.
+
+See [Bootstrap an older upgrader](operations.md#bootstrap-an-older-upgrader) for
+the verified-wheel invocation. `--bootstrap-from` takes an absolute path to the
+existing installed launcher; it does not bypass artifact or installation checks.
 
 Interactive `data purge` displays the canonical root and installation ID and
 defaults to cancellation. Unattended purge requires both `--yes` and the exact

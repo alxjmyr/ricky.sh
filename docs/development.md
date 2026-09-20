@@ -123,8 +123,24 @@ the matching documentation.
 Use `scripts/run_release.sh` to prepare release tags. It runs the full test suite,
 lint, and type checks locally before creating the release commit and tag. The
 GitHub release workflow validates the tag version, builds and verifies the release
-assets, and publishes them; it does not repeat those local checks or install a
-browser test environment. Tags pushed outside the helper bypass the local checks.
+assets, runs the cross-release upgrade drill, and publishes them. It does not
+repeat the full local suite or install a browser test environment. Tags pushed
+outside the helper bypass the local full-suite checks.
+
+Upgrade release validation must exercise different schema owners, not only two
+version labels built from identical source. Cover a populated prior-release
+installation, target-owned planning before replacement, exact mutable backup
+scope, data preservation, and managed gateway restart. Include interrupted
+migration resume and source restoration after rollback. Keep absent stores
+absent and include disabled profiles. The isolated bootstrap path must also
+work when the installed coordinator predates the target planning protocol.
+
+`tests/test_upgrade_release_drill.py` builds the real `v0.8.7` source and its
+dependency lock for bootstrap completion, resume, and rollback. It also tests a
+protocol-aware source with the older sessions adapter upgrading to the candidate
+schema. Release checkouts must include that tag; the publication workflow fetches
+full history. The drill verifies populated records through the restored or
+upgraded public store APIs.
 
 ## Improvement needs outcome evidence
 

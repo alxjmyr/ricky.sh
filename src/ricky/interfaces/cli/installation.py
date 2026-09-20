@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Literal, Never
 from uuid import uuid4
@@ -11,6 +13,7 @@ from uuid import uuid4
 import typer
 from pydantic import BaseModel
 
+from ricky import __version__
 from ricky.config import (
     ModelSelection,
     load_settings,
@@ -46,7 +49,9 @@ from ricky.upgrades import (
     check_upgrade,
 )
 from ricky.upgrades.environment import (
+    InstalledToolEnvironment,
     UpgradeEnvironmentError,
+    discover_bootstrap_tool_environment,
     discover_installed_tool_environment,
 )
 from ricky.upgrades.integrations import (
@@ -56,10 +61,17 @@ from ricky.upgrades.integrations import (
     prepare_managed_upgrade,
     restart_gateway_after_upgrade,
     restore_gateway_after_aborted_prepare,
+    verify_managed_upgrade_prepared,
 )
 from ricky.upgrades.inventory import build_upgrade_registry
-from ricky.upgrades.journal import UpgradeJournal
-from ricky.upgrades.orchestrator import UpgradeCoordinator, UpgradeCoordinatorError
+from ricky.upgrades.journal import UpgradeJournal, UpgradeManagedBinding, load_upgrade_journal
+from ricky.upgrades.orchestrator import (
+    UpgradeCoordinator,
+    UpgradeCoordinatorError,
+    estimate_backup_bytes,
+)
+from ricky.upgrades.planning import PlanningRequest, TargetReleasePlanner
+from ricky.upgrades.registry import UpgradeRegistry
 from ricky.upgrades.releases import ReleaseResolutionError
 from ricky.upgrades.software import (
     SoftwareReplacementError,
@@ -78,6 +90,11 @@ _RELEASE_DESCRIPTOR_OPTION = typer.Option(
     "--release-descriptor",
     hidden=True,
     help="Use one or more local release-drill descriptors.",
+)
+_BOOTSTRAP_FROM_OPTION = typer.Option(
+    None,
+    "--bootstrap-from",
+    help="Use this released coordinator to upgrade an older installed Ricky launcher.",
 )
 
 
@@ -173,12 +190,18 @@ def register_installation_commands(root: typer.Typer) -> None:
             help="Restore the verified pre-upgrade software and data pair.",
         ),
         as_json: bool = typer.Option(False, "--json", help="Emit one machine-readable result."),
+        bootstrap_from: Path | None = _BOOTSTRAP_FROM_OPTION,
         release_descriptor: list[Path] = _RELEASE_DESCRIPTOR_OPTION,
     ) -> None:
         """Check, apply, resume, or roll back a released Ricky upgrade."""
 
         renderer = CliRenderer()
         try:
+            environment = (
+                discover_bootstrap_tool_environment(bootstrap_from)
+                if bootstrap_from is not None
+                else None
+            )
             modes = int(check) + int(resume) + int(rollback)
             if modes > 1:
                 raise InstallationError("choose only one of --check, --resume, or --rollback")
@@ -201,7 +224,13 @@ def register_installation_commands(root: typer.Typer) -> None:
                     operation="upgrade_check",
                 ):
                     require_compatible_installation()
-                    result = asyncio.run(check_upgrade(resolver, target))
+                    result = asyncio.run(
+                        check_upgrade(
+                            resolver,
+                            target,
+                            current_version=environment.current_version if environment else None,
+                        )
+                    )
                 _emit(
                     result,
                     renderer,
@@ -233,6 +262,7 @@ def register_installation_commands(root: typer.Typer) -> None:
                 journal = _run_upgrade_recovery(
                     rollback=rollback,
                     as_json=as_json,
+                    environment=environment,
                 )
             else:
                 journal = asyncio.run(
@@ -243,6 +273,7 @@ def register_installation_commands(root: typer.Typer) -> None:
                         as_json=as_json,
                         release_descriptor=release_descriptor,
                         renderer=renderer,
+                        environment=environment,
                     )
                 )
             _emit(
@@ -633,10 +664,20 @@ async def _run_upgrade_apply(
     as_json: bool,
     release_descriptor: list[Path],
     renderer: CliRenderer,
+    environment: InstalledToolEnvironment | None = None,
 ) -> UpgradeJournal:
-    environment = discover_installed_tool_environment()
+    environment = environment or discover_installed_tool_environment()
     resolver = _release_resolver(release_descriptor)
-    checked = await check_upgrade(resolver, target)
+    with installation_operation_lock(
+        mode="shared", timeout_seconds=5.0, operation="upgrade_preflight",
+    ):
+        require_compatible_installation()
+        checked = await check_upgrade(
+            resolver,
+            target,
+            current_version=environment.current_version,
+            plan_target=False,
+        )
     if checked.status != "update_available" or checked.selected_release is None:
         raise InstallationError(checked.detail)
     target_release = checked.selected_release
@@ -655,42 +696,62 @@ async def _run_upgrade_apply(
     ):
         pointer, manifest = require_compatible_installation()
         root = Path(pointer.user_data_dir)
-        preview_registry = build_upgrade_registry(root)
-        preview_plan = preview_registry.build_plan(
-            source_data_generation=manifest.data_generation,
-            target_data_generation=target_release.target_data_generation,
-        )
-        preview_preflights = preview_registry.preflight(user_data_dir=root)
-        preview_estimate = sum(item.estimated_backup_bytes for item in preview_preflights)
-    if not yes:
-        renderer.render_status(
-            "Ricky upgrade plan:\n"
-            f"  software: {environment.current_version} -> "
-            f"{target_release.software_version}\n"
-            f"  data generation: {manifest.data_generation} -> "
-            f"{target_release.target_data_generation}\n"
-            f"  data root: {root}\n"
-            f"  migration steps: {len(preview_plan.steps)}\n"
-            f"  estimated mutable-state backup: {preview_estimate} bytes\n"
-            f"  profile-job updates: {'enabled' if update_jobs else 'disabled'}\n"
-            "  an active managed gateway will be stopped and restarted",
-            style="yellow",
-        )
-        if not typer.confirm("Apply this released Ricky upgrade?", default=False):
-            raise InstallationError("upgrade was cancelled before any lifecycle change")
-
     operation_id = uuid4().hex
-    software_binding = await create_software_binding(
-        user_data_dir=root,
-        operation_id=operation_id,
-        source_release=source_release,
-        target_release=target_release,
-    )
     operation_root = root / "upgrades" / operation_id
     settings = load_settings()
     managed = None
     prepared = False
+    resources = ExitStack()
     try:
+        software_binding = await create_software_binding(
+            user_data_dir=root,
+            operation_id=operation_id,
+            source_release=source_release,
+            target_release=target_release,
+        )
+        planner = resources.enter_context(
+            TargetReleasePlanner(
+                release=target_release,
+                wheel=Path(software_binding.target_wheel_path),
+                constraints=Path(software_binding.target_constraints_path),
+                python=Path(sys.executable),
+            )
+        )
+        request = PlanningRequest(
+            user_data_dir=str(root),
+            installation_id=pointer.installation_id,
+            source_software_version=environment.current_version,
+            target_software_version=target_release.software_version,
+            source_data_generation=manifest.data_generation,
+            target_data_generation=target_release.target_data_generation,
+        )
+        with installation_operation_lock(
+            mode="shared",
+            timeout_seconds=5.0,
+            operation="upgrade_preflight",
+        ):
+            preview = planner.inspect(request)
+        preview_managed = UpgradeManagedBinding(update_jobs=update_jobs)
+        preview_estimate = estimate_backup_bytes(
+            preview.plan,
+            preview.preflights,
+            managed=preview_managed,
+        )
+        if not yes:
+            renderer.render_status(
+                "Ricky upgrade plan:\n"
+                f"  software: {environment.current_version} -> {target_release.software_version}\n"
+                f"  data generation: {manifest.data_generation} -> "
+                f"{target_release.target_data_generation}\n"
+                f"  data root: {root}\n"
+                f"  migration steps: {len(preview.plan.steps)}\n"
+                f"  estimated mutable-state backup: {preview_estimate} bytes\n"
+                f"  profile-job updates: {'enabled' if update_jobs else 'disabled'}\n"
+                "  an active managed gateway will be stopped and restarted",
+                style="yellow",
+            )
+            if not typer.confirm("Apply this released Ricky upgrade?", default=False):
+                raise InstallationError("upgrade was cancelled before any lifecycle change")
         managed = await prepare_managed_upgrade(
             settings=settings,
             source_executable=Path(environment.executable),
@@ -710,14 +771,20 @@ async def _run_upgrade_apply(
             if locked_target != target_release or locked_source != source_release:
                 raise InstallationError("release metadata changed while preparing the upgrade")
 
-            registry = build_upgrade_registry(root)
-            plan = registry.build_plan(
-                source_data_generation=manifest.data_generation,
-                target_data_generation=target_release.target_data_generation,
+            verify_managed_upgrade_prepared(
+                settings=settings,
+                source_executable=Path(environment.executable),
+                managed=managed,
             )
-            if plan != preview_plan:
+            planned = planner.inspect(request)
+            if planned.plan != preview.plan:
                 raise InstallationError("upgrade migration plan changed after confirmation")
-            registry.preflight(user_data_dir=root)
+            # File sizes can change while the preview's shared lock permits
+            # normal runtimes; mutation scope cannot expand after confirmation.
+            if tuple((p.target, p.backup_paths) for p in planned.preflights) != tuple(
+                (p.target, p.backup_paths) for p in preview.preflights
+            ):
+                raise InstallationError("upgrade backup scope changed after confirmation")
 
             software = UvToolSoftwareController(
                 environment=environment,
@@ -727,7 +794,7 @@ async def _run_upgrade_apply(
             coordinator = UpgradeCoordinator(
                 user_data_dir=root,
                 lock=lock,
-                registry=registry,
+                registry=UpgradeRegistry(),
                 software=software,
                 integrations=ManagedUpgradeController(
                     user_data_dir=root,
@@ -743,9 +810,11 @@ async def _run_upgrade_apply(
                 operation_id=operation_id,
                 software=software_binding,
                 managed=managed,
+                target_plan=planned.plan,
+                target_preflights=planned.preflights,
             )
             prepared = True
-            journal = await asyncio.to_thread(coordinator.resume)
+            journal = await _resume_owned_upgrade(coordinator)
         restart_gateway_after_upgrade(
             user_data_dir=root,
             executable=Path(environment.executable),
@@ -780,13 +849,38 @@ async def _run_upgrade_apply(
                     f"be restarted: {restore_failure}"
                 )
         raise
+    finally:
+        resources.close()
 
 
-def _run_upgrade_recovery(*, rollback: bool, as_json: bool) -> UpgradeJournal:
+async def _resume_owned_upgrade(coordinator: UpgradeCoordinator) -> UpgradeJournal:
+    """Retain the installation lock until a non-cancellable worker has exited."""
+
+    worker = asyncio.create_task(asyncio.to_thread(coordinator.resume))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling a to_thread await does not stop its thread. Releasing the
+        # lock here would let normal runtimes enter during software replacement.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        worker.result()  # Preserve a child handoff or a durable failure.
+        raise
+
+
+def _run_upgrade_recovery(
+    *,
+    rollback: bool,
+    as_json: bool,
+    environment: InstalledToolEnvironment | None = None,
+) -> UpgradeJournal:
     pointer, manifest = require_installation()
     if manifest.operation_id is None:
         raise InstallationError("installation has no active upgrade operation")
-    environment = discover_installed_tool_environment()
+    environment = environment or discover_installed_tool_environment()
     root = Path(pointer.user_data_dir)
     with installation_operation_lock(
         mode="exclusive",
@@ -799,6 +893,22 @@ def _run_upgrade_recovery(*, rollback: bool, as_json: bool) -> UpgradeJournal:
             lock=lock,
             as_json=as_json,
         )
+        if not rollback:
+            recorded = load_upgrade_journal(
+                user_data_dir=root,
+                operation_id=manifest.operation_id,
+                installation_id=manifest.installation_id,
+            )
+            # A source process may resume backup/replacement and hand off. Once
+            # the target is installed, only its own adapters can run migrations.
+            if (
+                software.inspect_version() == recorded.target_software_version
+                and ReleaseVersion.parse(__version__) != recorded.target_software_version
+            ):
+                raise InstallationError(
+                    "resume must run through the exact journaled target release; "
+                    "use the installed Ricky upgrade --resume command"
+                )
         coordinator = UpgradeCoordinator(
             user_data_dir=root,
             lock=lock,

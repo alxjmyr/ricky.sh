@@ -13,7 +13,7 @@ import pytest
 
 import ricky.upgrades.integrations as integrations
 from ricky.config import load_settings_at
-from ricky.gateway.service_unit import MARKER
+from ricky.gateway.service_unit import MARKER, CommandResult, GatewayServiceUnit
 from ricky.installation import initialize_installation
 from ricky.schedules.cron import BEGIN_MARKER, END_MARKER
 from ricky.upgrades.integrations import (
@@ -21,6 +21,7 @@ from ricky.upgrades.integrations import (
     ManagedUpgradeController,
     ManagedUpgradeResult,
     prepare_managed_upgrade,
+    verify_managed_upgrade_prepared,
 )
 from ricky.upgrades.journal import (
     UpgradeJournal,
@@ -31,6 +32,139 @@ from ricky.upgrades.models import MigrationPlan
 from ricky.upgrades.versions import ReleaseVersion
 
 OPERATION_ID = "b" * 32
+
+
+def test_upgrade_preserves_installed_gateway_project_from_different_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, settings = _settings(tmp_path)
+    original_project = tmp_path / "original project"
+    original_project.mkdir()
+    caller_project = tmp_path / "different-project"
+    caller_project.mkdir()
+    executable = tmp_path / "ricky"
+
+    def runner(args: Any) -> CommandResult:
+        action = args[2]
+        if action == "is-enabled":
+            return CommandResult(tuple(args), 0, "enabled", "")
+        if action == "is-active":
+            return CommandResult(tuple(args), 3, "inactive", "")
+        return CommandResult(tuple(args), 0, "", "")
+
+    unit = GatewayServiceUnit(
+        settings, executable=str(executable), project_root=original_project, runner=runner
+    )
+    unit.install()
+    original = unit.installed()
+
+    def unit_factory(
+        config: Any, *, executable: str, project_root: Path | None = None
+    ) -> GatewayServiceUnit:
+        return GatewayServiceUnit(
+            config, executable=executable, project_root=project_root, runner=runner
+        )
+
+    monkeypatch.setattr(integrations, "GatewayServiceUnit", unit_factory)
+
+    async def no_cron(_backend: object) -> bool:
+        return False
+
+    monkeypatch.setattr(integrations, "managed_schedules_installed", no_cron)
+    monkeypatch.chdir(caller_project)
+    binding = asyncio.run(
+        prepare_managed_upgrade(
+            settings=settings,
+            source_executable=executable,
+            update_jobs=False,
+        )
+    )
+    verify_managed_upgrade_prepared(
+        settings=settings, source_executable=executable, managed=binding
+    )
+    outcome = ManagedUpgradeController(
+        user_data_dir=root, executable=executable, run_async=asyncio.run
+    )._reconcile_gateway(settings, binding)
+    assert outcome == "inactive"
+    assert unit.installed() == original
+
+
+@pytest.mark.parametrize("directory", ["", "relative", "/does-not-exist", "/tmp /tmp", "'unclosed"])
+def test_upgrade_refuses_invalid_installed_working_directory(
+    tmp_path: Path, directory: str
+) -> None:
+    _root, settings = _settings(tmp_path)
+    unit = GatewayServiceUnit(settings, executable=str(tmp_path / "ricky"), project_root=tmp_path)
+    unit.unit_path.parent.mkdir(parents=True, exist_ok=True)
+    unit.unit_path.write_text(f"{MARKER}\nWorkingDirectory={directory}\n", encoding="utf-8")
+    with pytest.raises(ManagedIntegrationError, match="working directory"):
+        asyncio.run(
+            prepare_managed_upgrade(
+                settings=settings, source_executable=tmp_path / "ricky", update_jobs=False
+            )
+        )
+
+
+@pytest.mark.parametrize("change", [None, "content", "active", "runtime", "enabled", "missing"])
+def test_exclusive_revalidation_requires_unchanged_inactive_gateway(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str | None
+) -> None:
+    _root, settings = _settings(tmp_path)
+    executable = tmp_path / "ricky"
+    expected = f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={executable} gateway run\n"
+
+    class FakeUnit:
+        unit_path = tmp_path / "ricky-gateway.service"
+
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
+            pass
+
+        def render(self) -> str:
+            return expected
+
+        def installed(self) -> str | None:
+            if change == "missing":
+                return None
+            return expected + "# edited\n" if change == "content" else expected
+
+        def enabled(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                returncode=0 if change != "enabled" else 1,
+                stdout="enabled" if change != "enabled" else "disabled",
+            )
+
+        def status(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                returncode=0 if change == "active" else 3,
+                stdout="active" if change == "active" else "inactive",
+            )
+
+    class FakeLock:
+        def __init__(self, _settings: object) -> None:
+            pass
+
+        def is_active(self) -> bool:
+            return change == "runtime"
+
+    monkeypatch.setattr(integrations, "GatewayServiceUnit", FakeUnit)
+    monkeypatch.setattr(integrations, "GatewayLock", FakeLock)
+    binding = UpgradeManagedBinding(
+        gateway_unit_path=str(FakeUnit.unit_path),
+        gateway_unit_sha256=hashlib.sha256(expected.encode()).hexdigest(),
+        gateway_was_enabled=True,
+        gateway_was_active=True,
+    )
+    if change is None:
+        verify_managed_upgrade_prepared(
+            settings=settings, source_executable=executable, managed=binding
+        )
+    else:
+        with pytest.raises(ManagedIntegrationError):
+            verify_managed_upgrade_prepared(
+                settings=settings, source_executable=executable, managed=binding
+            )
 
 
 def _settings(tmp_path: Path) -> tuple[Path, Any]:
@@ -62,11 +196,15 @@ def test_prepare_records_and_stops_an_exact_owned_gateway(
     class FakeUnit:
         unit_path = (tmp_path / "ricky-gateway.service").resolve()
 
-        def __init__(self, _settings: object, *, executable: str) -> None:
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
             self.executable = executable
 
         def render(self) -> str:
-            return f"{MARKER}\nExecStart={self.executable} gateway run\n"
+            return (
+                f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={self.executable} gateway run\n"
+            )
 
         def installed(self) -> str:
             return self.render()
@@ -113,7 +251,7 @@ def test_prepare_records_and_stops_an_exact_owned_gateway(
     assert binding.managed_crontab_was_installed is True
     assert binding.update_jobs is True
     assert binding.gateway_unit_path == str(FakeUnit.unit_path)
-    expected = f"{MARKER}\nExecStart={executable} gateway run\n"
+    expected = f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={executable} gateway run\n"
     assert binding.gateway_unit_sha256 == hashlib.sha256(expected.encode()).hexdigest()
 
 
@@ -126,11 +264,15 @@ def test_prepare_restores_a_stopped_gateway_if_preparation_aborts(
     class FakeUnit:
         unit_path = (tmp_path / "ricky-gateway.service").resolve()
 
-        def __init__(self, _settings: object, *, executable: str) -> None:
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
             self.executable = executable
 
         def render(self) -> str:
-            return f"{MARKER}\nExecStart={self.executable} gateway run\n"
+            return (
+                f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={self.executable} gateway run\n"
+            )
 
         def installed(self) -> str:
             return self.render()
@@ -183,7 +325,9 @@ def test_prepare_refuses_a_foreign_gateway_without_controlling_it(
     class ForeignUnit:
         unit_path = (tmp_path / "ricky-gateway.service").resolve()
 
-        def __init__(self, _settings: object, *, executable: str) -> None:
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
             del executable
 
         def installed(self) -> str:
@@ -208,17 +352,21 @@ def test_gateway_reconciliation_preserves_enabled_and_inactive_state(
     source = (tmp_path / "old" / "ricky").resolve()
     target = (tmp_path / "new" / "ricky").resolve()
     unit_path = (tmp_path / "ricky-gateway.service").resolve()
-    source_content = f"{MARKER}\nExecStart={source} gateway run\n"
+    source_content = f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={source} gateway run\n"
     state = {"content": source_content}
     calls: list[str] = []
 
     class FakeUnit:
-        def __init__(self, _settings: object, *, executable: str) -> None:
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
             self.executable = executable
             self.unit_path = unit_path
 
         def render(self) -> str:
-            return f"{MARKER}\nExecStart={self.executable} gateway run\n"
+            return (
+                f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={self.executable} gateway run\n"
+            )
 
         def installed(self) -> str:
             return state["content"]
@@ -255,7 +403,10 @@ def test_gateway_reconciliation_preserves_enabled_and_inactive_state(
     )._reconcile_gateway(settings, binding)
 
     assert outcome == "inactive"
-    assert state["content"] == f"{MARKER}\nExecStart={target} gateway run\n"
+    assert (
+        state["content"]
+        == f"{MARKER}\nWorkingDirectory={tmp_path}\nExecStart={target} gateway run\n"
+    )
     assert calls == ["install", "reload", "enable"]
 
 
@@ -265,15 +416,20 @@ def test_gateway_rollback_accepts_the_target_template_and_restores_source(
     root, settings = _settings(tmp_path)
     executable = (tmp_path / "tool" / "bin" / "ricky").resolve()
     unit_path = (tmp_path / "ricky-gateway.service").resolve()
-    source_content = f"{MARKER}\n[Service]\nExecStart={executable} gateway run\n"
+    source_content = (
+        f"{MARKER}\nWorkingDirectory={tmp_path}\n[Service]\nExecStart={executable} gateway run\n"
+    )
     state = {
         "content": (
-            f"{MARKER}\n[Service]\nTargetFeature=true\nExecStart={executable} gateway run\n"
+            f"{MARKER}\nWorkingDirectory={tmp_path}\n[Service]\nTargetFeature=true\n"
+            f"ExecStart={executable} gateway run\n"
         )
     }
 
     class FakeUnit:
-        def __init__(self, _settings: object, *, executable: str) -> None:
+        def __init__(
+            self, _settings: object, *, executable: str, project_root: Path | None = None
+        ) -> None:
             self.executable = executable
             self.unit_path = unit_path
 

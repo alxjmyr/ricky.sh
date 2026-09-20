@@ -806,12 +806,16 @@ def installation_operation_lock(
 
 
 def _active_operation_detail(path: Path) -> str:
+    runtime_detail = (
+        "another Ricky process is active; close open Ricky chats and wait for running "
+        "jobs or manually started gateways to exit, then retry; do not delete the lock file"
+    )
     try:
         info = InstallationOperationInfo.model_validate_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return "another Ricky process is active"
+        return runtime_detail
     if not _pid_is_alive(info.pid):
-        return "another Ricky process is active"
+        return runtime_detail
     operation_id = f" {info.operation_id}" if info.operation_id is not None else ""
     return f"Ricky operation {info.operation}{operation_id} is active (pid {info.pid})"
 

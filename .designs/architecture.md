@@ -106,6 +106,10 @@ cross-component boundary.
   declared mutable state, and verifies completion; it never embeds another
   subsystem's migration logic. Ordinary store opening creates absent current
   state or validates existing state and does not lazily migrate it.
+  The verified target release supplies inspection and planning through a strict
+  JSON protocol in a temporary isolated environment. The source release does
+  not plan schemas it cannot know. Exclusive revalidation precedes the immutable
+  journal and backup; recovery never expands that recorded migration scope.
 
 ## Profiles, configuration, and storage
 
@@ -159,6 +163,11 @@ Software replacement preserves exclusion by passing the already-held lock file
 descriptor only to the verified target executable. The child validates the
 descriptor, operation journal, target version, launcher, pointer, and
 installation identity and assumes the same lock without a close/reacquire gap.
+Rollback retains the recovering coordinator through source software restoration
+so older code need not interpret newer migration steps. An explicitly selected
+installed launcher can be bound to an isolated released coordinator for upgrade
+bootstrap or recovery; arbitrary executables and development checkouts cannot
+use that path to replace installed software.
 The complete manifest, lock, release, backup, rollback, and launcher contract
 is in [installation.md](installation.md).
 

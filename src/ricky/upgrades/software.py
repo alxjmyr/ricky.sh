@@ -157,7 +157,9 @@ class UvToolSoftwareController:
             expected=journal.source_software_version,
             minimum_uv=software.source_release.minimum_uv_version,
         )
-        self._handoff(journal, action="rollback")
+        # Keep the recovery coordinator that understands the journal alive.
+        # A historical source executable cannot interpret migrations introduced
+        # by the target release. The exclusive lock remains held throughout.
 
     def _install(
         self,
@@ -241,6 +243,10 @@ class UvToolSoftwareController:
         except subprocess.TimeoutExpired:
             child.kill()
             exit_code = child.wait()
+        except BaseException:
+            child.kill()
+            child.wait()
+            raise
         raise UpgradeHandoffComplete(exit_code)
 
     def _software(self, journal: UpgradeJournal) -> UpgradeSoftwareBinding:

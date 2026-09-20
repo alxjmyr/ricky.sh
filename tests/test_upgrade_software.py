@@ -218,6 +218,38 @@ def test_handoff_transfers_only_after_spawn_and_returns_child_status(
     os.close(lock.descriptor)
 
 
+def test_source_restore_keeps_target_coordinator_and_lock_instead_of_old_handoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal, environment, lock = _fixture(tmp_path)
+    uv = tmp_path / "uv"
+    uv.write_text("binary", encoding="utf-8")
+    uv.chmod(0o700)
+    restored: list[dict[str, Any]] = []
+    controller = UvToolSoftwareController(
+        environment=environment,
+        lock=lock,  # type: ignore[arg-type]
+        uv_executable=uv,
+    )
+    monkeypatch.setattr(controller, "_install", lambda **kwargs: restored.append(kwargs))
+
+    def forbidden_handoff(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("historical source must not inherit a target-owned recovery journal")
+
+    monkeypatch.setattr(controller, "_handoff", forbidden_handoff)
+    try:
+        controller.install_source(journal)
+        assert journal.software is not None
+        assert len(restored) == 1
+        assert restored[0]["wheel"] == Path(journal.software.source_wheel_path)
+        assert restored[0]["constraints"] == Path(journal.software.source_constraints_path)
+        assert restored[0]["expected"] == journal.source_software_version
+        assert lock.transferred is False
+        lock.require_owned_exclusive()
+    finally:
+        os.close(lock.descriptor)
+
+
 def test_uv_minimum_is_checked_before_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -364,8 +396,9 @@ def test_real_handoff_preserves_session_for_gateway_reconciliation(
 
 
 @pytest.mark.parametrize("spawn_fails", [False, True])
+@pytest.mark.parametrize("interrupted", [False, True])
 def test_handoff_keeps_lock_on_spawn_failure_and_reaps_timed_out_child(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_fails: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, spawn_fails: bool, interrupted: bool
 ) -> None:
     journal, environment, lock = _fixture(tmp_path)
     events: list[str] = []
@@ -374,6 +407,9 @@ def test_handoff_keeps_lock_on_spawn_failure_and_reaps_timed_out_child(
         def wait(self, *, timeout: int | None = None) -> int:
             assert lock.transferred
             if timeout is not None:
+                if interrupted:
+                    events.append("interrupted")
+                    raise KeyboardInterrupt
                 events.append("timeout")
                 raise subprocess.TimeoutExpired("test-child", timeout)
             events.append("reaped")
@@ -400,6 +436,10 @@ def test_handoff_keeps_lock_on_spawn_failure_and_reaps_timed_out_child(
                 controller._handoff(journal, action="resume")
             assert not lock.transferred
             assert events == []
+        elif interrupted:
+            with pytest.raises(KeyboardInterrupt):
+                controller._handoff(journal, action="resume")
+            assert events == ["interrupted", "killed", "reaped"]
         else:
             with pytest.raises(UpgradeHandoffComplete) as completed:
                 controller._handoff(journal, action="resume")
