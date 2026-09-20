@@ -46,6 +46,13 @@ _PERSONAL_PASSPHRASE = "personal-startup-passphrase-8412"
 _WORK_PASSPHRASE = "work-startup-passphrase-3791"
 
 
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    # AF_UNIX has a small platform path limit; xdist adds a worker directory.
+    # Keep the real socket and full ownership checks, but use a short test root.
+    return tmp_path_factory.mktemp("vault")
+
+
 def _settings(tmp_path: Path) -> RickySettings:
     return RickySettings(
         user_data_dir=str(tmp_path / "user"),

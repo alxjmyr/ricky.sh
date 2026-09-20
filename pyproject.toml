@@ -26,6 +26,7 @@ ricky = "ricky.interfaces.cli.app:main"
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-xdist>=3.8",
     "ruff>=0.5",
     "pyright>=1.1.370",
 ]
@@ -75,8 +76,9 @@ venv = ".venv"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra -n 4 --dist loadgroup --durations=10 --strict-markers"
 markers = [
     "browser_integration: requires the host-installed Google Chrome Stable",
+    "release_integration: builds and installs isolated historical releases with uv",
     "real_bundled_resources: discovers the real skills, workflows, and jobs shipped with Ricky",
 ]

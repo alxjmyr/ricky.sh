@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -19,13 +16,32 @@ import pytest
 import tomlkit
 from tomlkit.items import Table
 
-UV = shutil.which("uv")
+from release_support import (
+    UV,
+    BootstrapReleases,
+    _descriptor,
+    _run,
+    bootstrap_releases,
+    copy_candidate_source,
+)
+
+pytestmark = pytest.mark.release_integration
+
+
+@pytest.fixture(autouse=True)
+def isolated_uv_cache(release_uv_cache: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("UV_CACHE_DIR", str(release_uv_cache))
+
+
+@pytest.fixture(scope="session")
+def bootstrap_artifacts(test_run_root: Path, release_uv_cache: Path) -> BootstrapReleases:
+    return bootstrap_releases(test_run_root / "bootstrap-releases", release_uv_cache)
 
 
 @pytest.mark.skipif(UV is None, reason="uv is required for the released-installation drill")
 @pytest.mark.parametrize("recovery", ["complete", "resume", "rollback"])
 def test_actual_087_schemas_upgrade_with_isolated_bootstrap_and_recovery(
-    tmp_path: Path, recovery: str
+    tmp_path: Path, recovery: str, bootstrap_artifacts: BootstrapReleases
 ) -> None:
     """Exercise old code, target planning, migration, interruption, and recovery.
 
@@ -33,87 +49,13 @@ def test_actual_087_schemas_upgrade_with_isolated_bootstrap_and_recovery(
     not candidate code with a relabeled version. Only the candidate contains a
     test-only one-shot crash immediately before whole-installation verification.
     """
-    repository = Path(__file__).parents[1]
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
-    old_source = tmp_path / "source-0.8.7"
-    old_source.mkdir()
-    archived = subprocess.run(
-        [
-            "git",
-            "archive",
-            "v0.8.7",
-            "src",
-            "docs",
-            "scripts/bundle_docs.py",
-            "hatch_build.py",
-            "pyproject.toml",
-            "README.md",
-            "ricky.toml.example",
-            ".secrets.toml.example",
-            "uv.lock",
-        ],
-        cwd=repository,
-        capture_output=True,
-        check=True,
+    legacy = bootstrap_artifacts.legacy
+    target = (
+        bootstrap_artifacts.candidate if recovery == "complete" else bootstrap_artifacts.interrupted
     )
-    with tarfile.open(fileobj=io.BytesIO(archived.stdout)) as archive:
-        archive.extractall(old_source, filter="data")
-    target_source = tmp_path / "source-candidate"
-    target_source.mkdir()
-    for name in ("src", "docs"):
-        shutil.copytree(repository / name, target_source / name)
-    (target_source / "scripts").mkdir()
-    shutil.copy2(repository / "scripts/bundle_docs.py", target_source / "scripts/bundle_docs.py")
-    for name in (
-        "hatch_build.py",
-        "pyproject.toml",
-        "README.md",
-        "ricky.toml.example",
-        ".secrets.toml.example",
-        "uv.lock",
-    ):
-        shutil.copy2(repository / name, target_source / name)
-    candidate = tomllib.loads((target_source / "pyproject.toml").read_text())["project"]["version"]
-    crash_marker = tmp_path / "interrupt-before-verification"
-    coordinator_path = target_source / "src/ricky/upgrades/orchestrator.py"
-    coordinator = coordinator_path.read_text()
-    needle = "    def _verify_target(self, journal: UpgradeJournal) -> None:\n"
-    assert coordinator.count(needle) == 1
-    if recovery != "complete":
-        coordinator_path.write_text(
-            coordinator.replace(
-                needle,
-                needle + f"        crash_marker = Path({str(crash_marker)!r})\n"
-                "        if crash_marker.exists():\n"
-                "            crash_marker.unlink()\n"
-                "            __import__('os')._exit(87)\n",
-            )
-        )
-    descriptors = []
-    for version, source in (("0.8.7", old_source), (candidate, target_source)):
-        constraints = artifacts / f"ricky-{version}-constraints.txt"
-        _run(
-            [
-                str(UV),
-                "export",
-                "--frozen",
-                "--no-dev",
-                "--no-emit-project",
-                "--no-header",
-                "--format",
-                "requirements.txt",
-                "--output-file",
-                str(constraints),
-            ],
-            cwd=source,
-        )
-        _run([str(UV), "build", "--wheel", "--out-dir", str(artifacts)], cwd=source)
-        descriptors.append(
-            _descriptor(
-                artifacts, version, artifacts / f"ricky-{version}-py3-none-any.whl", constraints
-            )
-        )
+    candidate = target.version
+    crash_marker = tmp_path / "user-data" / "interrupt-before-verification"
+    descriptors = [legacy.descriptor, target.descriptor]
     host_bin, service_state, _ = _fake_host_commands(tmp_path)
     tool_root, bin_root = tmp_path / "tools", tmp_path / "bin"
     environment = {
@@ -137,8 +79,8 @@ def test_actual_087_schemas_upgrade_with_isolated_bootstrap_and_recovery(
         [
             *install,
             "--constraints",
-            str(artifacts / "ricky-0.8.7-constraints.txt"),
-            str(artifacts / "ricky-0.8.7-py3-none-any.whl"),
+            str(legacy.constraints),
+            str(legacy.wheel),
         ],
         env=environment,
     )
@@ -151,8 +93,8 @@ def test_actual_087_schemas_upgrade_with_isolated_bootstrap_and_recovery(
         [
             *install,
             "--constraints",
-            str(artifacts / f"ricky-{candidate}-constraints.txt"),
-            str(artifacts / f"ricky-{candidate}-py3-none-any.whl"),
+            str(target.constraints),
+            str(target.wheel),
         ],
         env=bootstrap_environment,
     )
@@ -396,7 +338,7 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
     wheels: dict[str, Path] = {}
     for version in ("0.6.0", "0.6.1"):
         source = tmp_path / f"source-{version}"
-        shutil.copytree(repository / "src", source / "src")
+        copy_candidate_source(source)
         if version == "0.6.0":
             # A protocol-aware source still has only its own schema knowledge.
             # Use the real old owner implementation, not a changed version label.
@@ -404,12 +346,6 @@ def test_isolated_uv_tool_replaces_itself_through_local_release_pair(
                 ["git", "show", "v0.8.7:src/ricky/sessions/upgrade.py"], cwd=repository
             ).stdout
             (source / "src/ricky/sessions/upgrade.py").write_text(old_owner)
-        shutil.copytree(repository / "docs", source / "docs")
-        (source / "scripts").mkdir()
-        shutil.copy2(repository / "scripts/bundle_docs.py", source / "scripts/bundle_docs.py")
-        for name in ("hatch_build.py", "ricky.toml.example", ".secrets.toml.example"):
-            shutil.copy2(repository / name, source / name)
-        shutil.copy2(repository / "README.md", source / "README.md")
         project = tomlkit.parse((repository / "pyproject.toml").read_text(encoding="utf-8"))
         metadata = project["project"]
         assert isinstance(metadata, Table)
@@ -751,66 +687,3 @@ state_path.write_text(Path(sys.argv[1]).read_text(encoding="utf-8"), encoding="u
     systemctl.chmod(0o755)
     crontab.chmod(0o755)
     return host_bin, systemctl_state, crontab_state
-
-
-def _descriptor(
-    root: Path,
-    version: str,
-    wheel: Path,
-    constraints: Path,
-) -> Path:
-    def artifact(path: Path) -> dict[str, object]:
-        payload = path.read_bytes()
-        return {
-            "name": path.name,
-            "url": path.resolve().as_uri(),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size": len(payload),
-        }
-
-    path = root / f"ricky-{version}-release.json"
-    path.write_text(
-        json.dumps(
-            {
-                "format_version": 1,
-                "repository": "alxjmyr/ricky.sh",
-                "channel": "stable",
-                "source": "local_drill",
-                "software_version": version,
-                "supported_source_data_generations": [1],
-                "target_data_generation": 1,
-                "python_requirement": ">=3.12",
-                "minimum_uv_version": "0.6.0",
-                "wheel": artifact(wheel),
-                "constraints": artifact(constraints),
-            }
-        ),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _run(
-    command: list[str],
-    *,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-    timeout: int = 120,
-) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        command,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
-    if completed.returncode != 0:
-        # Surface the child's own diagnosis; a bare CalledProcessError hides it.
-        raise AssertionError(
-            f"command failed ({completed.returncode}): {' '.join(command)}\n"
-            f"stdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
-        )
-    return completed

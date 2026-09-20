@@ -7,10 +7,10 @@ import pytest
 from pydantic import SecretStr
 from rich.console import Console
 
+from browser_challenge_support import Journal, record
 from ricky.browser.challenges import LiveBrowserChallenge
 from ricky.interfaces.cli.input import CliInputSession
 from ricky.interfaces.cli.render import CliRenderer
-from test_browser_challenges import Journal, record
 
 
 @pytest.mark.parametrize("answer", ["123456", ""])

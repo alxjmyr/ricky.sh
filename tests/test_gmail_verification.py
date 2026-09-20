@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 
+from browser_challenge_support import configured
 from ricky.browser.verification import (
     VerificationQuery,
     VerificationUnavailable,
@@ -15,7 +16,6 @@ from ricky.config import GoogleAccountSettings
 from ricky.profiles import ProfileScope
 from ricky.tools.integrations.gmail.client import GmailClient
 from ricky.tools.integrations.gmail.verification import GmailVerificationReader
-from test_browser_verification import configured
 from test_gmail_client import FakeAuth
 
 

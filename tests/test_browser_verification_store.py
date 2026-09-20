@@ -7,12 +7,12 @@ from pathlib import Path
 import pytest
 
 from authority_support import settings
+from browser_challenge_support import record
 from ricky.browser.challenge_store import BrowserChallengeStore
 from ricky.browser.challenge_upgrade import BrowserChallengesUpgradeAdapter
 from ricky.browser.challenges import ChallengeError
 from ricky.browser.verification_store import VerificationClaimStore, VerificationSourceClaim
 from ricky.profiles import ProfileResourceRef, ProfileScope
-from test_browser_challenges import record
 
 
 async def test_source_claim_is_atomic_durable_scoped_and_in_upgrade_inventory(tmp_path):

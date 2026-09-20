@@ -5,13 +5,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from authority_support import CONVERSATION_ID, PRINCIPAL, inbound, settings
+from browser_challenge_support import Journal, record
+from gateway_conversation_support import HandoffTransport, _handoff_messaging
 from ricky.browser.challenges import LiveBrowserChallenge
 from ricky.executions.challenges import ExecutionBrowserChallenges
 from ricky.executions.types import ExecutionRequest
 from ricky.messaging.store import MessagingStore
 from ricky.notifications.service import NotificationService
-from test_browser_challenges import Journal, record
-from test_gateway_conversations import HandoffTransport, _handoff_messaging
 
 
 @pytest.mark.parametrize("scenario", ["otp", "manual", "delivery_race", "expired"])

@@ -1,10 +1,11 @@
 """Synthetic checkout content shared by real-browser transaction tests."""
 
 
-def checkout_html() -> bytes:
+def checkout_html(*, background_sections: int = 0) -> bytes:
+    """Use a compact checkout unless a test specifically exercises DOM size."""
     background = "\n".join(
         f"<section><h2>Account information {index}</h2><p>Background content</p></section>"
-        for index in range(180)
+        for index in range(background_sections)
     )
     return (
         """<!doctype html><html><head><title>Fixture account</title></head><body>

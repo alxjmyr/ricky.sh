@@ -274,6 +274,8 @@ async def test_invalid_image_batch_preserves_existing_selection(tmp_path: Any) -
     good = tmp_path / "good.png"
     good.write_bytes(b"good")
     console, output = _console()
+    # Assert the diagnostic content independently of worker-path line wrapping.
+    console.width = 200
     session = CliInputSession(console, interactive=False)
     session.configure_images(_upload_loader)
     await session._select_images(str(good))
@@ -361,9 +363,9 @@ async def test_picker_completes_directories_before_images(
             await asyncio.sleep(0.05)
             pipe.send_text(keys)
         assert await asyncio.wait_for(task, 2) == ""
-        assert [item.filename for item in session.staged_images] == [
-            "picture.PNG"
-        ], output.getvalue()
+        assert [item.filename for item in session.staged_images] == ["picture.PNG"], (
+            output.getvalue()
+        )
         assert session.staged_images[0].content == b"snapshot"
         assert "Is a directory" not in output.getvalue()
 

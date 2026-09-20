@@ -7,6 +7,21 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(scope="session")
+def test_run_root(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest) -> Path:
+    """One disposable root shared by this run's workers, never by separate runs."""
+    base = tmp_path_factory.getbasetemp()
+    return base.parent if hasattr(request.config, "workerinput") else base
+
+
+@pytest.fixture(scope="session")
+def release_uv_cache(test_run_root: Path) -> Path:
+    """Share downloaded packages without sharing installed tools or user state."""
+    cache = test_run_root / "release-uv-cache"
+    cache.mkdir(exist_ok=True)
+    return cache
+
+
 @pytest.fixture(autouse=True)
 def plain_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep CLI text assertions independent of CI's forced terminal styling."""
@@ -69,9 +84,15 @@ def bundled_root(tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture(scope="session")
+def empty_bundled_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """An empty resource catalog; tests that author bundles use bundled_root."""
+    return tmp_path_factory.mktemp("empty-bundled")
+
+
 @pytest.fixture(autouse=True)
 def isolate_bundled_root(
-    bundled_root: Path,
+    empty_bundled_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> None:
@@ -88,4 +109,9 @@ def isolate_bundled_root(
 
     from ricky import builtins
 
-    monkeypatch.setattr(builtins, "bundled_root", lambda: bundled_root)
+    root = (
+        request.getfixturevalue("bundled_root")
+        if "bundled_root" in request.fixturenames
+        else empty_bundled_root
+    )
+    monkeypatch.setattr(builtins, "bundled_root", lambda: root)

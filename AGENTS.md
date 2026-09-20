@@ -25,21 +25,24 @@ Use these exact commands and flags:
 |---|---|
 | Install or sync | `uv sync` |
 | All tests | `uv run pytest` |
-| Inner-loop tests | `uv run pytest -m "not browser_integration"` |
-| One test file | `uv run pytest tests/<file> -v` |
+| Inner-loop tests | `uv run pytest -m "not browser_integration and not release_integration"` |
+| Real browser tests | `uv run pytest -m browser_integration` |
+| Release installation drills | `uv run pytest -m release_integration` |
+| One test file | `uv run pytest tests/<file> -n 0 -v` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
 | Type check | `uv run pyright` |
 | CLI | `uv run ricky` |
 
-The sanctioned inner-loop test command excludes only tests that control a real
-Google Chrome process. Browser unit, service, policy, backend-contract,
-and tool tests still run. Use it while iterating when the current changes do not
-affect the real-browser boundaries below. It is not a completion gate or a
-substitute for the full test command.
+Tests run on four worker processes by default. Use `-n 0` for serial debugging,
+or `-n 2` to reduce resource use. The inner-loop command excludes real Google
+Chrome and isolated release installation drills. Browser unit, service, policy,
+backend-contract, tool, and ordinary upgrade tests still run. Use it while
+iterating when the current changes do not affect the real-browser boundaries
+below. It is not a completion gate or a substitute for the full test command.
 
 During development, run
-`uv run pytest tests/test_browser_integration.py -v` for browser changes that
+`uv run pytest -m browser_integration` for browser changes that
 can affect browser configuration or runtime composition, Playwright integration,
 process/session/page ownership, live semantic snapshot shape or redaction,
 action dispatch, navigation or destination interception, dialogs, frames or
@@ -47,6 +50,35 @@ popups, persistent resources, or CDP attachment.
 
 Before declaring repository changes complete, all three must pass:
 `uv run pytest && uv run ruff check . && uv run pyright`.
+
+## Keep tests fast and trustworthy
+
+- Read `tests/README.md` before adding or restructuring tests; it maps expensive
+  scenarios to their coverage owners and explains fixture isolation.
+- Test each behavior at the narrowest boundary that can detect its regression.
+  Keep real-browser and installed-release tests for guarantees that require
+  those boundaries, plus representative end-to-end wiring. Put additional
+  policy, parsing, and state-transition cases in focused tests rather than
+  multiplying expensive journey matrices.
+- Mark tests that launch real Chrome as `browser_integration` and isolated
+  release installation drills as `release_integration`. Do not move ordinary
+  harness coverage out of the core lane to make it appear faster.
+- Use events or explicit state transitions for synchronization and a controlled
+  owner clock for elapsed-time cases. Avoid long sleeps; retain real-timer tests
+  where timer behavior is the contract. Bound waits and cancel and await owned
+  tasks and processes on failure.
+- Keep fixtures minimal: large DOMs and resource-heavy inputs belong in their
+  dedicated boundary tests. Reuse `*_support.py` helpers rather than importing
+  other test modules. Share immutable setup through existing fixtures; keep
+  writable homes, profiles, databases, and installation state isolated per test.
+  Tests must work independently and under the default parallel runner.
+- Review the default slowest-test report when adding expensive coverage. Before
+  increasing timeouts, adding worker groups, or disabling parallelism, identify
+  the bottleneck and fix unnecessary setup or synchronization. Preserve genuine
+  process, locking, and browser ownership checks.
+- When removing or consolidating cases, identify the retained regression
+  assertions and update the coverage mapping in `tests/README.md` where relevant.
+  A similarly named fake test is not evidence that a real boundary is covered.
 
 ## Engineering rules
 

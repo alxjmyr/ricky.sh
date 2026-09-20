@@ -9,6 +9,8 @@ import httpx
 import pytest
 from PIL import Image
 
+from gateway_conversation_support import ScriptedProvider, _answer
+from gateway_conversation_support import _settings as gateway_settings
 from ricky.attachments import read_stored_attachment
 from ricky.config import user_data_path
 from ricky.gateway.conversations import ConversationCoordinator
@@ -16,8 +18,6 @@ from ricky.interfaces.messaging.telegram import TelegramTransport
 from ricky.llm import CompletionRequest, ImagePart, MediaResolver, StreamEvent
 from ricky.messaging.store import InboxLeaseError, MessagingStore
 from ricky.messaging.types import ReceiveBatch, ReceivedImage
-from test_gateway_conversations import ScriptedProvider, _answer
-from test_gateway_conversations import _settings as gateway_settings
 from test_messaging_store import MutableClock, _batch, _settings, _update
 from test_telegram_transport import TOKEN
 from test_telegram_transport import _settings as telegram_settings

@@ -5,6 +5,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from pydantic import ValidationError
 
+from browser_challenge_support import (
+    configured,
+)
 from ricky.browser.verification import (
     VerificationCeiling,
     VerificationMessage,
@@ -12,36 +15,8 @@ from ricky.browser.verification import (
     compile_verification_ceiling,
     eligible_message,
 )
-from ricky.config import BrowserVerificationSettings, RickySettings
+from ricky.config import BrowserVerificationSettings
 from ricky.profiles import ProfileResourceRef, ProfileScope
-
-
-def configured() -> RickySettings:
-    return RickySettings.model_validate(
-        {
-            "profiles": {"enabled": ["shared", "personal", "work"], "default": "personal"},
-            "profile_configs": {
-                "personal": {
-                    "google": {
-                        "accounts": {
-                            "mail": {
-                                "email": "owner@example.com",
-                                "verification_aliases": ["alias@example.com"],
-                            }
-                        }
-                    }
-                },
-                "work": {"google": {"accounts": {"mail": {"email": "work@example.com"}}}},
-            },
-            "browser": {
-                "verification": {
-                    "enabled": True,
-                    "allow_background": True,
-                    "gmail_accounts": ["personal/mail", "work/mail"],
-                }
-            },
-        }
-    )
 
 
 def test_verification_ceiling_filters_profiles_and_pins_aliases():

@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 
 from authority_support import settings
+from browser_challenge_support import SOURCE, record
 from ricky.browser.challenge_store import BrowserChallengeStore
 from ricky.browser.challenge_upgrade import BrowserChallengesUpgradeAdapter
 from ricky.browser.challenges import ChallengeError
 from ricky.profiles import ProfileScope
-from test_browser_challenges import SOURCE, record
 
 
 async def test_store_roundtrip_scope_and_separate_roots(tmp_path: Path) -> None:

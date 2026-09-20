@@ -8,6 +8,7 @@ import pytest
 from playwright.async_api import BrowserType
 from pydantic import SecretStr
 
+from browser_checkout_support import checkout_settings
 from ricky.agent import AgentSession
 from ricky.browser.challenge_store import BrowserChallengeStore
 from ricky.browser.challenge_wait import ChallengeWaitBudget
@@ -23,7 +24,6 @@ from ricky.browser.tools import (
 )
 from ricky.browser.types import BrowserActionTarget, BrowserError
 from ricky.tools import ToolContext
-from test_browser_gateway_checkout import checkout_settings
 
 pytestmark = pytest.mark.browser_integration
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import shutil
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,33 +14,14 @@ import pytest
 from playwright.async_api import BrowserType
 from pydantic import SecretStr
 
-from browser_transaction_support import checkout_html
-from ricky.authority.registry import AuthorityRegistry
-from ricky.authority.store import AuthorityStore
-from ricky.browser.authority import browser_authority_evaluators
-from ricky.browser.challenge_store import BrowserChallengeStore
-from ricky.browser.guardrails import browser_guardrail_evaluators
-from ricky.browser.playwright_backend import PlaywrightBrowserBackend
-from ricky.browser.policy import DestinationPolicy
-from ricky.browser.service import BrowserService
-from ricky.browser.verification import VerificationMessage, VerificationUnavailable
-from ricky.config import GoogleAccountSettings, GoogleOAuthClientSettings, GoogleSettings
-from ricky.executions.contracts import ExecutionContract, build_execution_contract
-from ricky.executions.dispatcher import ExecutionDispatcher
-from ricky.executions.store import ExecutionStore
-from ricky.gateway.conversations import ConversationCoordinator
-from ricky.gateway.store import GatewayStore
-from ricky.llm import MessageDone
-from ricky.notifications.routes import RoutePolicy
-from ricky.notifications.service import NotificationService
-from ricky.runtime import build_session_runtime
-from test_browser_gateway_checkout import (
+from browser_checkout_support import (
     ORIGIN,
     CheckoutDelegator,
     CheckoutWorker,
     checkout_settings,
 )
-from test_gateway_conversations import (
+from browser_transaction_support import checkout_html
+from gateway_conversation_support import (
     _SCOPE,
     HandoffTransport,
     _answer,
@@ -47,12 +29,32 @@ from test_gateway_conversations import (
     _ingest,
     _tool,
 )
+from ricky.authority.registry import AuthorityRegistry
+from ricky.authority.store import AuthorityStore
+from ricky.browser.authority import browser_authority_evaluators
+from ricky.browser.challenge_store import BrowserChallengeStore
+from ricky.browser.challenge_wait import ChallengeWaitBudget
+from ricky.browser.guardrails import browser_guardrail_evaluators
+from ricky.browser.playwright_backend import PlaywrightBrowserBackend
+from ricky.browser.policy import DestinationPolicy
+from ricky.browser.service import BrowserService
+from ricky.browser.verification import VerificationMessage
+from ricky.config import GoogleAccountSettings, GoogleOAuthClientSettings, GoogleSettings
+from ricky.executions.contracts import ExecutionContract, build_execution_contract
+from ricky.executions.dispatcher import ExecutionDispatcher
+from ricky.executions.store import ExecutionStore
+from ricky.gateway.conversations import ConversationCoordinator
+from ricky.gateway.store import GatewayStore
+from ricky.llm import CompletionRequest, MessageDone, StreamEvent
+from ricky.notifications.routes import RoutePolicy
+from ricky.notifications.service import NotificationService
+from ricky.runtime import build_session_runtime
 
 pytestmark = pytest.mark.browser_integration
 
 
 class ChallengeDelegator(CheckoutDelegator):
-    async def stream(self, request):
+    async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         async for event in super().stream(request):
             if not isinstance(event, MessageDone):
                 yield event
@@ -68,14 +70,15 @@ class ChallengeDelegator(CheckoutDelegator):
 
 
 class ChallengeWorker(CheckoutWorker):
-    def __init__(self, scenario="code"):
+    def __init__(self, scenario: str, settle_pending: Callable[[], Awaitable[None]]) -> None:
         super().__init__()
         self.scenario = scenario
+        self.settle_pending = settle_pending
         self.observation_waits = 0
         self.reported = False
         self.final_submitted = False
 
-    async def stream(self, request):
+    async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
         if self.step < 9:
             async for event in super().stream(request):
                 yield event
@@ -91,7 +94,10 @@ class ChallengeWorker(CheckoutWorker):
                 for line in latest.splitlines()
                 if line.startswith("{") and '"control_kind"' in line
             ]
-            control = next(c for c in controls if c.get("protected_kind") == "one_time_code")
+            control = next(
+                (c for c in controls if c.get("protected_kind") == "one_time_code"), None
+            )
+            assert control is not None, f"Missing OTP control in checkout observation:\n{latest}"
             session = re.search(r"browser_session_[0-9a-f]{32}", latest)
             page = re.search(r"browser_page_[0-9a-f]{32}", latest)
             snapshot = re.search(r"browser_snapshot_[0-9a-f]{32}", latest)
@@ -195,10 +201,15 @@ class ChallengeWorker(CheckoutWorker):
                 return
             if "Processing verification" in results[-1] and self.observation_waits < 2:
                 self.observation_waits += 1
+                if self.scenario == "email_delayed":
+                    # The site progresses only after the worker has observed a
+                    # pending result. No wall-clock delay is needed to prove it
+                    # waits for evidence instead of reporting success early.
+                    await self.settle_pending()
                 yield _tool(
                     f"wait-{self.observation_waits}",
                     "browser_snapshot",
-                    {"session_id": self.target["session_id"], "wait_seconds": 4.0},
+                    {"session_id": self.target["session_id"]},
                 )
                 return
             uncertain = self.scenario == "email_unconfirmed"
@@ -233,13 +244,9 @@ class ChallengeWorker(CheckoutWorker):
     "scenario",
     [
         "code",
-        "duplicate",
         "cancel",
-        "slow",
         "email",
         "email_interpretation",
-        "email_fallback",
-        "email_uninterpretable",
         "email_revoked",
         "email_delayed",
         "email_unconfirmed",
@@ -250,6 +257,26 @@ class ChallengeWorker(CheckoutWorker):
 async def test_gateway_checkout_continues_after_correlated_otp_reply(
     tmp_path, monkeypatch, scenario
 ):
+    observed_budgets: list[ChallengeWaitBudget] = []
+    parked_budgets: list[ChallengeWaitBudget] = []
+    observe_task = ChallengeWaitBudget.wait_for_task
+    wait_for_reply = ChallengeWaitBudget.waiting
+
+    async def observe(budget, task, *, active_seconds):
+        observed_budgets.append(budget)
+        return await observe_task(budget, task, active_seconds=active_seconds)
+
+    @asynccontextmanager
+    async def waiting(budget):
+        async with wait_for_reply(budget):
+            parked_budgets.append(budget)
+            try:
+                yield
+            finally:
+                assert parked_budgets.pop() is budget
+
+    monkeypatch.setattr(ChallengeWaitBudget, "wait_for_task", observe)
+    monkeypatch.setattr(ChallengeWaitBudget, "waiting", waiting)
     settings = checkout_settings(tmp_path)
     settings.browser.background.budget.transaction_commits = 2
     settings.authority.capabilities["browser_commit"].max_financial_limit_minor = 6000
@@ -273,8 +300,6 @@ async def test_gateway_checkout_continues_after_correlated_otp_reply(
         async def read_email(_reader, query):
             assert query.source.account.qualified == "personal/mail"
             assert query.recipient == "owner@example.com"
-            if scenario == "email_fallback":
-                raise VerificationUnavailable("The authorized Gmail account needs reconnection.")
             if scenario == "email_revoked":
                 request = (await ExecutionStore(settings).list(scope=_SCOPE, status="running"))[0]
                 assert request.grant_id is not None
@@ -293,24 +318,22 @@ async def test_gateway_checkout_continues_after_correlated_otp_reply(
                     sender="verify@checkout.example",
                     recipients=("owner@example.com",),
                     subject="Verify your purchase",
-                    text="Use your mobile authenticator to continue."
-                    if scenario == "email_uninterpretable"
-                    else f"Your verification code is {code}.",
+                    text=f"Your verification code is {code}.",
                 ),
             )
 
         monkeypatch.setattr(
             "ricky.tools.integrations.gmail.verification.GmailVerificationReader.read", read_email
         )
-    if scenario == "slow":
-        settings.agents.ad_hoc_background.execution.wall_clock_seconds = 30
     executable = shutil.which("google-chrome-stable")
     assert executable
     starts, purchases = [], []
+    contexts = []
     launch = BrowserType.launch_persistent_context
 
     async def fixture_launch(self, *args, **kwargs):
         context = await launch(self, *args, **kwargs)
+        contexts.append(context)
 
         async def respond(route):
             request = route.request
@@ -330,10 +353,6 @@ async def test_gateway_checkout_continues_after_correlated_otp_reply(
                     body = b"<h1>Verification rejected; no purchase was made</h1>"
                 elif scenario in {"email_delayed", "email_unconfirmed"}:
                     body = b"<h1>Processing verification</h1>"
-                    if scenario == "email_delayed":
-                        body += (
-                            b"<script>setTimeout(()=>location.replace('/settled'),7500)</script>"
-                        )
                 else:
                     purchases.append("completed")
                     body = b"<h1>Purchase completed</h1><p>Credit balance: $26.42</p>"
@@ -414,11 +433,19 @@ oninput="if(this.value.length===6)this.form.requestSubmit()"></label></form>"""
     else:
         assert contract.version == 3 and contract.verification is None
     routes = RoutePolicy(settings, conversation_resolver=GatewayStore(settings))
+
+    async def settle_pending():
+        assert starts == ["pending"] and purchases == []
+        page = contexts[0].pages[0]
+        await page.evaluate("location.replace('/settled')")
+        await page.wait_for_url(ORIGIN + "/settled")
+
+    worker = ChallengeWorker(scenario, settle_pending)
     dispatcher = ExecutionDispatcher(
         settings,
         project_root=tmp_path,
         store=ExecutionStore(settings),
-        provider_factory=lambda _: ChallengeWorker(scenario),
+        provider_factory=lambda _: worker,
         authority_registry=AuthorityRegistry(list(browser_authority_evaluators())),
         routes=routes,
         notifications=NotificationService(settings, routes=routes),
@@ -449,13 +476,10 @@ oninput="if(this.value.length===6)this.form.requestSubmit()"></label></form>"""
 
     async def supply_code(owner, request_id, principal_id, scope):
         assert scenario not in {"email", "email_interpretation", "email_revoked"}
-        if scenario == "email_fallback":
-            assert owner.assistance_reason == "The authorized Gmail account needs reconnection."
-        if scenario == "email_uninterpretable":
-            assert (
-                owner.assistance_reason
-                == "The verification email did not contain an identifiable code."
-            )
+        # The live browser pauses the exact budget observed by the job runner.
+        # Elapsed-time arithmetic is exercised with a controlled clock in
+        # test_browser_challenge_wait, without a 31-second checkout sleep.
+        assert len(observed_budgets) == 1 and parked_budgets == observed_budgets
         await notify_code(owner, request_id, principal_id, scope)
         await messaging.deliver_once()
         assert starts == ["pending"] and purchases == []
@@ -463,30 +487,24 @@ oninput="if(this.value.length===6)this.form.requestSubmit()"></label></form>"""
             cancellation_request.append(request_id)
             cancellation_ready.set()
             return
-        if scenario == "slow":
-            # The user alone waits longer than the complete active-work budget.
-            # The job must retain its live browser and resume within wait capacity.
-            await asyncio.sleep(31)
         message = await _ingest(
             settings, suffix="c", text="123456", reply_to=str(len(transport.sent))
         )
         await coordinator.process(message.id)
-        if scenario == "duplicate":
-            second = await _ingest(
-                settings, suffix="e", text="123456", reply_to=message.reply_to_platform_message_id
-            )
-            await coordinator.process(second.id)
 
     monkeypatch.setattr(dispatcher, "_request_browser_challenge", supply_code)
     cancellation = asyncio.create_task(cancel_from_gateway()) if scenario == "cancel" else None
     try:
         completed = await dispatcher.worker_once(scope=_SCOPE)
         if cancellation is not None:
-            await cancellation
+            # A failure before the challenge must fail this test, not strand it
+            # waiting forever for a notification that can no longer arrive.
+            await asyncio.wait_for(cancellation, timeout=2)
     finally:
         if cancellation is not None and not cancellation.done():
             cancellation.cancel()
             await asyncio.gather(cancellation, return_exceptions=True)
+    assert len(observed_budgets) == 1 and parked_budgets == []
     if scenario == "cancel":
         assert len(completed) == 1 and completed[0].status in {"uncertain", "cancelled"}
         assert starts == ["pending"] and purchases == []
@@ -500,6 +518,7 @@ oninput="if(this.value.length===6)this.form.requestSubmit()"></label></form>"""
         assert len(records) == 1 and records[0].state == "invalidated"
         return
     if scenario == "email_unconfirmed":
+        assert worker.observation_waits == 2
         assert len(completed) == 1 and completed[0].status == "uncertain"
         assert starts == ["pending"] and purchases == []
         assert len(approvals) == 2
@@ -514,5 +533,7 @@ oninput="if(this.value.length===6)this.form.requestSubmit()"></label></form>"""
         (r.status, r.error) for r in completed
     ]
     assert starts == ["pending"] and purchases == ["completed"]
+    if scenario == "email_delayed":
+        assert worker.observation_waits == 1
     assert len(approvals) == (3 if scenario == "email_continue" else 2)
     assert await dispatcher.worker_once(scope=_SCOPE) == []

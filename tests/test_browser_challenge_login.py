@@ -12,6 +12,15 @@ import pytest
 from playwright.async_api import BrowserType
 from pydantic import SecretStr
 
+from browser_checkout_support import CheckoutDelegator, checkout_settings
+from gateway_conversation_support import (
+    _SCOPE,
+    HandoffTransport,
+    _answer,
+    _handoff_messaging,
+    _ingest,
+    _tool,
+)
 from ricky.agent import AgentSession
 from ricky.authority.registry import AuthorityRegistry
 from ricky.browser.authority import browser_authority_evaluators
@@ -31,15 +40,6 @@ from ricky.permissions import PermissionResponse
 from ricky.protected_values import ProtectedValueBroker
 from ricky.protected_values.resident import ResidentProtectedValueRegistry
 from ricky.runtime import build_session_runtime
-from test_browser_gateway_checkout import CheckoutDelegator, checkout_settings
-from test_gateway_conversations import (
-    _SCOPE,
-    HandoffTransport,
-    _answer,
-    _handoff_messaging,
-    _ingest,
-    _tool,
-)
 from test_protected_values_runtime import SENTINEL, _initialize
 
 pytestmark = pytest.mark.browser_integration

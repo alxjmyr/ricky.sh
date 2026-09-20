@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import select
 import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, cast
 
@@ -1160,35 +1163,43 @@ def test_lease_metadata_is_safe_and_stale_lock_files_are_reusable(tmp_path: Path
 def test_process_death_releases_live_resource_lease(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
     ref = ProfileResourceRef(profile="personal", name="main")
-    read_fd, write_fd = os.pipe()
-    child_pid = os.fork()
-    if child_pid == 0:  # pragma: no cover - assertions run in the parent process.
+    # xdist workers own threads. Start an independent interpreter rather than
+    # forking that threaded process, while still testing real flock/SIGKILL.
+    program = """
+import signal
+import sys
+from ricky.browser.lease import BrowserResourceLease
+from ricky.config import RickySettings
+from ricky.profiles import ProfileResourceRef
+
+settings = RickySettings(user_data_dir=sys.argv[1], project_data_dir=sys.argv[2])
+lease = BrowserResourceLease(settings, ProfileResourceRef(profile="personal", name="main"))
+lease.acquire()
+print("ready", flush=True)
+signal.pause()
+"""
+    with subprocess.Popen(
+        [sys.executable, "-c", program, settings.user_data_dir, settings.project_data_dir],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ) as child:
         try:
-            os.close(read_fd)
-            lease = BrowserResourceLease(settings, ref)
-            lease.acquire()
-            os.write(write_fd, b"ready")
-            signal.pause()
+            assert child.stdout is not None
+            ready, _, _ = select.select([child.stdout], [], [], 5)
+            assert ready, "lease owner did not become ready"
+            assert child.stdout.readline() == "ready\n"
+            with pytest.raises(BrowserError) as busy:
+                BrowserResourceLease(settings, ref).acquire()
+            assert busy.value.failure.code == "resource_busy"
+
+            child.kill()
+            assert child.wait(timeout=5) == -signal.SIGKILL
+            recovered = BrowserResourceLease(settings, ref)
+            recovered.acquire()
+            recovered.release()
         finally:
-            os._exit(0)
-
-    os.close(write_fd)
-    try:
-        assert os.read(read_fd, 5) == b"ready"
-        with pytest.raises(BrowserError) as busy:
-            BrowserResourceLease(settings, ref).acquire()
-        assert busy.value.failure.code == "resource_busy"
-
-        os.kill(child_pid, signal.SIGKILL)
-        waited_pid, _status = os.waitpid(child_pid, 0)
-        assert waited_pid == child_pid
-        child_pid = 0
-
-        recovered = BrowserResourceLease(settings, ref)
-        recovered.acquire()
-        recovered.release()
-    finally:
-        os.close(read_fd)
-        if child_pid:
-            os.kill(child_pid, signal.SIGKILL)
-            os.waitpid(child_pid, 0)
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)

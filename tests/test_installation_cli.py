@@ -108,6 +108,7 @@ def test_init_human_output_creates_custom_scaffold(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("RICKY_USER_DATA_DIR", raising=False)
+    monkeypatch.setenv("COLUMNS", "200")
     root = tmp_path / "custom-data"
 
     result = runner.invoke(app, ["init", "--user-data-dir", str(root)])

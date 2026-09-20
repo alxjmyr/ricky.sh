@@ -63,7 +63,9 @@ from ricky.protected_values import (
 )
 from ricky.tools import ToolContext
 
-pytestmark = pytest.mark.browser_integration
+# Keep the large-DOM and process-ownership boundary drills on one worker.
+# Independent gateway journeys and core tests can run alongside this group.
+pytestmark = [pytest.mark.browser_integration, pytest.mark.xdist_group("browser_boundary")]
 
 
 @dataclass(frozen=True)
@@ -105,7 +107,11 @@ class _FixtureHandler(BaseHTTPRequestHandler):
         if path == "/checkout-modal":
             from browser_transaction_support import checkout_html
 
-            body = checkout_html()
+            # This boundary test starts at the modal. Gateway journeys exercise
+            # the opening click and its receipt on the compact checkout fixture.
+            body = checkout_html(background_sections=180) + (
+                b"<script>document.querySelector('dialog').showModal()</script>"
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -1765,11 +1771,6 @@ async def test_real_chrome_modal_amount_preparation_and_final_transaction(
         try:
             opened = await service.open_session(headless=True)
             await service.navigate(opened.session_id, page_id=None, url=f"{origin}/checkout-modal")
-            initial = await service.snapshot(opened.session_id, page_id=None)
-            opened_checkout = await service.action(
-                _target(initial, "Open checkout"), BrowserActionRequest(kind="click")
-            )
-            assert opened_checkout.disposition == "performed"
             snapshot = await service.snapshot(opened.session_id, page_id=None)
             assert "Visible modal dialog" in snapshot.content
             assert "Account information" not in snapshot.content

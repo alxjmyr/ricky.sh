@@ -86,6 +86,33 @@ Ricky does not provision either. The browser integration fixture fails when Chro
 and headed profile coverage runs in an isolated Xvfb display. A source move should preserve command
 options, output, exit codes, and test assertions, as well as resource cleanup.
 
+### Run tests locally
+
+The full suite runs on four worker processes and reports its ten slowest tests.
+Large-DOM and process-ownership browser boundary tests share one worker; other
+tests are distributed in small batches so slow release drills can run in parallel.
+Choose a smaller lane during development:
+
+| Scope | Command |
+|---|---|
+| Core harness, stores, adapters, and upgrade logic | `uv run pytest -m "not browser_integration and not release_integration"` |
+| All real Chrome boundaries and journeys | `uv run pytest -m browser_integration` |
+| Released installation, upgrade, and recovery | `uv run pytest -m release_integration` |
+| One file, without worker startup overhead | `uv run pytest tests/test_agent_loop.py -n 0 -v` |
+| Last failures, for a focused repair | `uv run pytest --lf` |
+
+Use `-n 2` on a resource-constrained host, or `-n 0` for serial debugging and
+`--pdb`. Lane selection and `--lf` do not replace the full completion gate.
+These commands are local development tools; no CI setup is required.
+
+Release drills share immutable build artifacts and a uv download cache within
+one test invocation. Their installed tools, profiles, databases, and recovery
+markers remain isolated. A new invocation rebuilds the current working tree,
+including uncommitted edits. Shared conversation and browser checkout helpers
+live in `tests/gateway_conversation_support.py` and
+`tests/browser_checkout_support.py`; import helpers from support modules rather
+than other test modules.
+
 ## Maintain the bundled user docs
 
 Edit `docs/`, `ricky.toml.example`, and `.secrets.toml.example` as the canonical

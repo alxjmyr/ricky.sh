@@ -7,6 +7,7 @@ from uuid import uuid4
 import pytest
 from pydantic import SecretStr
 
+from browser_challenge_support import configured, record
 from ricky.browser.challenge_store import BrowserChallengeStore
 from ricky.browser.challenges import ChallengeError, LiveBrowserChallenge
 from ricky.browser.verification import VerificationMessage, compile_verification_ceiling
@@ -16,8 +17,6 @@ from ricky.browser.verification_resolver import (
     extract_simple_code,
 )
 from ricky.browser.verification_store import VerificationClaimStore
-from test_browser_challenges import record
-from test_browser_verification import configured
 
 
 @pytest.mark.parametrize(
