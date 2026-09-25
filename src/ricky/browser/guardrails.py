@@ -8,6 +8,7 @@ from typing import Any, ClassVar, Literal, cast
 
 from pydantic import Field, JsonValue, field_validator, model_validator
 
+from ricky.browser.holds import HOLD_TOOLS
 from ricky.browser.resources import BrowserResourceSelectionError, select_browser_resource
 from ricky.browser.types import BrowserModel
 from ricky.capabilities.guardrails import (
@@ -38,6 +39,7 @@ from ricky.profiles import ProfileResourceRef, ProfileScope
 
 BrowserGuardrailCapability = Literal[
     "builtin.browser.read",
+    "builtin.browser.verify",
     "builtin.browser.interact",
     "builtin.protected_value.use",
     "builtin.browser.commit",
@@ -74,6 +76,7 @@ BROWSER_PROTECTED_TOOLS = frozenset({"browser_fill_protected"})
 BROWSER_COMMIT_TOOLS = frozenset({"browser_commit", "browser_coordinate_commit"})
 BROWSER_TOOLS_BY_CAPABILITY: dict[BrowserGuardrailCapability, frozenset[str]] = {
     "builtin.browser.read": BROWSER_READ_TOOLS,
+    "builtin.browser.verify": HOLD_TOOLS,
     "builtin.browser.interact": BROWSER_INTERACT_TOOLS,
     "builtin.protected_value.use": BROWSER_PROTECTED_TOOLS,
     "builtin.browser.commit": BROWSER_COMMIT_TOOLS,
@@ -253,6 +256,11 @@ def compile_browser_execution_scope(
         raise ValueError("resolved protected-resource pins differ from reviewed selections")
 
     operations = _operations_for_tools(frozenset(allowed_tools))
+    if "browser_hold_start" in allowed_tools and (
+        not {"browser_hold_release", "browser_visual_snapshot"} <= set(allowed_tools)
+        or not any(item.allow_masked_visual_observations for item in constraints)
+    ):
+        raise ValueError("verification holds require release and authorized visual observation")
     private_origins = tuple(
         sorted({origin for item in constraints for origin in item.private_origin_ceiling})
     )
@@ -283,6 +291,10 @@ def _operations_for_tools(tools: frozenset[str]) -> tuple[BrowserBudgetOperation
         operations.add("scrolls")
     if "browser_snapshot" in tools:
         operations.add("semantic_observations")
+    if "browser_hold_start" in tools:
+        operations.update(
+            {"verification_attempts", "navigations", "created_pages", "controlled_pages"}
+        )
     if "browser_visual_snapshot" in tools:
         operations.add("visual_observations")
     interaction_tools = BROWSER_INTERACT_TOOLS - {"browser_session_open_resource"}
@@ -403,6 +415,7 @@ _FIELDS = (
 
 _SCHEMA_TO_CAPABILITY: dict[str, BrowserGuardrailCapability] = {
     "browser.read": "builtin.browser.read",
+    "browser.verify": "builtin.browser.verify",
     "browser.interact": "builtin.browser.interact",
     "protected_value.use": "builtin.protected_value.use",
     "browser.commit": "builtin.browser.commit",
@@ -545,6 +558,11 @@ BrowserReadGuardrailEvaluator = _evaluator(
     capability_id="builtin.browser.read",
     schema_id="browser.read",
 )
+BrowserVerifyGuardrailEvaluator = _evaluator(
+    "BrowserVerifyGuardrailEvaluator",
+    capability_id="builtin.browser.verify",
+    schema_id="browser.verify",
+)
 BrowserInteractGuardrailEvaluator = _evaluator(
     "BrowserInteractGuardrailEvaluator",
     capability_id="builtin.browser.interact",
@@ -563,12 +581,13 @@ BrowserCommitGuardrailEvaluator = _evaluator(
 
 
 def browser_guardrail_evaluators() -> tuple[GuardrailEvaluator, ...]:
-    """Return the four production browser capability guardrail evaluators."""
+    """Return production browser capability guardrail evaluators."""
 
     return cast(
         tuple[GuardrailEvaluator, ...],
         (
             BrowserReadGuardrailEvaluator(),
+            BrowserVerifyGuardrailEvaluator(),
             BrowserInteractGuardrailEvaluator(),
             ProtectedValueUseGuardrailEvaluator(),
             BrowserCommitGuardrailEvaluator(),

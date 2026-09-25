@@ -350,6 +350,7 @@ class JobRunStore:
         identity: ActionIdentity,
         effect_budget: int,
         scope: ProfileScope,
+        reserve_effect_call: bool = True,
     ) -> JobAction:
         run = await self.get(run_id, scope=scope)
         return await self._call(
@@ -359,6 +360,7 @@ class JobRunStore:
             identity,
             effect_budget,
             run.profile_scope,
+            reserve_effect_call,
         )
 
     async def seed_grant_budget(
@@ -1429,6 +1431,7 @@ class JobRunStore:
         identity: ActionIdentity,
         effect_budget: int,
         profile_scope: ProfileScope,
+        reserve_effect_call: bool = True,
     ) -> JobAction:
         now = datetime.now(UTC)
         action = JobAction(
@@ -1456,10 +1459,13 @@ class JobRunStore:
                 raise JobActionConflictError(
                     f"job action is already {existing[0]} for this occurrence"
                 )
+            # Browser verification reserves its own durable attempt budget at
+            # dispatch. It still needs the same occurrence/evidence ledger,
+            # without consuming authority for ordinary external mutations.
             cursor = connection.execute(
-                """UPDATE job_runs SET effect_calls = effect_calls + 1
-                WHERE id = ? AND outcome IS NULL AND effect_calls < ?""",
-                (run_id, effect_budget),
+                """UPDATE job_runs SET effect_calls = effect_calls + ?
+                WHERE id = ? AND outcome IS NULL AND (? = 0 OR effect_calls < ?)""",
+                (int(reserve_effect_call), run_id, int(reserve_effect_call), effect_budget),
             )
             if cursor.rowcount != 1:
                 raise JobEffectBudgetError("job effect-call budget exhausted")

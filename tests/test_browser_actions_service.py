@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,9 @@ def _service(
         {
             "user_data_dir": str(tmp_path / "user"),
             "project_data_dir": str(tmp_path / "project"),
+            "profile_configs": {
+                "personal": {"browser": {"screenshot_allowed_providers": ["openrouter"]}}
+            },
             "browser": {
                 "enabled": True,
                 "headless": headless,
@@ -109,6 +113,219 @@ def _action_target(
         snapshot_id=snapshot_id,
         ref=ref,
     )
+
+
+async def _hold_target(service: BrowserService, page: FakeBrowserPage, session_id: str):
+    visual = await service.visual_snapshot(session_id, page_id=None, provider="openrouter")
+    return BrowserCoordinateTarget(
+        session_id=session_id,
+        page_id=visual.page.page_id,
+        screenshot_id=visual.snapshot_id,
+        x=15,
+        y=10,
+    )
+
+
+async def test_verification_hold_observes_blocks_competing_input_and_bounds_retries(tmp_path):
+    service, backend = _service(tmp_path)
+    try:
+        session = await service.open_session()
+        page = backend.sessions[0].page_handles[0]
+        page.url = f"{_ORIGIN}/challenge"
+        descriptor = BackendTargetDescriptor(
+            ref="d1",
+            role="button",
+            name="Press and hold to verify human",
+            frame_origin=_ORIGIN,
+            restricted_interaction="captcha",
+        )
+        page.coordinate_target = descriptor
+        page.visual_capture = _visual_capture(descriptor)
+        target = await _hold_target(service, page, session.session_id)
+        first = await service.holds.start(target, provider="openrouter")
+        assert first.state == "holding"
+        await service.snapshot(session.session_id, page_id=None)
+        await service.visual_snapshot(session.session_id, page_id=None, provider="openrouter")
+        with pytest.raises(BrowserError, match="release the active"):
+            await service.scroll(session.session_id, page_id=None, direction="down", amount=10)
+        assert page.scrolls == []
+        released = await service.holds.release(first.hold_id)
+        assert released.state == "released"
+        await service.holds.release(first.hold_id)
+        assert page.holds[0].release_calls == 1
+        second = await service.holds.start(
+            await _hold_target(service, page, session.session_id), provider="openrouter"
+        )
+        await service.holds.release(second.hold_id)
+        with pytest.raises(BrowserError, match="budget exhausted"):
+            await service.holds.start(
+                await _hold_target(service, page, session.session_id), provider="openrouter"
+            )
+        assert len(page.holds) == 2
+    finally:
+        await service.aclose()
+
+
+async def test_verification_deadline_does_not_wait_for_a_busy_observation(tmp_path, monkeypatch):
+    service, backend = _service(tmp_path)
+    service._settings.browser.hold_max_seconds = 0.02
+    entered = asyncio.Event()
+    finish = asyncio.Event()
+    task = None
+    try:
+        session = await service.open_session()
+        page = backend.sessions[0].page_handles[0]
+        page.url = f"{_ORIGIN}/challenge"
+        descriptor = BackendTargetDescriptor(
+            ref="d1",
+            role="button",
+            name="Human verification",
+            frame_origin=_ORIGIN,
+            restricted_interaction="captcha",
+        )
+        page.coordinate_target = descriptor
+        page.visual_capture = _visual_capture(descriptor)
+        hold = await service.holds.start(
+            await _hold_target(service, page, session.session_id), provider="openrouter"
+        )
+        original = page.snapshot
+
+        async def blocked_snapshot(*, depth: int, character_limit: int):
+            entered.set()
+            await finish.wait()
+            return await original(depth=depth, character_limit=character_limit)
+
+        monkeypatch.setattr(page, "snapshot", blocked_snapshot)
+        task = asyncio.create_task(service.snapshot(session.session_id, page_id=None))
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(page.holds[0].released.wait(), 1)
+        assert not task.done()
+        assert service.holds.status(hold.hold_id).stop_reason == "deadline"
+    finally:
+        finish.set()
+        if task is not None:
+            await task
+        await service.aclose()
+
+
+async def test_visual_finishing_after_release_cannot_authorize_coordinates(tmp_path, monkeypatch):
+    service, backend = _service(tmp_path)
+    entered, finish = asyncio.Event(), asyncio.Event()
+    task = None
+    try:
+        session = await service.open_session()
+        page = backend.sessions[0].page_handles[0]
+        page.url = f"{_ORIGIN}/challenge"
+        descriptor = BackendTargetDescriptor(
+            ref="d1",
+            role="button",
+            name="Human verification",
+            frame_origin=_ORIGIN,
+            restricted_interaction="captcha",
+        )
+        page.coordinate_target = descriptor
+        page.visual_capture = _visual_capture(descriptor)
+        target = await _hold_target(service, page, session.session_id)
+        hold = await service.holds.start(target, provider="openrouter")
+        original = page.visual_snapshot
+
+        async def blocked_visual(*, candidate_limit: int, observation_only: bool = False):
+            captured = await original(
+                candidate_limit=candidate_limit, observation_only=observation_only
+            )
+            entered.set()
+            await finish.wait()
+            return captured
+
+        monkeypatch.setattr(page, "visual_snapshot", blocked_visual)
+        task = asyncio.create_task(
+            service.visual_snapshot(session.session_id, page_id=None, provider="openrouter")
+        )
+        await asyncio.wait_for(entered.wait(), 1)
+        await service.holds.release(hold.hold_id)
+        finish.set()
+        captured = await task
+        assert captured.observation_only
+        with pytest.raises(BrowserError, match="stale"):
+            service.coordinate_context(
+                target.model_copy(update={"screenshot_id": captured.snapshot_id})
+            )
+        fresh = await _hold_target(service, page, session.session_id)
+        assert service.coordinate_context(fresh).target == fresh
+    finally:
+        finish.set()
+        if task is not None:
+            await task
+        await service.aclose()
+
+
+async def test_failed_observation_releases_verification_input(tmp_path):
+    service, backend = _service(tmp_path)
+    try:
+        session = await service.open_session()
+        page = backend.sessions[0].page_handles[0]
+        page.url = f"{_ORIGIN}/challenge"
+        descriptor = BackendTargetDescriptor(
+            ref="d1",
+            role="button",
+            name="Human verification",
+            frame_origin=_ORIGIN,
+            restricted_interaction="captcha",
+        )
+        page.coordinate_target = descriptor
+        page.visual_capture = _visual_capture(descriptor)
+        hold = await service.holds.start(
+            await _hold_target(service, page, session.session_id), provider="openrouter"
+        )
+        page.visual_capture = None
+        with pytest.raises(AssertionError, match="not configured"):
+            await service.visual_snapshot(session.session_id, page_id=None, provider="openrouter")
+        status = service.holds.status(hold.hold_id)
+        assert status.state == "released"
+        assert status.stop_reason == "observation_failed"
+        assert page.holds[0].release_calls == 1
+    finally:
+        await service.aclose()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"restricted_interaction": None},
+        {"protected": True},
+        {"consequential": True},
+        {"restricted_interaction": "sso"},
+        {"editable": True},
+        {"disabled": True},
+    ],
+)
+async def test_verification_hold_cannot_dispatch_an_ordinary_or_protected_control(
+    tmp_path, changes
+):
+    service, backend = _service(tmp_path)
+    try:
+        session = await service.open_session()
+        page = backend.sessions[0].page_handles[0]
+        page.url = f"{_ORIGIN}/challenge"
+        descriptor = replace(
+            BackendTargetDescriptor(
+                ref="d1",
+                role="button",
+                name="Human verification",
+                frame_origin=_ORIGIN,
+                restricted_interaction="captcha",
+            ),
+            **changes,
+        )
+        page.coordinate_target = descriptor
+        page.visual_capture = _visual_capture(descriptor)
+        with pytest.raises(BrowserError):
+            await service.holds.start(
+                await _hold_target(service, page, session.session_id), provider="openrouter"
+            )
+        assert page.holds == []
+    finally:
+        await service.aclose()
 
 
 async def _snapshot_with_targets(

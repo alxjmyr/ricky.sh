@@ -26,6 +26,7 @@ BrowserActionKind = Literal[
     "coordinate_click",
     "coordinate_commit",
     "protected_fill",
+    "verification_hold",
 ]
 BrowserEffectDisposition = Literal["not_performed", "performed", "in_doubt"]
 BrowserResourceKind = Literal["persistent", "cdp"]
@@ -619,6 +620,7 @@ class BrowserActionRequest(BrowserModel):
             "download": None,
             "coordinate_click": None,
             "coordinate_commit": None,
+            "verification_hold": None,
         }
         required = expected[self.kind]
         if required is not None and not supplied[required]:

@@ -10,7 +10,8 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 from typing import Literal, cast
 from urllib.parse import parse_qsl, urljoin, urlsplit, urlunsplit
@@ -22,6 +23,7 @@ from playwright.async_api import (
     CDPSession,
     Dialog,
     Download,
+    ElementHandle,
     FilePayload,
     Frame,
     Locator,
@@ -188,6 +190,7 @@ class PlaywrightBrowserBackend:
                 no_viewport=True,
                 env={key: value for key, value in chrome_environment().items()},
                 chromium_sandbox=True,
+                args=["--disable-blink-features=AutomationControlled"],
                 # Share the host's credential store with ordinary manual Chrome setup.
                 ignore_default_args=["--password-store=basic", "--use-mock-keychain"],
                 accept_downloads=True,
@@ -895,7 +898,9 @@ class _PlaywrightPage:
         except PlaywrightError as exc:
             raise _backend_error("semantic browser snapshot failed", exc) from exc
 
-    async def visual_snapshot(self, *, candidate_limit: int) -> BackendVisualSnapshot:
+    async def visual_snapshot(
+        self, *, candidate_limit: int, observation_only: bool = False
+    ) -> BackendVisualSnapshot:
         """Capture one masked viewport and bounded DOM-derived interactive candidates."""
         self._ensure_open()
         if candidate_limit < 1:
@@ -903,6 +908,16 @@ class _PlaywrightPage:
         try:
             async with asyncio.timeout(self._session._operation_timeout_seconds):
                 viewport, png = await self._masked_viewport_png()
+                if observation_only:
+                    # Progress is expected to animate while input is held. Issue
+                    # one masked observation, never a stable actionable mapping.
+                    self._dom_targets = {}
+                    return BackendVisualSnapshot(
+                        png=png,
+                        masked_base_sha256=hashlib.sha256(png).hexdigest(),
+                        viewport=viewport,
+                        candidates=(),
+                    )
                 candidates: list[BackendVisualCandidate] = []
                 dom_targets: dict[str, tuple[Frame, Locator]] = {}
                 truncated = False
@@ -912,68 +927,56 @@ class _PlaywrightPage:
                 )
                 for frame in self._page.frames:
                     locator = frame.locator(selector)
-                    count = await locator.count()
-                    for index in range(count):
-                        candidate = locator.nth(index)
-                        if not await candidate.is_visible():
-                            continue
-                        box = await candidate.bounding_box()
-                        if not isinstance(box, dict):
-                            continue
-                        x = float(box.get("x", -1))
-                        y = float(box.get("y", -1))
-                        width = float(box.get("width", 0))
-                        height = float(box.get("height", 0))
-                        if (
-                            x + width <= 0
-                            or y + height <= 0
-                            or x >= viewport.width
-                            or y >= viewport.height
-                            or width <= 0
-                            or height <= 0
-                        ):
-                            continue
-                        if len(candidates) >= candidate_limit:
-                            truncated = True
-                            break
-                        facts = await candidate.evaluate(
-                            """element => ({
-                                tag: String(element.tagName || '').toLowerCase(),
-                                role: String(element.getAttribute('role') || ''),
-                                aria: String(element.getAttribute('aria-label') || ''),
-                                alt: String(element.getAttribute('alt') || ''),
-                                title: String(element.getAttribute('title') || ''),
-                                placeholder: String(element.getAttribute('placeholder') || ''),
-                                text: String(element.innerText || element.textContent || ''),
-                            })"""
+                    # Reject offscreen main-frame elements in one browser call rather
+                    # than making visibility and geometry round trips for each one.
+                    # Child-frame rectangles use a different coordinate space; retain
+                    # their existing top-level bounding-box checks below.
+                    if frame == self._page.main_frame:
+                        indices = await locator.evaluate_all(
+                            """(elements, viewport) => elements.flatMap((element, index) => {
+                                const rect = element.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0
+                                    && rect.right > 0 && rect.bottom > 0
+                                    && rect.left < viewport.width && rect.top < viewport.height
+                                    ? [index] : [];
+                            })""",
+                            {"width": viewport.width, "height": viewport.height},
                         )
-                        if not isinstance(facts, dict):
-                            continue
-                        ref = f"d{len(candidates) + 1}"
-                        role = _dom_role(facts)
-                        name = _dom_name(facts)
-                        descriptor = await self._describe_target(
-                            candidate,
-                            frame=frame,
-                            ref=ref,
-                            role=role,
-                            name=name,
-                        )
-                        dom_targets[ref] = (frame, candidate)
-                        candidates.append(
-                            BackendVisualCandidate(
-                                descriptor=descriptor,
-                                bounding_box=BackendBoundingBox(
-                                    x=max(0.0, x),
-                                    y=max(0.0, y),
-                                    width=min(width, max(0.0, viewport.width - max(0.0, x))),
-                                    height=min(
-                                        height,
-                                        max(0.0, viewport.height - max(0.0, y)),
-                                    ),
-                                ),
+                    else:
+                        indices = range(await locator.count())
+                    # Bound concurrent read-only inspection without changing DOM order.
+                    # Native Playwright state/geometry checks remain authoritative.
+                    pending_indices = iter(indices)
+                    while batch := list(
+                        islice(pending_indices, min(8, candidate_limit - len(candidates) + 1))
+                    ):
+                        locators = [locator.nth(index) for index in batch]
+                        tasks = [
+                            asyncio.create_task(
+                                self._visual_candidate(candidate, frame=frame, viewport=viewport)
                             )
-                        )
+                            for candidate in locators
+                        ]
+                        try:
+                            inspected = await asyncio.gather(*tasks)
+                        finally:
+                            for task in tasks:
+                                if not task.done():
+                                    task.cancel()
+                            await asyncio.gather(*tasks, return_exceptions=True)
+                        for candidate, item in zip(locators, inspected, strict=True):
+                            if item is None:
+                                continue
+                            if len(candidates) >= candidate_limit:
+                                truncated = True
+                                break
+                            ref = f"d{len(candidates) + 1}"
+                            dom_targets[ref] = (frame, candidate)
+                            candidates.append(
+                                replace(item, descriptor=replace(item.descriptor, ref=ref))
+                            )
+                        if truncated:
+                            break
                     if truncated:
                         break
                 verified_viewport, verified_png = await self._masked_viewport_png()
@@ -1008,7 +1011,101 @@ class _PlaywrightPage:
         except PlaywrightError as exc:
             raise _backend_error("visual browser snapshot failed", exc) from exc
 
+    async def _visual_candidate(
+        self, candidate: Locator, *, frame: Frame, viewport: BackendViewport
+    ) -> BackendVisualCandidate | None:
+        # Snapshot inspection must not wait for a vanished nth locator to match
+        # again, or combine facts from different elements as the DOM reorders.
+        handles = await candidate.element_handles()
+        try:
+            if not handles:
+                return None
+            result = await self._visual_element(handles[0], frame=frame, viewport=viewport)
+            if result is not None and not await candidate.evaluate_all(
+                "(elements, expected) => elements.length === 1 && elements[0] === expected",
+                handles[0],
+            ):
+                raise BrowserError(
+                    BrowserFailure(
+                        code="stale_target",
+                        message="browser control changed during visual capture; request another",
+                        retryable=True,
+                    )
+                )
+            return result
+        finally:
+            for handle in handles:
+                await handle.dispose()
+
+    async def _visual_element(
+        self, candidate: ElementHandle, *, frame: Frame, viewport: BackendViewport
+    ) -> BackendVisualCandidate | None:
+        """Inspect one control using native Playwright state and frame geometry."""
+        if not await candidate.is_visible():
+            return None
+        box = await candidate.bounding_box()
+        if not isinstance(box, dict):
+            return None
+        x = float(box.get("x", -1))
+        y = float(box.get("y", -1))
+        width = float(box.get("width", 0))
+        height = float(box.get("height", 0))
+        if (
+            x + width <= 0
+            or y + height <= 0
+            or x >= viewport.width
+            or y >= viewport.height
+            or width <= 0
+            or height <= 0
+        ):
+            return None
+        facts = await candidate.evaluate(
+            """element => ({
+                tag: String(element.tagName || '').toLowerCase(),
+                role: String(element.getAttribute('role') || ''),
+                aria: String(element.getAttribute('aria-label') || ''),
+                alt: String(element.getAttribute('alt') || ''),
+                title: String(element.getAttribute('title') || ''),
+                placeholder: String(element.getAttribute('placeholder') || ''),
+                text: String(element.innerText || element.textContent || ''),
+            })"""
+        )
+        if not isinstance(facts, dict):
+            return None
+        role = _dom_role(facts)
+        name = _dom_name(facts)
+        descriptor = await self._describe_target(
+            candidate,
+            frame=frame,
+            ref="pending",
+            role=role,
+            name=name,
+        )
+        return BackendVisualCandidate(
+            descriptor=descriptor,
+            bounding_box=BackendBoundingBox(
+                x=max(0.0, x),
+                y=max(0.0, y),
+                width=min(width, max(0.0, viewport.width - max(0.0, x))),
+                height=min(height, max(0.0, viewport.height - max(0.0, y))),
+            ),
+        )
+
     async def _masked_viewport_png(self) -> tuple[BackendViewport, bytes]:
+        frames = self._page.frames
+        try:
+            return await self._masked_viewport_png_for_frames(frames)
+        except PlaywrightError:
+            if not any(frame.is_detached() for frame in frames):
+                raise
+            # Read-only capture may race frame removal. Retry once with fresh
+            # metrics and masks for every current frame, under the caller's
+            # original deadline. Never retry without masking.
+            return await self._masked_viewport_png_for_frames(self._page.frames)
+
+    async def _masked_viewport_png_for_frames(
+        self, frames: list[Frame]
+    ) -> tuple[BackendViewport, bytes]:
         metrics = await self._page.evaluate(
             """() => ({
                 width: window.innerWidth,
@@ -1041,7 +1138,7 @@ class _PlaywrightPage:
             )
         masks = [
             frame.locator("input,textarea,select,[contenteditable]:not([contenteditable='false'])")
-            for frame in self._page.frames
+            for frame in frames
         ]
         raw = await self._page.screenshot(
             type="png",
@@ -1447,6 +1544,17 @@ class _PlaywrightPage:
     ) -> BackendCoordinatePreflight:
         """Recapture and inspect one coordinate without dispatching a click."""
 
+        return await self._preflight_coordinate(request, verification_hold=False)
+
+    async def preflight_verification_hold(
+        self, request: BackendCoordinateRequest
+    ) -> BackendCoordinatePreflight:
+        return await self._preflight_coordinate(request, verification_hold=True)
+
+    async def _preflight_coordinate(
+        self, request: BackendCoordinateRequest, *, verification_hold: bool
+    ) -> BackendCoordinatePreflight:
+
         self._ensure_open()
         try:
             viewport, png = await self._masked_viewport_png()
@@ -1474,7 +1582,11 @@ class _PlaywrightPage:
                 )
             )
         try:
-            facts = await self._coordinate_target_facts(request.x, request.y)
+            facts = await self._coordinate_target_facts(
+                request.x,
+                request.y,
+                verification_ref=request.verification_ref if verification_hold else None,
+            )
         except PlaywrightError as exc:
             raise BrowserError(
                 BrowserFailure(
@@ -1504,7 +1616,36 @@ class _PlaywrightPage:
                     message="coordinate clicks cannot activate recognized protected controls",
                 )
             )
-        if target.restricted_interaction is not None:
+        if verification_hold:
+            restriction = next(
+                (
+                    reason
+                    for rejected, reason in (
+                        (
+                            target.restricted_interaction != "captcha",
+                            "target is not recognized human verification",
+                        ),
+                        (
+                            target.role not in {"button", "canvas"},
+                            "target is not a button or canvas",
+                        ),
+                        (target.editable, "target is editable"),
+                        (target.disabled, "target is disabled"),
+                        (target.consequential, "target is consequential"),
+                        (facts.get("financialSignal") is True, "target has financial context"),
+                    )
+                    if rejected
+                ),
+                None,
+            )
+            if restriction is not None:
+                raise BrowserError(
+                    BrowserFailure(
+                        code="incompatible_target",
+                        message=f"verification hold rejected: {restriction}",
+                    )
+                )
+        elif target.restricted_interaction is not None:
             raise BrowserError(
                 BrowserFailure(
                     code="handoff_required",
@@ -1523,6 +1664,26 @@ class _PlaywrightPage:
             financial_signal=facts.get("financialSignal") is True,
             equivalent_semantic_ref=self._equivalent_semantic_ref(target),
         )
+
+    async def start_verification_hold(
+        self, request: BackendCoordinateRequest, *, expected: BackendCoordinatePreflight
+    ) -> _PlaywrightHold:
+        state_before = await self.state()
+        actual = await self.preflight_verification_hold(request)
+        if actual != expected:
+            raise BrowserError(
+                BrowserFailure(
+                    code="stale_target", message="verification target changed before hold"
+                )
+            )
+        owner = _PlaywrightHold(self, request, state_before, actual)
+        try:
+            await owner.start()
+        except BaseException:
+            with suppress(Exception):
+                await owner.release()
+            raise
+        return owner
 
     def _equivalent_semantic_ref(self, target: BackendTargetDescriptor) -> str | None:
         """Return one unambiguous current ARIA target for the coordinate hit."""
@@ -1586,6 +1747,8 @@ class _PlaywrightPage:
         self,
         x: float,
         y: float,
+        *,
+        verification_ref: str | None = None,
     ) -> dict[str, object] | None:
         """Resolve the actual hit target through open shadows and child frames."""
 
@@ -1593,8 +1756,22 @@ class _PlaywrightPage:
         local_x = x
         local_y = y
         for _depth in range(20):
-            handle = await frame.evaluate_handle(
-                """({x, y}) => {
+            if verification_ref is not None:
+                resolved = await self._resolve_target(verification_ref)
+                if resolved is None:
+                    return None
+                frame, locator = resolved
+                ancestor: Frame | None = frame
+                while ancestor is not None:
+                    if ancestor.url not in {"about:blank", "about:srcdoc"}:
+                        await self._session._destination_guard(ancestor.url)
+                    ancestor = ancestor.parent_frame
+                handle = await locator.element_handle()
+                if handle is None:
+                    return None
+            else:
+                handle = await frame.evaluate_handle(
+                    """({x, y}) => {
                     let element = document.elementFromPoint(x, y);
                     const visited = new Set();
                     while (element && element.shadowRoot && !visited.has(element)) {
@@ -1605,8 +1782,8 @@ class _PlaywrightPage:
                     }
                     return element;
                 }""",
-                {"x": local_x, "y": local_y},
-            )
+                    {"x": local_x, "y": local_y},
+                )
             element = handle.as_element()
             if element is None:
                 await handle.dispose()
@@ -1697,14 +1874,15 @@ class _PlaywrightPage:
                             'price', 'cost', 'fee', 'pay', 'card', 'total'
                         ].some(word => signalWords.has(word));
                         let restrictedInteraction = null;
-                        if (['captcha', 'recaptcha', 'hcaptcha', 'turnstile'].some(
-                            word => signalText.includes(word)
-                        )) restrictedInteraction = 'captcha';
-                        else if (['passkey', 'webauthn'].some(
+                        if (['passkey', 'webauthn'].some(
                             word => signalText.includes(word)
                         )) restrictedInteraction = 'passkey';
                         else if (signalWords.has('sso') ||
                             signalText.includes('single sign-on')) restrictedInteraction = 'sso';
+                        else if (['captcha', 'recaptcha', 'hcaptcha', 'turnstile',
+                                  'human challenge', 'human verification'].some(
+                            word => signalText.includes(word)
+                        )) restrictedInteraction = 'captcha';
                         return {
                             hitTag,
                             tag: String(target.tagName || '').toUpperCase(),
@@ -1771,7 +1949,7 @@ class _PlaywrightPage:
                     facts["frameKey"] = frame_key
                     facts["frameOrigin"] = frame_origin
                     frame_url = frame.url.casefold()
-                    if any(
+                    if facts.get("restrictedInteraction") is None and any(
                         marker in frame_url
                         for marker in (
                             "recaptcha",
@@ -2361,7 +2539,7 @@ class _PlaywrightPage:
 
     async def _describe_target(
         self,
-        locator: Locator,
+        locator: Locator | ElementHandle,
         *,
         frame: Frame,
         ref: str,
@@ -2504,6 +2682,125 @@ class _PlaywrightPage:
         self._session.ensure_connected()
         if self._page.is_closed() or self._session.is_quarantined(self._page):
             raise BrowserError(BrowserFailure(code="page_closed", message="browser page is closed"))
+
+
+class _PlaywrightHold:
+    """Keep the existing effect observers installed from mouse-down through release."""
+
+    def __init__(
+        self,
+        page: _PlaywrightPage,
+        request: BackendCoordinateRequest,
+        before: BackendPageState,
+        preflight: BackendCoordinatePreflight,
+    ) -> None:
+        self._page = page
+        self._request = request
+        self._before = before
+        self._preflight = preflight
+        self._pressed = asyncio.Event()
+        self._stop = asyncio.Event()
+        self._navigated = False
+        self._target_frame = next(
+            (
+                frame
+                for frame in page._page.frames
+                if page._frame_identity(frame)[0] == preflight.target.frame_key
+            ),
+            page._page.main_frame,
+        )
+        self._task: asyncio.Task[BackendActionOutcome] | None = None
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(
+            self._page._perform_raw_effect(
+                self._before,
+                BrowserActionRequest(kind="verification_hold"),
+                self._input,
+                reviewed_destinations=self._preflight.effective_destinations,
+            ),
+            name="browser-held-input",
+        )
+        pressed = asyncio.create_task(self._pressed.wait())
+        try:
+            async with asyncio.timeout(self._page._session._operation_timeout_seconds):
+                await asyncio.wait((pressed, self._task), return_when=asyncio.FIRST_COMPLETED)
+            if self._task.done():
+                outcome = await self._task
+                raise BrowserError(
+                    outcome.failure
+                    or BrowserFailure(code="action_in_doubt", message="hold ended during startup")
+                )
+        finally:
+            pressed.cancel()
+            await asyncio.gather(pressed, return_exceptions=True)
+
+    async def _input(self) -> None:
+        def navigation(frame: Frame) -> None:
+            if frame == self._target_frame or frame == self._page._page.main_frame:
+                self._navigated = True
+                self._stop.set()
+
+        self._page._page.on("framenavigated", navigation)
+        try:
+            if self._request.verification_ref is not None:
+                resolved = await self._page._resolve_target(self._request.verification_ref)
+                if resolved is None:
+                    raise BrowserError(
+                        BrowserFailure(
+                            code="stale_target", message="verification control disappeared"
+                        )
+                    )
+                self._target_frame = resolved[0]
+                # Native locator actionability resolves nested frames and rejects
+                # obscured controls before mouse-down. Never force the pointer.
+                await resolved[1].hover()
+            else:
+                await self._page._page.mouse.move(self._request.x, self._request.y)
+            if self._stop.is_set():
+                raise BrowserError(
+                    BrowserFailure(
+                        code="stale_target", message="verification page changed before press"
+                    )
+                )
+            await self._page._page.mouse.down(button="left")
+            self._pressed.set()
+            await self._stop.wait()
+        finally:
+            self._page._page.remove_listener("framenavigated", navigation)
+            try:
+                async with asyncio.timeout(3):
+                    await self._page._page.mouse.up(button="left")
+            except BaseException:
+                # If release cannot be confirmed, destroying the owned page is
+                # the input-safety fallback, not another uncertain mouse-up.
+                with suppress(Exception):
+                    async with asyncio.timeout(3):
+                        await self._page._page.close(run_before_unload=False)
+                raise
+
+    async def live(self) -> bool:
+        return (
+            self._task is not None
+            and not self._task.done()
+            and not self._navigated
+            and not self._target_frame.is_detached()
+            and not self._page._page.is_closed()
+            and self._page._page.url == self._before.url
+            and self._page._session.connected
+        )
+
+    async def release(self) -> BackendActionOutcome:
+        self._stop.set()
+        if self._task is None:
+            raise RuntimeError("hold input has not started")
+        try:
+            async with asyncio.timeout(self._page._session._operation_timeout_seconds + 3):
+                return await asyncio.shield(self._task)
+        except BaseException:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            raise
 
 
 async def _disconnect_browser(browser: Browser) -> None:

@@ -1314,6 +1314,7 @@ class BackgroundBrowserBudgetSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_starts: int = Field(default=1, ge=0, le=100)
+    verification_attempts: int = Field(default=2, ge=0, le=100)
     navigations: int = Field(default=40, ge=0, le=10_000)
     scrolls: int = Field(default=100, ge=0, le=10_000)
     created_pages: int = Field(default=8, ge=0, le=1_000)
@@ -1433,6 +1434,9 @@ class BrowserSettings(BaseModel):
     lease_dir: str = "browser/leases"
     challenge_dir: str = "browser/challenges"
     challenge_timeout_seconds: float = Field(default=900.0, gt=0, le=3600)
+    hold_max_seconds: float = Field(default=30.0, gt=0, le=120)
+    hold_attempt_limit: int = Field(default=2, ge=1, le=5)
+    hold_total_seconds: float = Field(default=60.0, gt=0, le=600)
     verification: BrowserVerificationSettings = Field(default_factory=BrowserVerificationSettings)
     download_dir: str = "downloads/browser"
     navigation_timeout_seconds: float = Field(default=30.0, gt=0, le=300)

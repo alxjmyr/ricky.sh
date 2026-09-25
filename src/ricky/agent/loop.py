@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -110,6 +110,7 @@ class AgentLoop:
         workflow_registry: WorkflowRegistry | None = None,
         artifact_store: ToolArtifactSink | None = None,
         deferred_tools: tuple[Tool, ...] = (),
+        turn_cleanup: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._provider = provider
         self._registry = registry
@@ -122,6 +123,7 @@ class AgentLoop:
         self._workflow_registry = workflow_registry
         self._artifact_store = artifact_store
         self._deferred_tools = deferred_tools
+        self._turn_cleanup = turn_cleanup
         self._active_session_ids: set[str] = set()
 
     def inspect_context(
@@ -212,6 +214,20 @@ class AgentLoop:
             yield TurnFinishedEvent(turn_id=turn_id, iterations=0, error=message)
             return
         self._active_session_ids.add(session.id)
+        cleaned = False
+
+        async def cleanup_once() -> None:
+            nonlocal cleaned
+            if cleaned or self._turn_cleanup is None:
+                return
+            cleaned = True
+            cleanup = asyncio.ensure_future(self._turn_cleanup())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
+
         try:
             async for event in self._run_turn_unlocked(
                 session,
@@ -220,9 +236,14 @@ class AgentLoop:
                 max_completion_tokens_per_request=max_completion_tokens_per_request,
                 extra_system_sections=extra_system_sections,
             ):
+                if isinstance(event, TurnFinishedEvent):
+                    await cleanup_once()
                 yield event
         finally:
-            self._active_session_ids.discard(session.id)
+            try:
+                await cleanup_once()
+            finally:
+                self._active_session_ids.discard(session.id)
 
     async def compact_context(
         self,
@@ -677,10 +698,21 @@ class AgentLoop:
             )
 
         follow_up_media = [
-            media
+            part
             for call in tool_calls
             for media in resolved[call.id].result.follow_up_media
             if not resolved[call.id].result.is_error
+            for part in (
+                TextPart(
+                    text=(
+                        f"Image {media.artifact.id} from tool {call.name}, call {call.id}. "
+                        "This image belongs to that observation; earlier images may depict "
+                        "a different state. Use the latest relevant observation when "
+                        "reporting current state."
+                    )
+                ),
+                media,
+            )
         ]
         if follow_up_media:
             session.history.append(

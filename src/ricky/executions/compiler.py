@@ -555,7 +555,13 @@ class ExecutionContractCompiler:
             guardrail
             for guardrail in guardrails
             if guardrail.schema_id
-            in {"browser.read", "browser.interact", "protected_value.use", "browser.commit"}
+            in {
+                "browser.read",
+                "browser.verify",
+                "browser.interact",
+                "protected_value.use",
+                "browser.commit",
+            }
         )
         if not browser_guardrails:
             return None

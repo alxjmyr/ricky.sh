@@ -191,6 +191,7 @@ class BackendCoordinateRequest:
     viewport: BackendViewport
     dialog_response: Literal["dismiss", "accept"] = "dismiss"
     dialog_prompt_text: str | None = None
+    verification_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -250,6 +251,14 @@ class BackendActionOutcome:
             raise ValueError("backend disposition and dispatch state are inconsistent")
 
 
+class BackendHoldHandle(Protocol):
+    """One dispatched input occurrence owned until release and outcome collection."""
+
+    async def live(self) -> bool: ...
+
+    async def release(self) -> BackendActionOutcome: ...
+
+
 class BrowserPageHandle(Protocol):
     @property
     def key(self) -> str: ...
@@ -264,7 +273,9 @@ class BrowserPageHandle(Protocol):
 
     async def snapshot(self, *, depth: int, character_limit: int) -> BackendSnapshot: ...
 
-    async def visual_snapshot(self, *, candidate_limit: int) -> BackendVisualSnapshot: ...
+    async def visual_snapshot(
+        self, *, candidate_limit: int, observation_only: bool = False
+    ) -> BackendVisualSnapshot: ...
 
     async def preflight_action(
         self,
@@ -308,6 +319,14 @@ class BrowserPageHandle(Protocol):
         self,
         request: BackendCoordinateRequest,
     ) -> BackendCoordinatePreflight: ...
+
+    async def preflight_verification_hold(
+        self, request: BackendCoordinateRequest
+    ) -> BackendCoordinatePreflight: ...
+
+    async def start_verification_hold(
+        self, request: BackendCoordinateRequest, *, expected: BackendCoordinatePreflight
+    ) -> BackendHoldHandle: ...
 
     async def close(self) -> None: ...
 

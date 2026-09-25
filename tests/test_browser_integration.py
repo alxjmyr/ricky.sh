@@ -26,6 +26,7 @@ from urllib.request import urlopen
 
 import pytest
 from PIL import Image
+from playwright.async_api import ElementHandle
 from pydantic import SecretStr
 
 from ricky.agent import AgentSession
@@ -79,6 +80,67 @@ class _FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = self.path.partition("?")[0]
         self.server.requests[path] += 1
+        if path == "/hold-frame":
+            body = (
+                b'<html><body style="margin:80px"><iframe width="900" height="500" '
+                b'src="/hold-challenge"></iframe></body></html>'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/hold-challenge":
+            body = b"""<!doctype html><html><body>
+            <h1>Human verification</h1>
+            <button type="button" id="captcha" aria-label="Human verification hold"
+              style="width:300px;height:80px">Press and hold</button>
+            <p id="status" role="status">Waiting for verification</p>
+            <style>@keyframes progress {from {opacity:.2} to {opacity:1}}
+            .held {animation:progress .3s infinite alternate}</style>
+            <script>
+            const button = document.querySelector('#captcha');
+            const status = document.querySelector('#status');
+            let ready = false, held = false, timer;
+            button.addEventListener('pointerdown', () => {
+              held = true;
+              button.classList.add('held');
+              status.textContent = 'Verification in progress';
+              timer = setTimeout(() => {
+                if (held) { ready = true; status.textContent = 'Release to finish verification'; }
+              }, 100);
+            });
+            window.addEventListener('pointerup', () => {
+              held = false; clearTimeout(timer);
+              button.classList.remove('held');
+              status.textContent = ready ? 'Verification passed' : 'Verification incomplete';
+              if (ready) button.outerHTML = '<input type="search" aria-label="Product search">';
+            });
+            </script></body></html>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/visual-offscreen":
+            body = (
+                b"<html><body><button>First visible</button>"
+                b'<div style="position:absolute;top:10000px">'
+                + b"<button>Offscreen</button>"
+                * 1500
+                + b"</div><button>Last visible</button>"
+                b'<button style="visibility:hidden">Hidden</button>'
+                b'<button style="position:fixed;left:-10px;top:60px">Partial</button>'
+                b"</body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/manual-login":
             self.send_response(302)
             self.send_header(
@@ -616,10 +678,11 @@ async def test_real_chrome_navigates_snapshots_scrolls_and_blocks_private_origin
                 },
             }
         )
+        backend = PlaywrightBrowserBackend()
         service = BrowserService(
             settings,
             scope=settings.resolve_profile_scope(),
-            backend=PlaywrightBrowserBackend(),
+            backend=backend,
             executable_path=installed_browser.executable,
         )
         try:
@@ -629,6 +692,9 @@ async def test_real_chrome_navigates_snapshots_scrolls_and_blocks_private_origin
                 page_id=None,
                 url=f"{allowed_origin}/start",
             )
+            # Inspect the actual launched browser, independently of snapshot redaction.
+            context = backend._sessions[0]._contexts[0]  # noqa: SLF001
+            assert await context.pages[0].evaluate("navigator.webdriver") is False
             snapshot = await service.snapshot(session.session_id, page_id=None)
             scrolled = await service.scroll(
                 session.session_id,
@@ -732,6 +798,128 @@ async def test_real_chrome_navigation_timeout_is_not_retried(
         )
         assert not profile_ephemeral.exists()
         assert not Path(settings.project_data_dir).exists()
+
+
+@pytest.mark.parametrize("path", ["/hold-challenge", "/hold-frame"])
+async def test_real_chrome_hold_observes_feedback_releases_and_continues(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+    path: str,
+) -> None:
+    with _fixture_server() as (origin, _requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "profile_configs": {
+                    "personal": {"browser": {"screenshot_allowed_providers": ["openrouter"]}}
+                },
+                "browser": {"enabled": True, "allowed_private_origins": [origin]},
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        settings.browser.screenshot_width_limit = 640
+        try:
+            session = await service.open_session(headless=True)
+            await service.navigate(session.session_id, page_id=None, url=f"{origin}{path}")
+            visual = await service.visual_snapshot(
+                session.session_id, page_id=None, provider="openrouter"
+            )
+            candidate = next(
+                item
+                for item in visual.candidates
+                if item.descriptor.name == "Human verification hold"
+            )
+            assert visual.viewport.image_scale < 1
+            hold = await service.holds.start(
+                BrowserActionTarget(
+                    session_id=session.session_id,
+                    page_id=visual.page.page_id,
+                    snapshot_id=visual.snapshot_id,
+                    ref=candidate.target.ref,
+                ),
+                provider="openrouter",
+            )
+            assert hold.state == "holding"
+            async with asyncio.timeout(5):
+                while True:
+                    observation = await service.snapshot(
+                        session.session_id, page_id=None, wait_seconds=0.02
+                    )
+                    if "Release to finish verification" in observation.content:
+                        break
+            during = await service.visual_snapshot(
+                session.session_id, page_id=None, provider="openrouter"
+            )
+            assert during.png
+            assert during.candidates == ()
+            assert service.holds.status(hold.hold_id).state == "holding"
+            released = await service.holds.release(hold.hold_id)
+            assert released.state == "released"
+            after = await service.snapshot(session.session_id, page_id=None)
+            assert "Verification passed" in after.content
+            assert "Product search" in after.content
+            assert not Path(settings.project_data_dir).exists()
+        finally:
+            await service.aclose()
+
+
+async def test_real_chrome_visual_scan_skips_offscreen_controls(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _fixture_server() as (origin, _requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "browser": {"enabled": True, "allowed_private_origins": [origin]},
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        geometry_calls = 0
+        original_box = ElementHandle.bounding_box
+
+        async def counted_box(locator: ElementHandle) -> Any:
+            nonlocal geometry_calls
+            geometry_calls += 1
+            return await original_box(locator)
+
+        monkeypatch.setattr(ElementHandle, "bounding_box", counted_box)
+        try:
+            session = await service.open_session(headless=True)
+            await service.navigate(
+                session.session_id, page_id=None, url=f"{origin}/visual-offscreen"
+            )
+            visual = await service.visual_snapshot(session.session_id, page_id=None)
+            assert {item.descriptor.name for item in visual.candidates} == {
+                "First visible",
+                "Last visible",
+                "Partial",
+            }
+            assert not visual.candidate_truncated
+            # Detect protocol work growth directly rather than relying on host speed.
+            assert geometry_calls == 3
+            settings.browser.visual_candidate_limit = 2
+            geometry_calls = 0
+            limited = await service.visual_snapshot(session.session_id, page_id=None)
+            assert len(limited.candidates) == 2
+            assert limited.candidate_truncated
+            assert geometry_calls == 3
+            assert not Path(settings.project_data_dir).exists()
+        finally:
+            await service.aclose()
 
 
 async def test_real_chrome_phase4_files_visual_masks_and_coordinate_freshness(

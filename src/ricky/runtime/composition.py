@@ -30,6 +30,8 @@ from ricky.browser.guardrails import (
     bind_browser_guardrail_evaluator,
     browser_guardrail_evaluators,
 )
+from ricky.browser.hold_tools import verification_policy
+from ricky.browser.holds import HOLD_TOOLS
 from ricky.browser.tools import BrowserAttachmentResolver
 from ricky.browser.verification import VerificationCeiling, compile_verification_ceiling
 from ricky.browser.verification_resolver import BrowserVerificationResolver
@@ -108,6 +110,7 @@ class CapabilityRuntime:
     capability_registry: CapabilityRegistry
     guardrail_registry: GuardrailRegistry
     protected_values: ProtectedValueBroker | None
+    turn_cleanup: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -209,6 +212,15 @@ CAPABILITY_SPECS: tuple[CapabilitySpec, ...] = (
         owner="builtin",
         description="Control and inspect a read-oriented browser session.",
         guardrail_schema_id="browser.read",
+    ),
+    CapabilitySpec(
+        id="builtin.browser.verify",
+        owner="builtin",
+        description=(
+            "Automatically attempt bounded human-verification holds "
+            "within an authorized browser session."
+        ),
+        guardrail_schema_id="browser.verify",
     ),
     CapabilitySpec(
         id="builtin.browser.interact",
@@ -389,6 +401,7 @@ async def build_capability_runtime(
         if browser_factory is not None and background_browser is not None:
             raise ValueError("foreground and background browser composition are exclusive")
         browser_runtime_tools: list[Tool] = []
+        browser = None
         verification = (
             background_browser.verification
             if background_browser is not None
@@ -476,6 +489,7 @@ async def build_capability_runtime(
             if runtime_settings.browser.enabled and background.enabled:
                 if background.read_enabled:
                     inventory_names.update(BROWSER_READ_TOOLS)
+                    inventory_names.update(HOLD_TOOLS)
                 if background.interaction_enabled:
                     inventory_names.update(BROWSER_INTERACT_TOOLS)
                 if background.commit_enabled:
@@ -534,13 +548,14 @@ async def build_capability_runtime(
             memory=memory,
             durable_tasks=task_store,
             workflow_registry=workflows,
-            permission_engine=PermissionEngine(durable_task_policy()),
+            permission_engine=PermissionEngine(verification_policy(durable_task_policy())),
             job_stream_adapters=tuple(slack.job_stream_adapters if slack is not None else []),
             session_artifacts=session_artifacts,
             session_media=session_media,
             capability_registry=capability_registry,
             guardrail_registry=guardrail_registry,
             protected_values=protected_values,
+            turn_cleanup=browser.holds.stop_all if browser is not None else None,
         )
     finally:
         await resources.aclose()
@@ -642,6 +657,7 @@ async def build_session_runtime(
                 workflow_registry=capabilities.workflow_registry,
                 cwd=project_root,
                 artifact_store=capabilities.session_artifacts,
+                turn_cleanup=capabilities.turn_cleanup,
                 deferred_tools=tuple(
                     tool
                     for tool in capabilities.tools

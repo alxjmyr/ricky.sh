@@ -16,6 +16,7 @@ from ricky.agent.events import (
     AgentEvent,
     PermissionRequestedEvent,
     ToolCallFinishedEvent,
+    TurnFinishedEvent,
     UserInteractionRequiredEvent,
 )
 from ricky.config import RickySettings
@@ -70,6 +71,66 @@ class FakeProvider:
 
 async def _collect_events(loop: AgentLoop, session: AgentSession, prompt: str) -> list[AgentEvent]:
     return [event async for event in loop.run_turn(session, prompt)]
+
+
+async def test_turn_cleanup_finishes_before_completion_is_reported(tmp_path: Path) -> None:
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    released = False
+    calls = 0
+
+    async def cleanup() -> None:
+        nonlocal released, calls
+        calls += 1
+        await asyncio.sleep(0)
+        released = True
+
+    loop = AgentLoop(
+        provider=FakeProvider([[_final_message("done")]]),
+        registry=ToolRegistry([]),
+        settings=settings,
+        cwd=tmp_path,
+        turn_cleanup=cleanup,
+    )
+    async for event in loop.run_turn(session, "finish"):
+        if isinstance(event, TurnFinishedEvent):
+            assert released
+    assert calls == 1
+
+
+async def test_cancelling_model_wait_joins_turn_cleanup(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    released = asyncio.Event()
+
+    class WaitingProvider(FakeProvider):
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            entered.set()
+            await asyncio.Event().wait()
+            yield _final_message("unreachable")
+
+    async def cleanup() -> None:
+        await asyncio.sleep(0)
+        released.set()
+
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    loop = AgentLoop(
+        provider=WaitingProvider([]),
+        registry=ToolRegistry([]),
+        settings=settings,
+        cwd=tmp_path,
+        turn_cleanup=cleanup,
+    )
+    task = asyncio.create_task(_collect_events(loop, session, "wait"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        events = await task
+        assert any(isinstance(event, TurnFinishedEvent) and event.interrupted for event in events)
+        assert released.is_set()
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def _tool_message(call_id: str, name: str, args: dict[str, object]) -> MessageDone:
@@ -344,6 +405,13 @@ async def test_tool_follow_up_images_become_ordered_canonical_user_content() -> 
         f"media_{1:032x}",
         f"media_{2:032x}",
     ]
+    for index, call_id in enumerate(("call_one", "call_two"), start=1):
+        label = follow_up.content[index * 2 - 1]
+        image = follow_up.content[index * 2]
+        assert isinstance(label, TextPart)
+        assert isinstance(image, ImagePart)
+        assert image.artifact.id in label.text
+        assert f"tool synthetic_media, call {call_id}" in label.text
     assert session.history[-2] == follow_up
 
 

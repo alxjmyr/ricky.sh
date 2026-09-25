@@ -46,7 +46,8 @@ A browser belongs to the runtime that performs the browser work:
 - An ad hoc background execution or named job owns its browser for the complete execution attempt,
   not for one model request, tool call, or workflow step. The runtime closes the browser on
   success, failure, cancellation, lost authority, or timeout. Named and scheduled jobs receive
-  only the bounded read-oriented surface; protected use, mutations, and commits are available only
+  only the bounded read-oriented surface plus automatic verification maintenance; protected use,
+  ordinary mutations, and commits are available only
   to gateway-owned ad hoc executions in the current contract.
 - A gateway-owned execution may park one exact prepared transaction while retaining its browser,
   resource lease, claim, and in-memory prepared effect. It performs no model or browser work while
@@ -214,7 +215,7 @@ from an opaque profile-qualified reference after local scope, field, destination
 revision, and permission checks. File controls are exposed only through safe
 snapshot metadata and the prepared upload operation; their values and selected local filenames
 remain suppressed. A headed interactive session can instead return a fixed Ricky-authored user
-handoff for CAPTCHA, passkey, SSO, protected-field, or ambiguous interface work. Handoff clears
+handoff for unsupported CAPTCHA, passkey, SSO, protected-field, or ambiguous interface work. Handoff clears
 current target references; the user completes the local step and the agent must request a new
 snapshot.
 
@@ -239,10 +240,58 @@ references but receives fixed metadata-only omission markers.
 
 ## Tools, authority, and effects
 
-Browser tools use three capability meanings:
+### Automatic verification holds
+
+Foreground chats and background browser workers may automatically attempt a
+locally identified human-verification control within their existing browser
+resource, destination, and screenshot-disclosure scope. This is a narrow
+verification maintenance operation, not authority for purchases, ordinary form
+submission, protected-value entry, passkeys, SSO, downloads, or uploads. Explicit
+policy denial remains authoritative. User handoff is a fallback when supported
+automatic interaction cannot complete the task, rather than the default CAPTCHA
+path.
+
+A hold is one resident, runtime-owned input operation across agent tool calls.
+Start binds a fresh masked visual candidate reference. The backend resolves its
+exact locator, validates the control and destinations, and uses native browser
+actionability before pressing the left mouse button. The model does not convert
+CSS bounds into image coordinates. Observation and release refer to that
+exact live hold. The model cannot move the pointer, extend the deadline, restore
+a hold after restart, or overlap another browser action with it. Semantic and
+masked visual observations may continue while input is held; new observations
+invalidate ordinary targets without losing the owned input occurrence.
+While held, masked visuals are observation-only captures: progress may animate,
+and no stable candidate mapping or actionable references are issued. Release
+invalidates observations taken during the hold.
+An observation-only image that finishes after release still cannot authorize coordinates.
+
+An independent owner enforces the configured monotonic maximum duration and
+attempt budget. It releases on explicit completion/rejection, deadline expiry,
+navigation, observation failure, cancellation, turn completion, or runtime
+shutdown. Cleanup never depends on a further model response or fresh permission.
+Release failure closes the owned browser page/session and is reported as
+uncertain. Background claim loss cancels the owner through the existing worker
+lifecycle; no live input operation is reconstructed from durable state.
+
+Each start is a separately accounted effect with an exact identity. Every
+attempt is charged to the browser's durable verification budget, independently
+of ordinary effect-call authority. Start and release still use the common
+occurrence ledger. Lifecycle release evidence is correlated by browser action id,
+even when the originating tool call has already settled. A second
+attempt requires confirmed release, a new observation of a still-actionable
+challenge, and remaining budget. An uncertain release forbids retry. Completing
+a hold proves only input dispatch/release; a fresh post-release observation must
+establish whether the challenge cleared and the original task can continue.
+Page-authored progress signals are untrusted evidence and cannot extend budgets
+or grant authority. The initial gesture is stationary press-and-hold, not drag.
+
+Browser tools use distinct capability meanings:
 
 - `builtin.browser.read` lists configured resource metadata and manages an ephemeral read-oriented
   session, navigation, page selection, scrolling, and semantic observation.
+- `builtin.browser.verify` authorizes only bounded human-verification holds, their status, and
+  release. It can accompany a read-oriented foreground or background task without granting
+  ordinary interaction or commit authority. Holds require authorized masked visual observation.
 - `builtin.browser.interact` opens a configured authenticated or attached resource and performs
   ordinary page interaction that may be externally observable.
 - `builtin.browser.commit` performs an explicitly consequential activation or submission with the
@@ -589,6 +638,11 @@ Subsequent controlled opening reuses the profile but starts at a blank page and 
 page-admission and destination checks; manual setup grants no automation authority.
 
 Owned controlled sessions support headed terminal use and headless background execution.
+Both ephemeral and persistent owned launches include
+`--disable-blink-features=AutomationControlled`, making `navigator.webdriver` false. This is a
+launch default, not a verification-success guarantee. Ordinary manual setup and external CDP
+attachment do not apply this override. Other launch defaults and service-worker policy remain
+unchanged.
 Local handoff invalidates prior observations and prepared approvals before fresh observation and
 normal permission checks. CDP visibility is not inferred. Autonomous obstacle recovery, remote
 takeover, automation detachment during verification, virtual desktops, and headed background

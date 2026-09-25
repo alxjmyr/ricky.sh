@@ -18,6 +18,37 @@ It starts with the modal open; the gateway checkout separately checks the openin
 click, amount editing, and commit through three performed effect receipts.
 The other real-browser tests retain navigation interception, redaction, process
 loss, persistent profiles, and CDP ownership coverage.
+The navigation/snapshot journey also checks `navigator.webdriver` in real Chrome
+to guard the owned-launch automation-indicator default without another browser fixture.
+
+`test_real_chrome_visual_scan_skips_offscreen_controls` owns the large offscreen
+visual-candidate fixture. It checks bounded per-element geometry calls, retained
+visible and partially clipped controls, and candidate-limit reporting. Existing
+visual-mask and coordinate-freshness coverage owns frame geometry, protected
+controls, and stale-image rejection.
+`test_playwright_backend_snapshot.py` checks bounded concurrent visual inspection,
+DOM-ordered results, candidate truncation, and joined cleanup on cancellation or
+inspection failure without launching Chrome.
+It also covers pinned-element disposal, reordered-locator rejection, and a
+single fully masked recapture when a frame detaches. Real-browser mask and
+freshness tests exercise the native element-handle observation path.
+
+`test_browser_holds.py` owns independent deadlines and joined release cancellation.
+The hold cases in `test_browser_actions_service.py` cover attempt ceilings, rejected controls,
+observation failure, release while observation is blocked, and rejection of coordinates from
+hold observations that finish after release. `test_browser_unattended.py`
+checks separate verification budgets with common effect receipts; `test_browser_guardrails.py`
+checks capability scope and legacy budget serialization. `test_browser_hold_job.py` runs a
+named read-oriented worker through start, observation, release, cleanup, and durable accounting
+with no ordinary mutation budget.
+Post-release worker coverage also checks that background briefing permits the
+separately exposed verification tools and that a released hold is followed by a
+new visual observation. `test_browser_tools.py` checks distinct holding,
+released, and uncertain-release guidance without treating input receipts as
+verification verdicts. The real Chrome hold journey owns
+native input, resized visual references, iframe targeting, animated observations while held,
+feedback-driven release, and verified continuation. Agent-loop tests check cleanup before
+turn completion and after interrupted model work.
 
 These focused tests replace repeated full-checkout scenarios:
 

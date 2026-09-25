@@ -23,6 +23,8 @@ from ricky.browser.backend import (
     BackendTargetDescriptor,
     BackendViewport,
 )
+from ricky.browser.hold_tools import _result as hold_result
+from ricky.browser.holds import BrowserHoldStatus
 from ricky.browser.service import (
     BrowserPreparedCommit,
     BrowserPreparedCoordinateCommit,
@@ -106,6 +108,36 @@ SNAPSHOT_ID = "browser_snapshot_" + "c" * 32
 ACTION_ID = "browser_action_" + "d" * 32
 
 
+@pytest.mark.parametrize("state", ["holding", "released", "in_doubt"])
+def test_hold_guidance_distinguishes_input_state_from_verification_verdict(
+    state: Literal["holding", "released", "in_doubt"],
+) -> None:
+    status = BrowserHoldStatus(
+        hold_id="browser_hold_" + "e" * 32,
+        session_id=SESSION_ID,
+        page_id=PAGE_ID,
+        state=state,
+        elapsed_seconds=30 if state != "holding" else 1,
+        remaining_seconds=29 if state == "holding" else 0,
+        stop_reason=None if state == "holding" else "deadline",
+    )
+    result = hold_result(status, effect=True)
+    assert result.data == status.model_dump(mode="json")
+    assert result.effect_receipt is not None
+    assert result.effect_receipt.disposition == "performed"
+    assert "Input state is not proof" in result.content
+    if state == "holding":
+        assert "Next call browser_visual_snapshot" in result.content
+        assert "keep observing" in result.content
+        assert "status polling is not visual observation" in result.content
+    elif state == "released":
+        assert "Next call browser_visual_snapshot" in result.content
+        assert "not a verification verdict" in result.content
+        assert "verify its result separately" in result.content
+    else:
+        assert "Do not start another hold or browser action" in result.content
+
+
 def _page(*, selected: bool = True) -> BrowserPage:
     return BrowserPage(
         session_id=SESSION_ID,
@@ -120,11 +152,15 @@ def _page(*, selected: bool = True) -> BrowserPage:
 
 class FakeToolService:
     def __init__(self) -> None:
+        self.holds = self
         self.calls: list[tuple[str, Any]] = []
         self.failure: BrowserFailure | None = None
         self.financial_signal = False
         self.payment_sources: tuple[ProfileResourceRef, ...] = ()
         self.destinations: tuple[str, ...] = ("https://example.com/submit",)
+
+    async def stop_all(self, reason: str) -> None:
+        del reason
 
     def _check(self) -> None:
         if self.failure is not None:
@@ -546,6 +582,9 @@ def test_browser_toolset_has_the_exact_current_surface() -> None:
     names = [tool.name for tool in browser_tools(FakeToolService())]  # type: ignore[arg-type]
 
     assert names == [
+        "browser_hold_start",
+        "browser_hold_status",
+        "browser_hold_release",
         "browser_resources",
         "browser_session_open",
         "browser_session_open_resource",

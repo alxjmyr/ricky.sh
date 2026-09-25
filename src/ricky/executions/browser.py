@@ -39,6 +39,7 @@ BrowserTransactionState = Literal[
 BrowserApprovalKind = Literal["browser_transaction", "protected_destination"]
 BrowserCommitTargetMode = Literal["semantic", "coordinate"]
 BrowserBudgetOperation = Literal[
+    "verification_attempts",
     "session_starts",
     "navigations",
     "scrolls",
@@ -78,6 +79,9 @@ class BrowserExecutionBudget(_FrozenModel):
     """Cumulative and live-resource ceilings for one browser execution."""
 
     session_starts: int = Field(ge=0, le=100)
+    # Legacy pinned scopes have no verification authority. Preserve their exact
+    # serialized form/digest while new scopes explicitly pin the configured budget.
+    verification_attempts: int = Field(default=0, ge=0, le=100, exclude_if=lambda value: value == 0)
     navigations: int = Field(ge=0, le=10_000)
     scrolls: int = Field(ge=0, le=10_000)
     created_pages: int = Field(ge=0, le=1_000)
@@ -163,7 +167,7 @@ class BrowserExecutionScope(_FrozenModel):
     https_only_transactions: bool = True
     private_origin_ceiling: tuple[str, ...] = Field(default=(), max_length=100)
     allowed_tools: tuple[str, ...] = Field(min_length=1, max_length=100)
-    allowed_operations: tuple[BrowserBudgetOperation, ...] = Field(min_length=1, max_length=15)
+    allowed_operations: tuple[BrowserBudgetOperation, ...] = Field(min_length=1, max_length=16)
     allow_masked_visual_observations: bool = False
     attachments: tuple[BrowserAttachmentPin, ...] = Field(default=(), max_length=100)
     protected_resources: tuple[BrowserProtectedResourcePin, ...] = Field(default=(), max_length=100)

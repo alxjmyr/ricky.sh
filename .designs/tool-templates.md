@@ -235,10 +235,7 @@ class SendFilesTool(SendTool):
     ) -> ToolResult:
         del ctx
         args = SendFilesParams.model_validate(params)
-        if (
-            not isinstance(prepared, PreparedAttachmentEffect)
-            or prepared.tool_name != self.name
-        ):
+        if not isinstance(prepared, PreparedAttachmentEffect) or prepared.tool_name != self.name:
             raise ValueError(f"prepared effect does not belong to {self.name}")
         return await self._run_with_attachments(args, prepared.attachments)
 

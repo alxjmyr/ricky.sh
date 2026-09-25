@@ -34,6 +34,7 @@ from ricky.browser.backend import (
     BackendTargetDescriptor,
     BackendUploadFile,
     BackendViewport,
+    BackendVisualCandidate,
     BrowserBackend,
     BrowserCdpOptions,
     BrowserLaunchOptions,
@@ -50,6 +51,7 @@ from ricky.browser.challenges import (
     LiveBrowserChallenge,
 )
 from ricky.browser.chrome import browser_status
+from ricky.browser.hold_service import BrowserHoldController, release_on_observation_error
 from ricky.browser.lease import BrowserResourceLease
 from ricky.browser.playwright_backend import PlaywrightBrowserBackend
 from ricky.browser.policy import (
@@ -227,7 +229,9 @@ class _VisualEntry:
     masked_base_sha256: str
     viewport: BackendViewport
     composed: ComposedVisual
+    candidates: tuple[BackendVisualCandidate, ...] = ()
     admitted_provider: str | None = None
+    observation_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -323,6 +327,7 @@ class BrowserVisualCapture:
     candidates: tuple[BrowserVisualCandidate, ...]
     candidate_truncated: bool
     masked_base_sha256: str
+    observation_only: bool = False
 
 
 class BrowserService:
@@ -356,6 +361,7 @@ class BrowserService:
         self._instance_dir = self._confined_state_path(self._instance_id)
         self._instance_state_created = False
         self._sessions: dict[str, _SessionEntry] = {}
+        self.holds = BrowserHoldController(self)
         self._registry_lock = asyncio.Lock()
         self._closed = False
         self._close_complete = False
@@ -822,7 +828,7 @@ class BrowserService:
             resources=tuple(
                 self._resource_model(resource)
                 for resource in resolve_browser_resources(self._settings, scope=self._scope)
-            )
+            ),
         )
         await self._record_guard(guard_facts, disposition="completed")
         return result
@@ -837,9 +843,7 @@ class BrowserService:
         try:
             resolved = select_browser_resource(self._settings, scope=self._scope, name=qualified)
         except ValueError as exc:
-            raise BrowserError(
-                BrowserFailure(code="unknown_resource", message=str(exc))
-            ) from exc
+            raise BrowserError(BrowserFailure(code="unknown_resource", message=str(exc))) from exc
         return self._resource_model(resolved)
 
     async def open_resource(
@@ -1076,6 +1080,7 @@ class BrowserService:
         return BrowserResourceReset(resource=resolved.ref)
 
     async def close_session(self, session_id: str) -> BrowserSessionClosed:
+        await self.holds.stop_all("shutdown", session_id=session_id)
         async with self._registry_lock:
             self._ensure_open()
             entry = self._sessions.get(session_id)
@@ -1260,6 +1265,7 @@ class BrowserService:
             await self._record_guard(guard_facts, disposition="completed")
             return result
 
+    @release_on_observation_error
     async def snapshot(
         self,
         session_id: str,
@@ -1294,6 +1300,7 @@ class BrowserService:
         """Return the already-authorized browser resource owner for screenshot policy."""
         return self._require_session(session_id).resource.profile
 
+    @release_on_observation_error
     async def visual_snapshot(
         self,
         session_id: str,
@@ -1327,8 +1334,10 @@ class BrowserService:
                 provider=provider,
             )
             await self._reserve_guard("visual_observations", 1, guard_facts)
+            observation_only = self.holds.is_holding(entry.id, page.id)
             capture = await page.handle.visual_snapshot(
-                candidate_limit=self._settings.browser.visual_candidate_limit
+                candidate_limit=self._settings.browser.visual_candidate_limit,
+                observation_only=observation_only,
             )
             if len(capture.png) > self._settings.browser.screenshot_file_byte_limit:
                 raise BrowserError(
@@ -1374,7 +1383,9 @@ class BrowserService:
                 masked_base_sha256=capture.masked_base_sha256,
                 viewport=capture.viewport,
                 composed=composed,
+                candidates=capture.candidates,
                 admitted_provider=provider,
+                observation_only=observation_only,
             )
             model = await self._page_model(entry, page, state=state_after)
             viewport = BrowserViewport(
@@ -1415,6 +1426,7 @@ class BrowserService:
                 candidates=candidates,
                 candidate_truncated=capture.candidate_truncated,
                 masked_base_sha256=capture.masked_base_sha256,
+                observation_only=observation_only,
             )
             await self._record_guard(guard_facts, disposition="completed")
             return result
@@ -2036,7 +2048,7 @@ class BrowserService:
         entry = self._require_session(target.session_id)
         page = self._page_entry(entry, target.page_id)
         visual = page.visual
-        if visual is None or visual.snapshot_id != target.screenshot_id:
+        if visual is None or visual.snapshot_id != target.screenshot_id or visual.observation_only:
             raise BrowserError(
                 BrowserFailure(
                     code="stale_target",
@@ -3638,6 +3650,10 @@ class BrowserService:
 
         async def cleanup() -> None:
             failure: Exception | None = None
+            try:
+                await self.holds.stop_all("shutdown")
+            except Exception as exc:
+                failure = exc
             for owner, resolver in self._interpreting_challenges.values():
                 try:
                     await owner.finish("invalidated")
@@ -3770,6 +3786,7 @@ class BrowserService:
         protected_revision: int | None = None,
         protected_field: str | None = None,
     ) -> BrowserGuardFacts:
+        self.holds.check_operation(tool_name)
         top_level_origin: str | None = None
         if page is not None and page.exact_url != "about:blank":
             with suppress(ValueError):
@@ -3939,6 +3956,7 @@ class BrowserService:
         failure: BrowserFailure | None = None,
         result_byte_count: int = 0,
         created_page_count: int = 0,
+        input_lifecycle: Literal["started", "released"] | None = None,
     ) -> None:
         if self._runtime_guard is not None:
             await self._runtime_guard.record(
@@ -3949,6 +3967,7 @@ class BrowserService:
                     failure=failure,
                     result_byte_count=result_byte_count,
                     created_page_count=created_page_count,
+                    input_lifecycle=input_lifecycle,
                 )
             )
 

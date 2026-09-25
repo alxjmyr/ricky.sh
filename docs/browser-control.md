@@ -35,6 +35,11 @@ headless = false
 
 Headed mode is the interactive default. Set `headless = true` when a visible window is not useful.
 
+Ricky-owned Chrome launches use `--disable-blink-features=AutomationControlled`, so
+`navigator.webdriver` reports false. This applies to ephemeral and persistent sessions in both
+headed and headless modes. It does not guarantee verification acceptance. Manual profile setup
+and attachment to an externally launched Chrome instance do not apply this flag.
+
 ## Configure a persistent browser profile
 
 Add a non-secret resource to the owning profile's `ricky.toml`:
@@ -315,7 +320,34 @@ separate destructive commit review for a consequential control.
 
 Ordinary fill, protected key entry, and coordinate clicks continue to reject recognized protected
 controls. Plain HTTP protected use is denied even if ordinary browser destination policy permits
-the page. CAPTCHA, passkey, SSO, and unsupported protected controls still require local handoff.
+the page. Supported press-and-hold human-verification challenges use automatic bounded holds.
+Passkey, SSO, and unsupported protected controls still require local handoff.
+
+## Automatic verification holds
+
+Ricky can attempt a supported press-and-hold challenge in foreground chat or a background
+browser worker. It selects the exact visual candidate reference, holds the control, observes feedback while
+holding, and releases when the page indicates completion or rejection. A fresh observation must
+confirm that verification passed before Ricky continues the original task.
+
+The `builtin.browser.verify` capability is limited to verification maintenance. It does not
+authorize ordinary form submission, purchases, or protected values. Background work must include
+the capability and authorize masked visual observations for its provider and browser resource.
+Named jobs may expose `browser_hold_start`, `browser_hold_status`, and `browser_hold_release`.
+
+The browser settings `hold_max_seconds` (30), `hold_attempt_limit` (2 per page generation), and
+`hold_total_seconds` (60 per runtime) bound attempts. Each start reserves its maximum duration
+from the total. Background runs also have a cumulative `verification_attempts` budget.
+Navigation, observation errors, cancellation, turn completion, and shutdown release held input;
+the deadline operates even while the model is responding. An uncertain release prevents retry.
+These limits bound attempts; they do not guarantee that a site accepts the verification.
+Visual observations during a hold show changing progress without providing actionable control
+references. After release, Ricky should take a fresh visual snapshot before concluding success
+or failure: a deadline release does not mean the site rejected verification, and semantic
+homepage content may remain behind an overlay. If processing continues, use bounded fresh
+visual observations without repeating input. After the overlay clears, resume the authorized
+task and verify its result separately. Tool guidance describes this sequence; the deadline
+and input cleanup are enforced independently of the model's interpretation.
 
 ## Upload and download files
 
@@ -412,7 +444,7 @@ request, subject to byte, pixel, token, and session-storage ceilings.
 
 ## Hand control to the user
 
-For a CAPTCHA, passkey, SSO flow, unsupported protected field, or ambiguous interface, Ricky can
+For an unsupported CAPTCHA, passkey, SSO flow, protected field, or ambiguous interface, Ricky can
 foreground a headed browser and end its turn with a fixed local instruction. Complete the step in
 the browser, reply to Ricky, and have it take a new snapshot before continuing. Handoff is not
 available in a headless session.

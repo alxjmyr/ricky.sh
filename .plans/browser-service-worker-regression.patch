@@ -1,0 +1,142 @@
+--- a/tests/test_browser_integration.py
++++ b/tests/test_browser_integration.py
+@@ -26,11 +26,12 @@
+ 
+ import pytest
+ from PIL import Image
+-from playwright.async_api import Locator
++from playwright.async_api import Locator, async_playwright
+ from pydantic import SecretStr
+ 
+ from ricky.agent import AgentSession
+ from ricky.attachments import LoadedAttachment, browser_download_path
++from ricky.browser.backend import BrowserLaunchOptions
+ from ricky.browser.chrome import browser_status
+ from ricky.browser.lease import BrowserResourceLease
+ from ricky.browser.playwright_backend import PlaywrightBrowserBackend
+@@ -49,6 +50,7 @@
+     BrowserCoordinateTarget,
+     BrowserDialogPolicy,
+     BrowserError,
++    BrowserFailure,
+     BrowserSnapshot,
+     BrowserVisualCandidate,
+ )
+@@ -80,6 +82,40 @@
+     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+         path = self.path.partition("?")[0]
+         self.server.requests[path] += 1
++        if path == "/worker-setup":
++            body = b"<!doctype html><title>Worker setup</title><p>Local worker fixture</p>"
++            self.send_response(200)
++            self.send_header("Content-Type", "text/html")
++            self.send_header("Content-Length", str(len(body)))
++            self.end_headers()
++            self.wfile.write(body)
++            return
++        if path == "/cached-navigation-worker.js":
++            script = """
++            self.addEventListener('install', e => e.waitUntil(self.skipWaiting()));
++            self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
++            self.addEventListener('fetch', e => {
++              const path = new URL(e.request.url).pathname;
++              if (path === '/worker-redirect')
++                e.respondWith(Promise.resolve(Response.redirect(REDIRECT_TARGET)));
++              if (path === '/worker-forbidden')
++                e.respondWith(Promise.resolve(new Response(
++                  '<script>document.title="Forbidden worker page"</script>',
++                  {headers: {'Content-Type': 'text/html'}})));
++            });
++            """.replace("REDIRECT_TARGET", json.dumps(self.server.redirect_target))
++            body = script.encode()
++            self.send_response(200)
++            self.send_header("Content-Type", "application/javascript")
++            self.send_header("Content-Length", str(len(body)))
++            self.end_headers()
++            self.wfile.write(body)
++            return
++        if path == "/worker-redirect":
++            self.send_response(302)
++            self.send_header("Location", self.server.redirect_target)
++            self.end_headers()
++            return
+         if path == "/hold-frame":
+             body = (
+                 b'<html><body style="margin:80px"><iframe width="900" height="500" '
+@@ -751,6 +787,76 @@
+         assert not Path(settings.project_data_dir).exists()
+ 
+ 
++async def test_real_chrome_persisted_worker_cannot_execute_forbidden_navigation(
++    installed_browser: _InstalledBrowser, tmp_path: Path
++) -> None:
++    """A post-navigation URL rejection is too late if a cached document executed."""
++    with (
++        _fixture_server() as (blocked_origin, _),
++        _fixture_server(redirect_target=f"{blocked_origin}/worker-forbidden") as (
++            allowed_origin,
++            _,
++        ),
++    ):
++        profile = tmp_path / "profile"
++        # Ordinary setup can leave active workers in a persistent profile. Seed
++        # both origins before Ricky owns the context and applies its policy.
++        async with async_playwright() as playwright:
++            context = await playwright.chromium.launch_persistent_context(
++                str(profile),
++                executable_path=str(installed_browser.executable),
++                headless=True,
++                chromium_sandbox=True,
++                service_workers="allow",
++            )
++            try:
++                page = context.pages[0]
++                for origin in (blocked_origin, allowed_origin):
++                    await page.goto(f"{origin}/worker-setup", wait_until="domcontentloaded")
++                    async with asyncio.timeout(10):
++                        await page.evaluate("""async () => {
++                          await navigator.serviceWorker.register('/cached-navigation-worker.js');
++                          await navigator.serviceWorker.ready;
++                          if (!navigator.serviceWorker.controller)
++                            await new Promise(resolve => navigator.serviceWorker.addEventListener(
++                              'controllerchange', resolve, {once: true}));
++                        }""")
++                assert len(context.service_workers) == 2
++            finally:
++                await context.close()
++
++        async def guard(url: str) -> None:
++            if url.startswith(f"{blocked_origin}/"):
++                raise BrowserError(
++                    BrowserFailure(code="destination_blocked", message="fixture origin blocked")
++                )
++
++        backend = PlaywrightBrowserBackend()
++        try:
++            session = await backend.open_session(
++                BrowserLaunchOptions(
++                    mode="owned_persistent",
++                    user_data_dir=profile,
++                    download_temp_dir=tmp_path / "downloads",
++                    executable_path=installed_browser.executable,
++                    headless=True,
++                    navigation_timeout_ms=5_000,
++                    operation_timeout_ms=5_000,
++                    max_redirects=10,
++                    page_discovery_limit=10,
++                ),
++                destination_guard=guard,
++            )
++            controlled = (await session.pages())[0]
++            await controlled.navigate(f"{allowed_origin}/worker-setup")
++            with pytest.raises(BrowserError) as rejected:
++                await controlled.navigate(f"{allowed_origin}/worker-redirect")
++            assert rejected.value.failure.code == "destination_blocked"
++            assert (await controlled.state()).title != "Forbidden worker page"
++        finally:
++            await backend.aclose()
++
++
+ async def test_real_chrome_navigation_timeout_is_not_retried(
+     installed_browser: _InstalledBrowser,
+     tmp_path: Path,

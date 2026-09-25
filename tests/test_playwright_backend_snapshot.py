@@ -187,3 +187,241 @@ def test_amount_fields_are_not_credentials(
     )
     assert target.protected is protected
     assert (target.protected_kind is not None) is protected
+
+
+@pytest.mark.parametrize("outcome", ["success", "cancel", "error"])
+async def test_visual_inspection_is_bounded_ordered_and_joined(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from types import SimpleNamespace
+
+    from playwright.async_api import Error as PlaywrightError
+
+    from ricky.browser.backend import (
+        BackendBoundingBox,
+        BackendTargetDescriptor,
+        BackendViewport,
+        BackendVisualCandidate,
+    )
+
+    page, raw_page = _page("", operation_timeout_seconds=5)
+
+    async def indices(*_: Any) -> list[int]:
+        return list(range(30))
+
+    locator = SimpleNamespace(evaluate_all=indices, nth=lambda index: index)
+    frame = SimpleNamespace(locator=lambda _: locator)
+    monkeypatch.setattr(raw_page, "frames", [frame], raising=False)
+    monkeypatch.setattr(raw_page, "main_frame", frame, raising=False)
+    viewport = BackendViewport(width=800, height=600, scroll_x=0, scroll_y=0, device_scale_factor=1)
+
+    async def capture() -> tuple[BackendViewport, bytes]:
+        return viewport, b"same masked image"
+
+    monkeypatch.setattr(page, "_masked_viewport_png", capture)
+    gates = [asyncio.Event() for _ in range(30)]
+    started: list[int] = []
+    finished: list[int] = []
+    batch_ready = asyncio.Event()
+
+    async def inspect(index: int, **_: Any) -> BackendVisualCandidate:
+        started.append(index)
+        if len(started) == 8:
+            batch_ready.set()
+        try:
+            await gates[index].wait()
+            if outcome == "error":
+                raise PlaywrightError("fixture inspection failure")
+            return BackendVisualCandidate(
+                descriptor=BackendTargetDescriptor(ref="pending", name=str(index)),
+                bounding_box=BackendBoundingBox(x=0, y=0, width=20, height=20),
+            )
+        finally:
+            finished.append(index)
+
+    monkeypatch.setattr(page, "_visual_candidate", inspect)
+    task = asyncio.create_task(page.visual_snapshot(candidate_limit=10))
+    try:
+        await asyncio.wait_for(batch_ready.wait(), 1)
+        assert started == list(range(8))
+        if outcome == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "error":
+            gates[3].set()
+            with pytest.raises(BrowserError, match="visual browser snapshot failed"):
+                await task
+        else:
+            # Complete later controls first; output must still follow DOM order.
+            for index in range(29, -1, -1):
+                gates[index].set()
+                await asyncio.sleep(0)
+            result = await task
+            assert [item.descriptor.name for item in result.candidates] == [
+                str(i) for i in range(10)
+            ]
+            assert [item.descriptor.ref for item in result.candidates] == [
+                f"d{i}" for i in range(1, 11)
+            ]
+            assert result.candidate_truncated
+            assert started == list(range(11))
+        assert set(finished) == set(started)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("outcome", ["missing", "success", "error", "cancel"])
+async def test_visual_candidate_pins_and_disposes_one_element(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from types import SimpleNamespace
+
+    from ricky.browser.backend import BackendViewport
+
+    page, _ = _page("")
+    disposed = asyncio.Event()
+    entered = asyncio.Event()
+
+    async def dispose() -> None:
+        disposed.set()
+
+    handle = SimpleNamespace(dispose=dispose)
+
+    async def resolve() -> list[Any]:
+        return [] if outcome == "missing" else [handle]
+
+    async def inspect(element: Any, **_: Any) -> None:
+        assert element is handle
+        entered.set()
+        if outcome == "error":
+            raise RuntimeError("fixture inspection failed")
+        if outcome == "cancel":
+            await asyncio.Event().wait()
+        return None
+
+    monkeypatch.setattr(page, "_visual_element", inspect)
+    viewport = BackendViewport(width=100, height=100, scroll_x=0, scroll_y=0, device_scale_factor=1)
+    task = asyncio.create_task(
+        page._visual_candidate(
+            cast(Any, SimpleNamespace(element_handles=resolve)),
+            frame=cast(Any, object()),
+            viewport=viewport,
+        )
+    )
+    try:
+        if outcome == "cancel":
+            await asyncio.wait_for(entered.wait(), 1)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif outcome == "error":
+            with pytest.raises(RuntimeError, match="fixture inspection failed"):
+                await task
+        else:
+            assert await task is None
+        assert disposed.is_set() == (outcome != "missing")
+        assert entered.is_set() == (outcome != "missing")
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("detached,second_fails", [(True, False), (True, True), (False, False)])
+async def test_masked_capture_retries_only_detachment_with_fresh_masks(
+    monkeypatch: pytest.MonkeyPatch, detached: bool, second_fails: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from playwright.async_api import Error as PlaywrightError
+
+    page, raw_page = _page("")
+    old = SimpleNamespace(locator=lambda _: "old-mask", is_detached=lambda: detached)
+    new = SimpleNamespace(locator=lambda _: "new-mask", is_detached=lambda: False)
+    monkeypatch.setattr(raw_page, "frames", [old], raising=False)
+    reads = 0
+    calls: list[dict[str, Any]] = []
+
+    async def metrics(_: str) -> dict[str, int]:
+        nonlocal reads
+        reads += 1
+        return {"width": 100, "height": 100, "scrollX": reads, "scrollY": 0, "deviceScaleFactor": 1}
+
+    async def screenshot(**kwargs: Any) -> bytes:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            monkeypatch.setattr(raw_page, "frames", [new])
+            raise PlaywrightError("fixture capture failed")
+        if second_fails:
+            raise PlaywrightError("second capture failed")
+        return b"masked pixels"
+
+    monkeypatch.setattr(raw_page, "evaluate", metrics, raising=False)
+    monkeypatch.setattr(raw_page, "screenshot", screenshot, raising=False)
+    if detached and not second_fails:
+        viewport, png = await page._masked_viewport_png()
+        assert png == b"masked pixels"
+        assert viewport.scroll_x == 2
+    else:
+        with pytest.raises(PlaywrightError):
+            await page._masked_viewport_png()
+    assert len(calls) == (2 if detached else 1)
+    assert calls[0]["mask"] == ["old-mask"]
+    if detached:
+        assert calls[1]["mask"] == ["new-mask"]
+    assert all(call["mask_color"] == "#4b0082" for call in calls)
+
+
+@pytest.mark.parametrize("same_element", [True, False])
+async def test_visual_candidate_rejects_reordered_action_locator(
+    monkeypatch: pytest.MonkeyPatch, same_element: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from ricky.browser.backend import (
+        BackendBoundingBox,
+        BackendTargetDescriptor,
+        BackendViewport,
+        BackendVisualCandidate,
+    )
+
+    page, _ = _page("")
+    disposed: list[bool] = []
+
+    async def dispose() -> None:
+        disposed.append(True)
+
+    handle = SimpleNamespace(dispose=dispose)
+
+    async def resolve() -> list[Any]:
+        return [handle]
+
+    async def same(_: str, expected: object) -> bool:
+        assert expected is handle
+        return same_element
+
+    result = BackendVisualCandidate(
+        descriptor=BackendTargetDescriptor(ref="pending", name="Original control"),
+        bounding_box=BackendBoundingBox(x=0, y=0, width=20, height=20),
+    )
+
+    async def inspect(element: object, **_: Any) -> BackendVisualCandidate:
+        assert element is handle
+        return result
+
+    monkeypatch.setattr(page, "_visual_element", inspect)
+    viewport = BackendViewport(width=100, height=100, scroll_x=0, scroll_y=0, device_scale_factor=1)
+    locator = cast(Any, SimpleNamespace(element_handles=resolve, evaluate_all=same))
+    if same_element:
+        assert (
+            await page._visual_candidate(locator, frame=cast(Any, object()), viewport=viewport)
+            is result
+        )
+    else:
+        with pytest.raises(BrowserError) as error:
+            await page._visual_candidate(locator, frame=cast(Any, object()), viewport=viewport)
+        assert error.value.failure.code == "stale_target"
+    assert disposed == [True]

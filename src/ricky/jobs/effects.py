@@ -43,6 +43,7 @@ class GuardedEffectTool:
         run_id: str,
         profile_scope: ProfileScope,
         effect_budget: int,
+        reserve_effect_call: bool = True,
     ) -> None:
         self._tool = tool
         self._store = store
@@ -50,6 +51,7 @@ class GuardedEffectTool:
         self._run_id = run_id
         self._profile_scope = profile_scope
         self._effect_budget = effect_budget
+        self._reserve_effect_call = reserve_effect_call
         self.name = tool.name
         self.description = tool.description
         self.Params = tool.Params
@@ -102,6 +104,7 @@ class GuardedEffectTool:
                 scope=self._profile_scope,
                 identity=identity,
                 effect_budget=self._effect_budget,
+                reserve_effect_call=self._reserve_effect_call,
             )
         )
         try:

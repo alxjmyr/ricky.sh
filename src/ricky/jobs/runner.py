@@ -30,6 +30,7 @@ from ricky.authority.store import AuthorityStore
 from ricky.browser.challenge_wait import ChallengeWaitBudget
 from ricky.browser.challenges import ChallengeError, LiveBrowserChallenge
 from ricky.browser.guardrails import BROWSER_READ_TOOLS
+from ricky.browser.holds import HOLD_EFFECT_TOOLS, HOLD_TOOLS
 from ricky.browser.resources import (
     browser_resource_configuration_digest,
     require_browser_resource,
@@ -1242,6 +1243,7 @@ class JobRunner:
                     workflow_registry=None,
                     cwd=self.project_root,
                     artifact_store=runtime.capabilities.session_artifacts,
+                    turn_cleanup=runtime.capabilities.turn_cleanup,
                     deferred_tools=tuple(
                         tool
                         for tool in (
@@ -1972,7 +1974,7 @@ def _named_job_browser_scope(
         raise JobConfigurationError("workflow-backed jobs cannot own a browser")
     if not selected or browser_named != selected:
         raise JobConfigurationError("named browser scope requires only recognized browser tools")
-    read_ceiling = set(BROWSER_READ_TOOLS) | {"browser_session_open_resource"}
+    read_ceiling = set(BROWSER_READ_TOOLS) | HOLD_TOOLS | {"browser_session_open_resource"}
     if not selected <= read_ceiling:
         raise JobConfigurationError("named jobs may select only the read-oriented browser surface")
 
@@ -2062,6 +2064,12 @@ def _named_job_browser_scope(
         operations.add("semantic_observations")
     if "browser_visual_snapshot" in selected:
         operations.add("visual_observations")
+    if "browser_hold_start" in selected:
+        operations.update(
+            {"verification_attempts", "navigations", "created_pages", "controlled_pages"}
+        )
+        if not {"browser_visual_snapshot", "browser_hold_release"} <= selected:
+            raise JobConfigurationError("verification holds require visual observation and release")
     budget = BrowserExecutionBudget.model_validate(
         owner.budget.model_dump(mode="json"),
         strict=True,
@@ -2173,6 +2181,8 @@ def validate_recurring_tool_profile(
     state_guards = StateGuardRegistry([DurableTaskStateGuard(task_store)])
     mutating = set(spec.permissions.allow_mutating)
     exposed_names = tuple(spec.tools.allow) if tool_names is None else tool_names
+    if spec.browser is not None:
+        mutating.update(HOLD_EFFECT_TOOLS.intersection(exposed_names))
     for name in exposed_names:
         tool = registry.get(name)
         if tool is None:
@@ -2211,6 +2221,7 @@ def validate_recurring_tool_profile(
                         run_id=run_id,
                         profile_scope=profile_scope,
                         effect_budget=spec.budget.effect_calls,
+                        reserve_effect_call=name not in HOLD_EFFECT_TOOLS,
                     ),
                 )
             )
@@ -2316,6 +2327,7 @@ def validate_execution_contract_tools(
                         run_id=run_id,
                         profile_scope=profile_scope,
                         effect_budget=spec.budget.effect_calls,
+                        reserve_effect_call=tool.name not in HOLD_EFFECT_TOOLS,
                     ),
                 )
                 if tool.name in ordinary_effects
@@ -2380,6 +2392,9 @@ def _rebind_skill_tools(registry: ToolRegistry, skills: SkillRegistry) -> ToolRe
 
 
 def recurring_permission_engine(spec: JobSpec, *, dry_run: bool) -> PermissionEngine:
+    mutating = set(spec.permissions.allow_mutating)
+    if spec.browser is not None:
+        mutating.update(HOLD_EFFECT_TOOLS.intersection(spec.tools.allow))
     rules = [
         PolicyRule(
             tool_name=name,
@@ -2390,7 +2405,7 @@ def recurring_permission_engine(spec: JobSpec, *, dry_run: bool) -> PermissionEn
                 else "exact mutating permission in the validated run specification"
             ),
         )
-        for name in spec.permissions.allow_mutating
+        for name in sorted(mutating)
     ]
     rules.extend(
         PolicyRule(

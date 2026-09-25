@@ -15,6 +15,9 @@ from ricky.runtime import build_capability_runtime
 from ricky.tools import ToolRegistry
 
 _BROWSER_TOOLS = {
+    "browser_hold_start",
+    "browser_hold_status",
+    "browser_hold_release",
     "browser_request_challenge",
     "browser_resources",
     "browser_session_open",
@@ -40,6 +43,7 @@ _BROWSER_TOOLS = {
 }
 
 _BROWSER_CAPABILITIES = {
+    "builtin.browser.verify",
     "builtin.browser.read",
     "builtin.browser.interact",
     "builtin.browser.commit",
@@ -50,6 +54,10 @@ _BROWSER_CAPABILITIES = {
 class _FakeBrowserService:
     def __init__(self) -> None:
         self.close_calls = 0
+        self.holds = self
+
+    async def stop_all(self) -> None:
+        pass
 
     async def aclose(self) -> None:
         self.close_calls += 1

@@ -18,6 +18,12 @@ from ricky.attachments import (
     load_attachments,
 )
 from ricky.browser.challenges import ChallengeError, LiveBrowserChallenge
+from ricky.browser.hold_tools import (
+    BrowserHoldReleaseTool,
+    BrowserHoldStartTool,
+    BrowserHoldStatusTool,
+)
+from ricky.browser.holds import HOLD_TOOLS
 from ricky.browser.recovery import BrowserReferenceError
 from ricky.browser.service import (
     BrowserPreparedCommit,
@@ -164,7 +170,10 @@ class BrowserChallengeTool:
         "contains no code. Submit it using browser_commit with activation='challenge', "
         "the same target and an accurate envelope covering any payment/authentication effects. "
         "A code reply is not transaction approval. Inspect the resulting browser state."
-        " For device approval, passkey, or CAPTCHA use kind='manual' and a current challenge "
+        " For supported press-and-hold human verification, use browser_hold_start and observe "
+        "before releasing; attempt this automatically within its runtime budget. "
+        " For device approval, passkey, or unsupported CAPTCHA use kind='manual' "
+        "and a current challenge "
         "control; the user performs the action and replies done."
         " Authorized email verification is attempted first; supply the page's recipient when known."
         " If a message needs interpretation, call this tool again with the same target and answer"
@@ -722,6 +731,8 @@ class BrowserVisualSnapshotTool:
     name = "browser_visual_snapshot"
     description = (
         "Capture one masked, bounded current-viewport PNG with numbered interactive candidates."
+        " During a verification hold, capture visual feedback without candidate references; "
+        "an empty candidate list in that mode says nothing about challenge clearance."
     )
     Params = BrowserPageParams
     Result = BrowserVisualSnapshotToolResult
@@ -738,6 +749,7 @@ class BrowserVisualSnapshotTool:
 
     async def run(self, params: BrowserPageParams, ctx: ToolContext) -> ToolResult:
         if self._media is None:
+            await self._service.holds.stop_all("observation_failed")
             return ToolResult(
                 content="browser visual snapshots require a session media store",
                 is_error=True,
@@ -808,7 +820,11 @@ class BrowserVisualSnapshotTool:
                 )
                 raise
         except BrowserError as exc:
+            await self._service.holds.stop_all("observation_failed")
             return _browser_reference_result(exc)
+        except BaseException:
+            await self._service.holds.stop_all("observation_failed")
+            raise
 
         image = ImagePart(artifact=record.reference())
         value = BrowserVisualSnapshot(
@@ -834,7 +850,14 @@ class BrowserVisualSnapshotTool:
         }
         return ToolResult(
             content=(
-                "Trusted browser visual metadata:\n"
+                (
+                    "Observation-only capture during a verification hold. Candidate references "
+                    "are intentionally omitted; inspect the image for progress. An empty "
+                    "candidate list is not evidence of clearance.\n"
+                    if capture.observation_only
+                    else ""
+                )
+                + "Trusted browser visual metadata:\n"
                 f"{json.dumps(trusted, sort_keys=True)}\n"
                 "BEGIN_UNTRUSTED_BROWSER_CONTENT\n"
                 f"{json.dumps(untrusted, sort_keys=True)}\n"
@@ -2560,6 +2583,9 @@ def browser_tools(
     """Build the interactive-only browser toolset."""
 
     tools: list[object] = [
+        BrowserHoldStartTool(service),
+        BrowserHoldStatusTool(service),
+        BrowserHoldReleaseTool(service),
         BrowserResourcesTool(service, verification_resolver),
         BrowserSessionOpenTool(service),
         BrowserSessionOpenResourceTool(service),
@@ -2605,6 +2631,9 @@ def browser_tool_descriptors() -> tuple[Tool, ...]:
     """
 
     descriptor_types = (
+        BrowserHoldStartTool,
+        BrowserHoldStatusTool,
+        BrowserHoldReleaseTool,
         BrowserResourcesTool,
         BrowserSessionOpenTool,
         BrowserSessionOpenResourceTool,
@@ -2638,6 +2667,7 @@ def browser_tool_descriptors() -> tuple[Tool, ...]:
 
 _BACKGROUND_READ_TOOLS = frozenset(
     {
+        *HOLD_TOOLS,
         "browser_resources",
         "browser_session_open",
         "browser_session_open_resource",

@@ -17,6 +17,9 @@ from ricky.browser.types import (
 from ricky.profiles import ProfileResourceRef
 
 BrowserToolName = Literal[
+    "browser_hold_start",
+    "browser_hold_status",
+    "browser_hold_release",
     "browser_request_challenge",
     "browser_resources",
     "browser_session_open",
@@ -41,6 +44,7 @@ BrowserToolName = Literal[
     "browser_coordinate_commit",
 ]
 BrowserBudgetKind = Literal[
+    "verification_attempts",
     "session_starts",
     "navigations",
     "scrolls",
@@ -181,9 +185,12 @@ class BrowserRuntimeEvidence(BrowserModel):
     failure: BrowserFailure | None = None
     result_byte_count: int = Field(default=0, ge=0)
     created_page_count: int = Field(default=0, ge=0, le=50)
+    input_lifecycle: Literal["started", "released"] | None = None
 
     @model_validator(mode="after")
     def _coherent_failure(self) -> BrowserRuntimeEvidence:
+        if self.input_lifecycle is not None and self.facts.tool_name != "browser_hold_start":
+            raise ValueError("resident input lifecycle belongs only to verification holds")
         if self.disposition == "completed" and self.failure is not None:
             raise ValueError("completed browser runtime evidence cannot carry a failure")
         return self

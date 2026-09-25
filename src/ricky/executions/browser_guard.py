@@ -325,7 +325,7 @@ class DurableBrowserExecutionGuard:
         reservation_id: str | None = None
         async with self._possible_page_lock:
             pending = self._possible_page_reservations.get(occurrence_digest)
-            if pending:
+            if pending and evidence.input_lifecycle != "started":
                 reservation_id = pending.pop(0)
                 if not pending:
                     del self._possible_page_reservations[occurrence_digest]
@@ -342,7 +342,12 @@ class DurableBrowserExecutionGuard:
         if evidence.action_id is not None:
             postcondition = f"{postcondition}; browser_action_id={evidence.action_id}"
         disposition = "observed" if evidence.disposition == "completed" else evidence.disposition
-        bound = self._bound_effect.get()
+        # A resident input release can run in a deadline task inheriting the
+        # original dispatch context, after that ledger action has settled.
+        # Correlate its independent lifecycle evidence by browser action id.
+        bound = None if evidence.input_lifecycle == "released" else self._bound_effect.get()
+        if evidence.input_lifecycle is not None:
+            postcondition += f"; input_lifecycle={evidence.input_lifecycle}"
         action_evidence = BrowserActionEvidence(
             attempt_id=self.attempt_id,
             action_id=(bound[0] if bound is not None and disposition != "observed" else None),

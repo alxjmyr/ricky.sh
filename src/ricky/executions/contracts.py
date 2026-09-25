@@ -266,6 +266,7 @@ class ExecutionContract(_FrozenModel):
             return frozenset(selected)
         browser_capabilities = {
             "builtin.browser.read",
+            "builtin.browser.verify",
             "builtin.browser.interact",
             "builtin.browser.commit",
             "builtin.protected_value.use",

@@ -38,6 +38,12 @@ def browser_system_sections(
             "browser_session_open_resource. A profile name alone is not a resource. "
             "Resource discovery is not required; these identities are already pinned "
             "by this execution's contract. Use only exposed tools within its guards.\n"
+            "When browser_hold_start and browser_hold_release are exposed, supported "
+            "press-and-hold human verification is authorized maintenance, including in "
+            "read_only mode. Attempt it using a fresh visual candidate instead of asking "
+            "the user to hold. Observe visual feedback, release within the runtime limits, "
+            "then use a fresh browser_visual_snapshot to verify clearance before continuing. "
+            "This exception does not authorize ordinary clicks, fills, or transactions.\n"
             f"Ephemeral browser sessions permitted: {scope.allow_ephemeral}. "
             "An ephemeral session does not contain the configured browser's login.\n"
             "Read each fresh snapshot and match the control's label, role, and kind before "
@@ -92,9 +98,11 @@ def job_system_sections(spec: JobSpec, *, named: bool) -> dict[str, str]:
         identity = "ad-hoc read-only job"
     authority = (
         (
-            "Use only the tools exposed in this request. Browser tools may navigate and "
-            "observe only inside the authored read-oriented browser scope; they cannot fill, "
-            "click, upload, download, use protected values, or commit a transaction."
+            "Use only the tools exposed in this request. Ordinary browser operations may "
+            "navigate and observe inside the authored read-oriented browser scope; they "
+            "cannot fill, click, upload, download, use protected values, or commit a "
+            "transaction. Separately exposed browser_hold_start and browser_hold_release "
+            "are authorized bounded verification maintenance within that same scope."
         )
         if spec.browser is not None
         else (

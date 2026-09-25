@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 
 from ricky.browser.backend import (
@@ -96,6 +97,7 @@ class FakeBrowserPage:
         self.coordinate_outcomes: list[BackendActionOutcome] = []
         self.coordinate_entered: asyncio.Event | None = None
         self.coordinate_release: asyncio.Event | None = None
+        self.holds: list[FakeBrowserHold] = []
         self._session: FakeBrowserSession | None = None
 
     @property
@@ -139,10 +141,14 @@ class FakeBrowserPage:
         self.snapshot_character_limits.append(character_limit)
         return BackendSnapshot(content=self.snapshot_text, targets=self.targets)
 
-    async def visual_snapshot(self, *, candidate_limit: int) -> BackendVisualSnapshot:
+    async def visual_snapshot(
+        self, *, candidate_limit: int, observation_only: bool = False
+    ) -> BackendVisualSnapshot:
         self.operations.append(f"visual:{candidate_limit}")
         if self.visual_capture is None:
             raise AssertionError("fake visual capture was not configured")
+        if observation_only:
+            return replace(self.visual_capture, candidates=())
         return self.visual_capture
 
     async def preflight_action(
@@ -327,6 +333,37 @@ class FakeBrowserPage:
             equivalent_semantic_ref=self.coordinate_equivalent_semantic_ref,
         )
 
+    async def preflight_verification_hold(
+        self, request: BackendCoordinateRequest
+    ) -> BackendCoordinatePreflight:
+        preflight = await self.preflight_coordinate_commit(request)
+        target = preflight.target
+        if (
+            target.restricted_interaction != "captcha"
+            or target.role not in {"button", "canvas"}
+            or target.protected
+            or target.file
+            or target.consequential
+            or target.editable
+            or target.disabled
+            or preflight.financial_signal
+        ):
+            raise BrowserError(
+                BrowserFailure(code="incompatible_target", message="not a verification control")
+            )
+        return preflight
+
+    async def start_verification_hold(
+        self, request: BackendCoordinateRequest, *, expected: BackendCoordinatePreflight
+    ) -> FakeBrowserHold:
+        if await self.preflight_verification_hold(request) != expected:
+            raise BrowserError(
+                BrowserFailure(code="stale_target", message="verification target changed")
+            )
+        hold = FakeBrowserHold(self, await self.state())
+        self.holds.append(hold)
+        return hold
+
     async def perform_coordinate_commit(
         self,
         request: BackendCoordinateRequest,
@@ -377,6 +414,29 @@ class FakeBrowserPage:
             self.quarantined = True
             return
         self.closed = True
+
+
+class FakeBrowserHold:
+    def __init__(self, page: FakeBrowserPage, before: BackendPageState) -> None:
+        self.page = page
+        self.before = before
+        self.release_calls = 0
+        self.released = asyncio.Event()
+
+    async def live(self) -> bool:
+        return (
+            not self.released.is_set() and not self.page.closed and self.page.url == self.before.url
+        )
+
+    async def release(self) -> BackendActionOutcome:
+        self.release_calls += 1
+        self.released.set()
+        return BackendActionOutcome(
+            disposition="performed",
+            dispatch_state="completed",
+            state_before=self.before,
+            state_after=await self.page.state(),
+        )
 
 
 class FakeBrowserSession:

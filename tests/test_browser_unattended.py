@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +24,7 @@ from ricky.browser.backend import (
     BackendVisualCandidate,
     BackendVisualSnapshot,
 )
+from ricky.browser.hold_tools import BrowserHoldReleaseTool, BrowserHoldStartTool
 from ricky.browser.runtime_guard import (
     BrowserBudgetKind,
     BrowserExecutionGuard,
@@ -32,6 +34,7 @@ from ricky.browser.runtime_guard import (
 from ricky.browser.service import BrowserService
 from ricky.browser.tools import BrowserClickTool, BrowserSessionOpenResourceTool
 from ricky.browser.types import (
+    BrowserActionTarget,
     BrowserCoordinateTarget,
     BrowserDialogPolicy,
     BrowserError,
@@ -39,7 +42,11 @@ from ricky.browser.types import (
 )
 from ricky.config import RickySettings
 from ricky.jobs.browser_store import BrowserBudgetExceededError
-from ricky.tools import ToolContext, ToolRegistry
+from ricky.jobs.effects import GuardedEffectTool
+from ricky.jobs.store import JobEffectBudgetError, JobRunStore
+from ricky.jobs.types import JobRun
+from ricky.tools import Tool, ToolContext, ToolRegistry, make_effect_identity
+from ricky.tools.testing import assert_tool_contract
 
 _ORIGIN = "https://127.0.0.1:9443"
 
@@ -324,6 +331,95 @@ def test_background_inventory_matches_real_tools_and_excludes_handoff(tmp_path: 
             allowed_tools=frozenset({"browser_fill_protected"}),
         )
     assert isinstance(service._runtime_guard, BrowserExecutionGuard)  # type: ignore[attr-defined]
+
+
+async def test_background_verification_uses_own_budget_and_common_effect_ledger(
+    tmp_path: Path,
+) -> None:
+    service, guard, page = _service(tmp_path)
+    settings = service._settings
+    scope = settings.resolve_profile_scope()
+    session = AgentSession.create(settings, profile_scope=scope)
+    ctx = ToolContext(settings=settings, cwd=tmp_path, session=session)
+    jobs = JobRunStore(settings)
+    await jobs.initialize()
+    run = JobRun(
+        id="jobrun_hold",
+        provider=session.provider,
+        model=session.model,
+        profile_scope=scope,
+        session_id=session.id,
+        started_at=datetime.now(UTC),
+        trigger="manual",
+    )
+    await jobs.insert(run, scope=scope)
+    descriptor = BackendTargetDescriptor(
+        ref="d1",
+        role="button",
+        name="Human verification",
+        restricted_interaction="captcha",
+        frame_origin=_ORIGIN,
+    )
+    page.visual_capture = _visual(descriptor)
+    page.coordinate_target = descriptor
+    try:
+        opened = await service.open_session()
+        visual = await service.visual_snapshot(
+            opened.session_id, page_id=None, provider=session.provider
+        )
+        target = BrowserActionTarget(
+            session_id=opened.session_id,
+            page_id=visual.page.page_id,
+            snapshot_id=visual.snapshot_id,
+            ref="d1",
+        )
+        start = BrowserHoldStartTool(service)
+        guarded = GuardedEffectTool(
+            cast(Tool, start),
+            store=jobs,
+            job_name="verification-research",
+            run_id=run.id,
+            profile_scope=scope,
+            effect_budget=0,
+            reserve_effect_call=False,
+        )
+        result = await guarded.run(start.Params(target=target), ctx)
+        assert not result.is_error, result.content
+        assert isinstance(result.data, dict)
+        hold_id = str(result.data["hold_id"])
+        assert any(
+            kind == "verification_attempts" and amount == 1
+            for kind, amount, _ in guard.reservations
+        )
+        release = BrowserHoldReleaseTool(service)
+        released = await assert_tool_contract(
+            cast(Tool, release),
+            valid_args={"hold_id": hold_id},
+            ctx=ctx,
+        )
+        assert not released.is_error, released.content
+        assert [item.input_lifecycle for item in guard.evidence if item.input_lifecycle] == [
+            "started",
+            "released",
+        ]
+        assert (await jobs.get(run.id, scope=scope)).effect_calls == 0
+        assert [item.status for item in await jobs.actions_for_run(run.id, scope=scope)] == [
+            "performed"
+        ]
+        with pytest.raises(JobEffectBudgetError):
+            await jobs.reserve_action(
+                job_name="verification-research",
+                run_id=run.id,
+                scope=scope,
+                effect_budget=0,
+                identity=make_effect_identity(
+                    operation="ordinary", target="site", occurrence="1", summary="Ordinary effect"
+                ),
+            )
+        assert page.holds[0].release_calls == 1
+        assert not Path(settings.project_data_dir).exists()
+    finally:
+        await service.aclose()
 
 
 async def test_guard_observes_and_reserves_background_read_operations(tmp_path: Path) -> None:
