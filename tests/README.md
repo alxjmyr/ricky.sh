@@ -75,6 +75,15 @@ fake has a similarly named test.
 
 ## Share setup, not mutable state
 
+Compaction lease tests advance only the session store's clock and keep provider
+work blocked until renewals are observed. They retain the real heartbeat and
+fenced database commit, including renewal during commit, without requiring a
+loaded host to renew within a one-second wall-clock lease. The owned-operation
+success test waits for a renewal event. The challenge active-work expiry test
+retains its real timer against an explicitly blocked task, so delayed scheduling
+cannot turn expiry into successful task completion. Owned tasks are cancelled
+and joined if a bounded wait fails.
+
 `test_claude_code.py::test_timeout_kills_subprocess` retains a real inactivity
 timer and verifies termination through the actual spawned process. It does not
 depend on child-side invocation logging completing before the timeout.

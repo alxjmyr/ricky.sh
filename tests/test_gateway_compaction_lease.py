@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -28,11 +28,22 @@ NOW = datetime(2026, 8, 21, 12, tzinfo=UTC)
 SCOPE = ProfileScope.create("personal")
 
 
+@pytest.fixture(autouse=True)
+def compaction_start_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StartTime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return NOW.astimezone(tz)
+
+    # The coordinator creates the turn timestamp; align it with the store clock
+    # so a terminal turn cannot appear to finish before it started.
+    monkeypatch.setattr(conversations_module, "datetime", StartTime)
+
+
 class CompactionRuntime:
     """A compact-context runtime with observable ownership boundaries."""
 
-    def __init__(self, *, delay_seconds: float = 0, block: bool = False) -> None:
-        self.delay_seconds = delay_seconds
+    def __init__(self, *, block: bool = False) -> None:
         self.block = block
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
@@ -49,8 +60,6 @@ class CompactionRuntime:
         del session
         self.entered.set()
         try:
-            if self.delay_seconds:
-                await asyncio.sleep(self.delay_seconds)
             if self.block:
                 await self.release.wait()
         except asyncio.CancelledError:
@@ -75,18 +84,25 @@ class CompactionRuntime:
 
 class CountingRenewStore(SessionStore):
     def __init__(self, settings: RickySettings) -> None:
-        super().__init__(settings)
+        self.now = NOW
+        super().__init__(settings, clock=lambda: self.now)
         self.renewals = 0
+        self.three_renewals = asyncio.Event()
 
     async def renew(self, lease: SessionLease) -> SessionLease:
+        # Advance only the store clock. CPU scheduling must not expire the lease
+        # while this test is checking the coordinator's renewal/commit wiring.
+        self.now += timedelta(seconds=0.4)
         renewed = await super().renew(lease)
         self.renewals += 1
+        if self.renewals >= 3:
+            self.three_renewals.set()
         return renewed
 
 
 class FailingRenewStore(SessionStore):
     def __init__(self, settings: RickySettings, failure: BaseException) -> None:
-        super().__init__(settings)
+        super().__init__(settings, clock=lambda: NOW)
         self.failure = failure
 
     async def renew(self, lease: SessionLease) -> SessionLease:
@@ -196,14 +212,18 @@ async def test_compaction_longer_than_lease_renews_until_commit(
     settings = _settings(tmp_path)
     store = CountingRenewStore(settings)
     coordinator, inbound, conversation, session = await _setup(settings, store)
-    runtime = CompactionRuntime(delay_seconds=1.2)
+    runtime = CompactionRuntime(block=True)
+    runtime.release = store.three_renewals
     _install_runtime(monkeypatch, runtime)
 
-    response, revision = await coordinator._compact(inbound, conversation)
+    response, revision = await asyncio.wait_for(
+        coordinator._compact(inbound, conversation), timeout=5
+    )
 
     assert "Context compacted" in response
     assert revision == 1
     assert store.renewals >= 3
+    assert (store.now - NOW).total_seconds() > settings.sessions.lease_seconds
     assert runtime.closed
     assert runtime.released_session_ids == [session.id]
     assert (await store.turns(session.id, scope=SCOPE))[0].status == "committed"
@@ -249,11 +269,14 @@ async def test_compaction_cancellation_during_provider_stream_joins_runtime(
     runtime = CompactionRuntime(block=True)
     _install_runtime(monkeypatch, runtime)
     compaction = asyncio.create_task(coordinator._compact(inbound, conversation))
-    await asyncio.wait_for(runtime.entered.wait(), timeout=2)
-
-    compaction.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await compaction
+    try:
+        await asyncio.wait_for(runtime.entered.wait(), timeout=2)
+        compaction.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await compaction
+    finally:
+        compaction.cancel()
+        await asyncio.gather(compaction, return_exceptions=True)
 
     assert runtime.cancelled
     assert runtime.closed
@@ -272,11 +295,14 @@ async def test_compaction_commit_is_covered_at_a_renewal_boundary(
     runtime = CompactionRuntime()
     _install_runtime(monkeypatch, runtime)
     compaction = asyncio.create_task(coordinator._compact(inbound, conversation))
-    await asyncio.wait_for(store.commit_entered.wait(), timeout=2)
-    await asyncio.wait_for(store.renewed_during_commit.wait(), timeout=2)
-
-    store.allow_commit.set()
-    _, revision = await compaction
+    try:
+        await asyncio.wait_for(store.commit_entered.wait(), timeout=2)
+        await asyncio.wait_for(store.renewed_during_commit.wait(), timeout=2)
+        store.allow_commit.set()
+        _, revision = await asyncio.wait_for(compaction, timeout=2)
+    finally:
+        compaction.cancel()
+        await asyncio.gather(compaction, return_exceptions=True)
 
     assert revision == 1
     assert store.commit_calls == 1

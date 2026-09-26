@@ -81,7 +81,12 @@ async def test_wait_allowance_is_not_reset_by_repeated_challenges(
 
 async def test_active_work_still_expires_without_user_wait() -> None:
     budget = ChallengeWaitBudget(1)
-    task = asyncio.create_task(asyncio.sleep(1))
-    assert not await budget.wait_for_task(task, active_seconds=0.02)
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    task = asyncio.create_task(asyncio.Event().wait())
+    try:
+        assert not await asyncio.wait_for(
+            budget.wait_for_task(task, active_seconds=0.02), timeout=2
+        )
+        assert not task.done(), "the observer must not cancel an effect owner"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

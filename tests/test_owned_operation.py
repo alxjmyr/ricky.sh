@@ -33,18 +33,23 @@ async def test_renewal_failure_cancels_and_joins_owned_operation() -> None:
 
 async def test_success_stops_heartbeat_and_returns_result() -> None:
     renewals = 0
+    renewed = asyncio.Event()
 
     async def operation() -> str:
-        await asyncio.sleep(0.005)
+        await renewed.wait()
         return "done"
 
     async def renew(lease: int) -> int:
         nonlocal renewals
         renewals += 1
+        renewed.set()
         return lease + 1
 
     assert (
-        await run_with_lease_heartbeat(operation(), lease=1, renew=renew, interval_seconds=0.001)
+        await asyncio.wait_for(
+            run_with_lease_heartbeat(operation(), lease=1, renew=renew, interval_seconds=0.001),
+            timeout=2,
+        )
         == "done"
     )
     assert renewals >= 1
