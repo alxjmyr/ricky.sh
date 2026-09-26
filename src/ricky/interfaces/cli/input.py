@@ -38,6 +38,7 @@ CHAT_COMMANDS: tuple[str, ...] = (
     "/model",
     "/clear",
     "/permissions",
+    "/send-it",
     "/remember",
     "/skill",
     "/workflow",
@@ -56,6 +57,7 @@ _COMMAND_DESCRIPTIONS = {
     "/model": "show the current model",
     "/clear": "start a fresh session",
     "/permissions": "list or clear session grants",
+    "/send-it": "show or change automatic approval mode",
     "/remember": "propose or save a memory",
     "/skill": "list or activate a skill",
     "/workflow": "list or run a workflow",
@@ -267,7 +269,7 @@ class CliInputSession:
         images = "  ".join(f"[{i}] {item.filename}" for i, item in enumerate(self.staged_images, 1))
         return (f" Images: {images}\n" if images else "") + _CHAT_TOOLBAR
 
-    async def read_chat(self) -> str:
+    async def read_chat(self, *, send_it: bool = False) -> str:
         """Read a draft, staging attachment commands without submitting or recalling them."""
         while True:
             draft, self._draft = self._draft, ""
@@ -277,10 +279,19 @@ class CliInputSession:
                         self._console.print(self._toolbar(), markup=False)
                     if draft:
                         self._console.print(f"Unsent text: {draft}", markup=False)
-                    text = await self._read_plain_line("[bold cyan]ricky>[/bold cyan] ")
+                    prompt = (
+                        "[bold yellow]ricky (send-it)>[/bold yellow] "
+                        if send_it
+                        else "[bold cyan]ricky>[/bold cyan] "
+                    )
+                    text = await self._read_plain_line(prompt)
                 else:
                     text = await self._prompt_session.prompt_async(
-                        HTML("<b><ansicyan>ricky&gt;</ansicyan></b> "),
+                        HTML(
+                            "<b><ansiyellow>ricky (send-it)&gt;</ansiyellow></b> "
+                            if send_it
+                            else "<b><ansicyan>ricky&gt;</ansicyan></b> "
+                        ),
                         default=draft,
                         multiline=True,
                         completer=self._completer,

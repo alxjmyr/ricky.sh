@@ -163,6 +163,24 @@ Use `y` to allow the call once or `n` to deny it. Some prompts also offer:
 
 Grant choices are case-sensitive. Use the narrowest choice that fits the task.
 
+## Skip approval prompts for this chat
+
+Start with `ricky chat --send-it`, or enter `/send-it on` in an active chat. While enabled,
+Ricky automatically authorizes tool approval requests, including browser resource opens, file
+transfers, protected fills, and consequential purchases or submissions. Chat also accepts workflow
+confirmation checkpoints automatically. The prompt shows a persistent send-it indicator.
+
+Use `/send-it` to inspect the status and `/send-it off` to restore normal approval prompts.
+Explicit deny policies still apply, as do argument validation, profile scope, browser destination
+and screenshot-disclosure rules, protected-value policy, and safeguards against replaying uncertain
+effects. A protected value's `confirm_new` destination prompt becomes an allow-once decision;
+it never creates a durable destination approval.
+
+Ricky still asks for information it needs, such as a vault password, an OTP, a local browser
+handoff, or a workflow selection. Send-it mode belongs only to this running chat. It is not saved
+in configuration or session records, and background executions and other interfaces do not inherit
+it. `/clear` turns it off; exiting discards it. `/permissions clear` only clears remembered grants.
+
 ## Use chat commands
 
 Enter these commands at the `ricky>` prompt:
@@ -177,6 +195,7 @@ Enter these commands at the `ricky>` prompt:
 | `/model` | Show the provider and model pinned to this chat. |
 | `/img [paths...]` | Select images for the next message. |
 | `/clear` | Discard the current chat state and start a fresh session with the same model. |
+| `/send-it [on\|off]` | Show send-it status, enable it, or disable it. |
 | `/permissions` | List active session permission grants. |
 | `/permissions clear` | Revoke all active session permission grants. |
 | `/remember <text>` | Ask Ricky to save one durable fact. |
@@ -218,8 +237,8 @@ durable-task leases when the chat closes cleanly.
 ## Understand chat persistence
 
 `ricky chat` is ephemeral. Exiting discards its transcript, temporary tasks, active skill, context
-checkpoints, and session permission grants. The following data can survive because it is stored
-separately:
+checkpoints, session permission grants, and send-it mode. The following data can survive because
+it is stored separately:
 
 - Memory notes
 - Durable tasks and their artifacts

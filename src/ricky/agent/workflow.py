@@ -114,6 +114,7 @@ class ApprovalResponse(BaseModel):
     """A fail-closed confirmation or stable-key collection selection."""
 
     approved: bool = False
+    source: Literal["user", "send_it"] = "user"
     selected_keys: list[ItemKey] = Field(default_factory=list)
 
 
@@ -655,7 +656,7 @@ class WorkflowRunner:
         if isinstance(step, MessageStep):
             return execute_message_step(step, context), Usage()
         if isinstance(step, ApprovalStep):
-            return await self._execute_approval(run, step, context), Usage()
+            return await self._execute_approval(run, step, record, context), Usage()
         if isinstance(step, ToolStep):
             return await self._execute_tool(run, step, record, context), Usage()
         if isinstance(step, ModelStep):
@@ -946,7 +947,7 @@ class WorkflowRunner:
         return ToolExecutionResult(content=result.content, is_error=result.is_error)
 
     async def _execute_approval(
-        self, run: WorkflowRun, step: ApprovalStep, context: dict[str, Any]
+        self, run: WorkflowRun, step: ApprovalStep, record: StepRecord, context: dict[str, Any]
     ) -> JsonValue:
         prompt = resolve_value(step.prompt, context)
         if not isinstance(prompt, str):
@@ -963,6 +964,23 @@ class WorkflowRunner:
                     proposal=proposal,
                 )
             )
+            await self._event(
+                run,
+                "approval_decided",
+                record=record,
+                reason=(
+                    "approved by chat send-it mode"
+                    if response.approved and response.source == "send_it"
+                    else "approved by user"
+                    if response.approved
+                    else "denied by user"
+                ),
+                details={
+                    "source": response.source,
+                    "approved": response.approved,
+                    "mode": step.mode,
+                },
+            )
             if not response.approved:
                 raise PermissionError("approval denied")
             return {"approved": True, "proposal": proposal}
@@ -978,7 +996,19 @@ class WorkflowRunner:
                 item_keys=keys,
             )
         )
-        return self._selection_output(value, keys, response.selected_keys)
+        output = self._selection_output(value, keys, response.selected_keys)
+        await self._event(
+            run,
+            "approval_decided",
+            record=record,
+            reason="selection supplied by user",
+            details={
+                "source": response.source,
+                "approved": bool(response.selected_keys),
+                "mode": step.mode,
+            },
+        )
+        return output
 
     def _approval_items(
         self, step: ApprovalStep, context: dict[str, Any]

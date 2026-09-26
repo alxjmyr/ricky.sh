@@ -110,8 +110,11 @@ organizational trust.
 
 `confirm_new` uses an injected trusted responder that can deny, allow once, or durably approve the
 exact top-level and target-frame origin pair. Only the explicit durable choice mutates approval
-state. Approvals remain local, inspectable, and revocable and are not ordinary session permission
-grants. A gateway-owned execution can park one exact protected-fill occurrence for authenticated
+state. Interactive CLI chat send-it mode answers `confirm_new` with allow-once,
+never durable approval. It leaves authored destination restrictions, scope,
+revision, and dispatch revalidation intact; secure secret input still requires
+the operator. Approvals remain local, inspectable, and revocable and are not ordinary session
+permission grants. A gateway-owned execution can park one exact protected-fill occurrence for authenticated
 one-execution destination authorization; this does not mutate durable destination approval. Other
 non-interactive surfaces deny new-destination confirmation.
 
@@ -157,7 +160,8 @@ path.
 
 Protected fill is an external effect because page JavaScript may observe or autosave a field. It
 is never retried after dispatch may begin. Filling never submits, clicks, presses Enter, or grants
-commit authority. Browser commit remains a separate destructive review.
+commit authority. Browser commit remains a separate destructive authorization; interactive chat
+send-it may authorize it automatically under the tool-review contract.
 
 A later financial browser approval may name a successfully used protected resource only by its safe
 profile-qualified alias. The browser consumer can retain that non-secret current-page evidence, but

@@ -281,7 +281,9 @@ async def decide_tool_permission(
         response = await responder(request)
         decision = response.decision
         reason = "allowed by user" if decision == "allow" else "denied by user"
-        if decision == "allow" and response.grant is not None:
+        if decision == "allow" and response.source == "send_it":
+            reason = "allowed by chat send-it mode"
+        if decision == "allow" and response.source == "user" and response.grant is not None:
             # Authority guard: only honor an id we actually offered, so a
             # renderer can never widen a grant past the loop's ceiling.
             chosen = next(

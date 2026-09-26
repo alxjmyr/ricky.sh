@@ -11,7 +11,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from ricky.agent import AgentSession, PermissionGrant
-from ricky.agent.events import PermissionRequestedEvent
+from ricky.agent.events import PermissionDecidedEvent, PermissionRequestedEvent
 from ricky.agent.tool_dispatch import (
     GateOutcome,
     PermissionResponder,
@@ -316,3 +316,80 @@ async def test_default_policy_review_mode_preserves_allow_and_grant_behavior(
     assert outcome.decision == "allow"
     assert tool.prepare_count == 1
     assert not any(isinstance(event, PermissionRequestedEvent) for event in outcome.events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool_type", [_PreparedTool, _FreshPreparedTool])
+async def test_send_it_keeps_prepared_dispatch_and_never_remembers_grants(
+    tmp_path: Path, tool_type: type[_PreparedTool]
+) -> None:
+    tool = tool_type()
+    session, registry, ctx = _setup(tmp_path, tool)
+
+    async def responder(_event: PermissionRequestedEvent) -> PermissionResponse:
+        assert tool.prepare_count == 1
+        # Even a forged automatic grant cannot escape into ordinary session authority.
+        return PermissionResponse(decision="allow", source="send_it", grant="tool")
+
+    outcome = await _decide(
+        session=session, registry=registry, engine=PermissionEngine(), responder=responder, ctx=ctx
+    )
+    assert outcome.decision == "allow"
+    assert outcome.remembered_grant is None
+    assert session.permission_grants == []
+    assert any(
+        isinstance(event, PermissionDecidedEvent)
+        and event.reason == "allowed by chat send-it mode"
+        and not event.remembered
+        for event in outcome.events
+    )
+    assert outcome.normalized_args is not None
+    assert outcome.prepared_effect is not None
+    assert tool.prepare_count == 1
+    await registry.dispatch_prepared(
+        tool.name, outcome.normalized_args, outcome.prepared_effect, ctx
+    )
+    assert tool.prepare_count == 1
+    assert tool.dispatch_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["deny", "invalid", "preparation"])
+async def test_send_it_cannot_skip_policy_validation_or_preparation(
+    tmp_path: Path, failure: str
+) -> None:
+    tool = _FreshPreparedTool()
+    session, registry, ctx = _setup(tmp_path, tool)
+    calls = 0
+
+    async def responder(_event: PermissionRequestedEvent) -> PermissionResponse:
+        nonlocal calls
+        calls += 1
+        return PermissionResponse(decision="allow", source="send_it")
+
+    async def broken_preparation(args: dict[str, object], ctx: ToolContext) -> PreparedEffect:
+        raise ValueError("stale target")
+
+    if failure == "preparation":
+        tool.prepare_effect = broken_preparation
+    policy = Policy(
+        rules=[PolicyRule(tool_name=tool.name, decision="deny")] if failure == "deny" else []
+    )
+    outcome = await decide_tool_permission(
+        session=session,
+        registry=registry,
+        engine=PermissionEngine(policy),
+        responder=responder,
+        turn_id="turn",
+        call=ToolCallPart(
+            id="call",
+            name=tool.name,
+            args={"target": 123 if failure == "invalid" else "example.com"},
+        ),
+        ctx=ctx,
+    )
+    assert outcome.decision == ("deny" if failure == "deny" else "error")
+    assert calls == 0
+    assert tool.prepare_count == 0
+    assert tool.dispatch_count == 0
+    assert session.permission_grants == []

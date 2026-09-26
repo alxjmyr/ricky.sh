@@ -1,9 +1,9 @@
 # Review browser transactions
 
-Ricky requires a fresh exact approval before it activates a consequential browser control. The
-review describes both Ricky's proposal and the exact browser occurrence it will use. Approval
-applies once; it cannot be remembered or reused after the page, target, destination, or proposal
-changes.
+By default, Ricky requires a fresh exact approval before it activates a consequential browser
+control. The review describes both Ricky's proposal and the exact browser occurrence it will use.
+Approval applies once; it cannot be remembered or reused after the page, target, destination, or
+proposal changes.
 
 An interactive resident chat uses its local terminal prompt. A gateway-owned ad hoc execution can
 park the same live browser occurrence and request a source-bound Telegram approval. Named and
@@ -247,6 +247,11 @@ automatically replays it.
 Check every proposed field and the local binding before entering `y`. Press Enter, enter `n`, close
 the prompt, or provide no interactive input to deny. Transaction approvals never offer a remembered
 grant, and an installation allow rule cannot suppress the fresh prompt.
+
+Interactive chat [send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically
+authorizes these exact prepared transactions, so purchases and submissions can proceed without
+per-action review. Deny policies, destination checks, transaction binding, and no-replay rules
+remain enforced. This mode does not affect gateway approvals.
 
 ## Reconcile an uncertain background transaction
 

@@ -89,9 +89,21 @@ class CliRenderer:
         self._prompt_active = False
         self._deferred_events: list[AgentEvent] = []
 
-    async def read_user_input(self) -> str:
+    async def read_user_input(self, *, send_it: bool = False) -> str:
         """Read one possibly multiline prompt without blocking the event loop."""
-        return await self.input_session.read_chat()
+        return await self.input_session.read_chat(send_it=send_it)
+
+    def render_send_it_status(self, enabled: bool) -> None:
+        """Keep the chat's automatic approval mode explicit to its local user."""
+        if enabled:
+            self.render_status(
+                "Send-it mode is on: actions, including purchases and submissions, "
+                "are approved automatically. Explicit denies still apply. "
+                "Use /send-it off to restore approval prompts.",
+                style="yellow",
+            )
+        else:
+            self.render_status("Send-it mode is off: normal approval prompts apply.")
 
     def configure_chat_input(self, skill_registry: SkillRegistry) -> None:
         """Expose only top-level slash commands and skills to completion."""
@@ -853,6 +865,7 @@ class CliRenderer:
 `/clear` start a fresh session
 `/permissions` list active session permission grants
 `/permissions clear` revoke all session permission grants
+`/send-it [on|off]` show or change automatic approval mode for this chat
 `/remember <text>` remember a durable fact
 `/remember` propose memory notes from the conversation
 `/skill` list loaded skills

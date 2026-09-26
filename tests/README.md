@@ -8,6 +8,14 @@ The browser boundary file has one `xdist_group` to avoid running several large
 DOMs and process-failure drills simultaneously. Other tests use small scheduling
 batches, including the independent release recovery scenarios.
 
+Chat send-it coverage stays in process: `test_chat_permissions.py` checks responder
+isolation and workflow approval provenance; `test_fresh_review_permissions.py` keeps
+the normal and automatic tool-review paths under the same preparation and denial
+contract. `test_chat_send_it_integration.py` covers chat composition, browser commit
+revalidation, and protected-value destination policy using the real service owners.
+CLI command, prompt, and per-turn context coverage lives in the existing chat and
+CLI test files. The real-browser and unattended suites retain their boundary coverage.
+
 ## Keep expensive coverage at its boundary
 
 Use compact HTML for gateway journeys. The large checkout DOM belongs to
@@ -66,6 +74,14 @@ rejection. Do not remove a browser-specific assertion merely because an in-proce
 fake has a similarly named test.
 
 ## Share setup, not mutable state
+
+`test_claude_code.py::test_timeout_kills_subprocess` retains a real inactivity
+timer and verifies termination through the actual spawned process. It does not
+depend on child-side invocation logging completing before the timeout.
+The gateway conversation concurrency case starts its second conversation while
+the first provider is confirmed live and blocked, preserving the overlap check
+without racing two cold runtime constructions. It cancels and joins owned tasks
+if either bounded startup wait fails.
 
 Conversation, checkout, and challenge builders live in their `*_support.py`
 modules. New tests should not import helpers from test modules. Keep assertions

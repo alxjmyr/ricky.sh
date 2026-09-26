@@ -32,6 +32,7 @@ from ricky.installation import (
 from ricky.interfaces.cli.browser import register_browser_commands
 from ricky.interfaces.cli.capabilities import register_capability_commands
 from ricky.interfaces.cli.chat import ChatController
+from ricky.interfaces.cli.chat_permissions import ChatPermissions
 from ricky.interfaces.cli.errors import run_with_provider_errors
 from ricky.interfaces.cli.executions import (
     register_authority_commands,
@@ -683,6 +684,11 @@ def chat(
         list[str] | None,
         typer.Option("--access-profile", help="Additional accessible profile; repeatable."),
     ] = None,
+    send_it: bool = typer.Option(
+        False,
+        "--send-it",
+        help="Automatically approve actions in this chat, including purchases and submissions.",
+    ),
 ) -> None:
     """Start an interactive agent chat session."""
     run_with_provider_errors(
@@ -692,6 +698,7 @@ def chat(
             renderer,
             profile_name=profile,
             access_profiles=access_profiles or (),
+            send_it=send_it,
         )
     )
 
@@ -745,6 +752,7 @@ async def _chat(
     *,
     profile_name: str | None = None,
     access_profiles: tuple[str, ...] | list[str] = (),
+    send_it: bool = False,
 ) -> None:
     settings = load_settings()
     profile_scope = settings.resolve_profile_scope(
@@ -762,12 +770,18 @@ async def _chat(
         provider=selection.provider,
         model=selection.model,
     )
+    permissions = ChatPermissions(
+        permission_responder=renderer.request_permission,
+        approval_responder=renderer.request_workflow_approval,
+        destination_responder=renderer.request_protected_destination,
+        enabled=send_it,
+    )
     async with build_session_runtime(
         settings,
         session=session,
         provider=provider,
-        permission_responder=renderer.request_permission,
-        approval_responder=renderer.request_workflow_approval,
+        permission_responder=permissions.request_permission,
+        approval_responder=permissions.request_workflow_approval,
         slack_factory=slack_toolset,
         gmail_factory=gmail_toolset,
         gcal_factory=gcal_toolset,
@@ -777,7 +791,7 @@ async def _chat(
         unlock_responder=renderer.request_protected_unlock,
         secure_value_responder=renderer.request_secure_value,
         browser_challenge_responder=renderer.request_browser_challenge,
-        destination_responder=renderer.request_protected_destination,
+        destination_responder=permissions.request_protected_destination,
         skill_factory=discover_skills,
         registry_factory=ToolRegistry,
     ) as runtime:
@@ -787,6 +801,7 @@ async def _chat(
             settings=settings,
             renderer=renderer,
             skill_registry=runtime.skill_registry,
+            permissions=permissions,
             memory=runtime.memory,
             durable_tasks=runtime.durable_tasks,
             workflow_runner=runtime.workflow_runner,

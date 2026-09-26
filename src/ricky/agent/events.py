@@ -401,6 +401,7 @@ class WorkflowEvent(EventBase):
         "graph_compiled",
         "scheduler_pass",
         "step_ready",
+        "approval_decided",
         "step_started",
         "step_attempt_failed",
         "step_retry_scheduled",

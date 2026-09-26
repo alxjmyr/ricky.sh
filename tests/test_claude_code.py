@@ -845,18 +845,36 @@ async def test_timeout_kills_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executable, record, _ = _fake_cli(tmp_path, monkeypatch)
+    executable, _, _ = _fake_cli(tmp_path, monkeypatch)
     monkeypatch.setenv("RICKY_FAKE_CLAUDE_SLEEP", "5")
     provider = ClaudeCodeProvider(_settings(executable, timeout=0.1))
+    processes: list[asyncio.subprocess.Process] = []
+    create_subprocess = asyncio.create_subprocess_exec
 
-    with pytest.raises(TransportError, match="timed out"):
-        await _events(provider, _request(Message.text("user", "hi")))
+    async def observe_subprocess(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        process = await create_subprocess(*args, **kwargs)
+        processes.append(process)
+        return process
 
-    pid = _records(record)[0]["pid"]
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-    assert provider._processes == set()
-    await provider.aclose()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_subprocess)
+    try:
+        with pytest.raises(TransportError, match="timed out"):
+            await _events(provider, _request(Message.text("user", "hi")))
+
+        # The timeout may kill the child before Python writes its invocation record.
+        # Observe the real process owner instead of racing child-side initialization.
+        assert len(processes) == 1
+        process = processes[0]
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+        assert provider._processes == set()
+    finally:
+        await provider.aclose()
+        for process in processes:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
 
 
 @pytest.mark.asyncio

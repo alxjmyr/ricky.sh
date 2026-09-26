@@ -297,11 +297,19 @@ Browser tools use distinct capability meanings:
 - `builtin.browser.commit` performs an explicitly consequential activation or submission with the
   strongest review and evidence requirements.
 
+Interactive CLI chat send-it is the explicit exception to fresh local review
+requirements below. It automatically authorizes exact prepared operations,
+including resource opens, transfers, protected fills, and consequential commits.
+It never replaces ordered denial, browser/profile/destination/disclosure policy,
+current target validation, exact transaction evidence, or no-replay guarantees.
+The mode is runtime-local and cannot authorize background work; those approvals
+remain source-bound and one-use. See [architecture.md](architecture.md).
+
 `browser_session_open` remains the unpermissioned ephemeral default. `browser_resources` lists only
 safe metadata inside the issued profile scope. `browser_session_open_resource` accepts one exact
-qualified identity, is mutating, requires a fresh local decision on every open, and offers no
-remembered grant. Its preview states resource kind, ownership, visibility, and the possibility that
-bounded authenticated page observations reach the configured model provider.
+qualified identity, is mutating, requires a fresh local decision unless chat send-it is enabled,
+and offers no remembered grant. Its preview states resource kind, ownership, visibility, and the
+possibility that bounded authenticated page observations reach the configured model provider.
 For a background execution, opening the exact contract-pinned persistent resource is runtime setup,
 not a delegated external effect. The compiled resource identity, revision, authenticated-origin
 ceiling, execution tool policy, and browser guard still constrain it; it does not reserve or consume
@@ -319,8 +327,8 @@ Phase 4 adds four foreground-only operations. `browser_visual_snapshot` is a rea
 artifact action under `builtin.browser.read`. `browser_upload` and `browser_download` are
 external-effect interactions with fresh review and no remembered grant.
 `browser_coordinate_commit` is a destructive external-effect click under
-`builtin.browser.commit`, always reviewed once and never generalized to coordinate typing,
-dragging, scrolling, or a remembered grant.
+`builtin.browser.commit`, reviewed once unless chat send-it is enabled and never generalized to
+coordinate typing, dragging, scrolling, or a remembered grant.
 
 Phase 7 adds `browser_coordinate_click` to the guarded background interaction surface. It is one
 external-effect click under `builtin.browser.interact`, not a selector, script, typing, dragging,
@@ -382,8 +390,8 @@ prepared coordinate identity also binds the image and CSS coordinates, masked-im
 viewport, and private frame identity; changing any of them invalidates the reviewed effect.
 
 Foreground transaction commits require a fresh interactive review for the exact prepared
-occurrence. An ordered deny remains a ceiling, while an allow rule or session grant cannot bypass
-the prompt. Approval is never remembered.
+occurrence unless the operator has enabled chat send-it. An ordered deny remains a ceiling, while
+an allow rule or session grant cannot bypass the prompt. Approval is never remembered.
 
 A gateway-owned background commit instead parks the live prepared occurrence and requires one
 authenticated, source-bound, expiring durable approval containing the transaction id and one-time
@@ -681,5 +689,6 @@ When extending browser control, preserve these properties:
 7. Page content cannot grant authority or widen destination, profile, file, or disclosure policy.
 8. Browser state and artifacts remain under their configured user-data and profile roots.
 9. Every consequential commit carries one exact financial or generic browser envelope and receives
-   fresh review or one exact source-bound background approval; no semantic, coordinate, policy, or
-   grant path bypasses it.
+   fresh review, explicit runtime-local chat send-it authorization, or one exact source-bound
+   background approval. No semantic, coordinate, allow-rule, or remembered-grant path substitutes
+   for that authorization.

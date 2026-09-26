@@ -81,5 +81,7 @@ class PermissionResponse(BaseModel):
     """Interface response to an ask decision."""
 
     decision: Literal["allow", "deny"]
+    source: Literal["user", "send_it"] = "user"
+    """Whether the answer came from a prompt or the live chat's explicit bypass."""
     grant: str | None = None
     """Chosen ``GrantOption.id`` to remember, or ``None`` for allow-once/deny."""

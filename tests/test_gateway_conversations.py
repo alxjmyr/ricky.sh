@@ -1054,17 +1054,23 @@ async def test_two_conversations_can_run_provider_calls_concurrently(
 
     coordinator = ConversationCoordinator(settings, provider_factory=factory)
     first_task = asyncio.create_task(coordinator.process(first.id))
-    second_task = asyncio.create_task(coordinator.process(second.id))
-    await asyncio.wait_for(
-        asyncio.gather(
-            first_provider.started.wait(),
-            second_provider.started.wait(),
-        ),
-        timeout=2,
-    )
-    first_provider.release.set()
-    second_provider.release.set()
-    first_result, second_result = await asyncio.gather(first_task, second_task)
+    tasks = [first_task]
+    try:
+        # Let cold store/runtime construction finish before testing overlap. The
+        # first provider remains blocked while the second conversation starts.
+        await asyncio.wait_for(first_provider.started.wait(), timeout=2)
+        second_task = asyncio.create_task(coordinator.process(second.id))
+        tasks.append(second_task)
+        await asyncio.wait_for(second_provider.started.wait(), timeout=2)
+        assert not first_task.done()
+        first_provider.release.set()
+        second_provider.release.set()
+        first_result, second_result = await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     assert first_result.conversation_id != second_result.conversation_id
 
 

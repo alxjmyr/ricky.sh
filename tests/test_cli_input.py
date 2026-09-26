@@ -38,6 +38,7 @@ def test_completion_is_limited_to_commands_and_skill_names() -> None:
     completer.configure(commands=CHAT_COMMANDS, skills={"review", "work/release"})
 
     assert _completion_texts(completer, "/deb") == ["/debug"]
+    assert _completion_texts(completer, "/send") == ["/send-it"]
     assert _completion_texts(completer, "/skill rev") == ["review"]
     assert _completion_texts(completer, "/skill work/") == ["work/release"]
     assert _completion_texts(completer, "/workflow rel") == []
@@ -64,6 +65,38 @@ async def test_non_tty_input_preserves_plain_stream_behavior() -> None:
 
     assert result == "hello"
     assert "ricky>" in output.getvalue()
+
+
+async def test_send_it_indicator_tracks_each_plain_chat_prompt() -> None:
+    console, output = _console()
+    input_session = CliInputSession(console, stdin=StringIO("first\nsecond\n"), interactive=False)
+
+    assert await input_session.read_chat(send_it=True) == "first"
+    assert "ricky (send-it)>" in output.getvalue()
+    output.seek(0)
+    output.truncate()
+    assert await input_session.read_chat(send_it=False) == "second"
+    assert "ricky>" in output.getvalue()
+    assert "send-it" not in output.getvalue()
+
+
+async def test_send_it_indicator_tracks_each_enhanced_chat_prompt() -> None:
+    from prompt_toolkit.formatted_text import to_formatted_text
+
+    console, _output = _console()
+    input_session = CliInputSession(console, interactive=False)
+    prompts: list[str] = []
+
+    class RecordingPrompt:
+        async def prompt_async(self, prompt: object, **_kwargs: object) -> str:
+            prompts.append("".join(text for _, text in to_formatted_text(prompt)))  # type: ignore[arg-type]
+            return "message"
+
+    input_session._prompt_session = cast(Any, RecordingPrompt())
+    await input_session.read_chat(send_it=True)
+    await input_session.read_chat(send_it=False)
+
+    assert prompts == ["ricky (send-it)> ", "ricky> "]
 
 
 async def test_secure_input_fails_closed_without_a_tty() -> None:

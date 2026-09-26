@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from typer.testing import CliRunner
 
 from ricky import __version__
@@ -72,6 +73,35 @@ def test_chat_command_quits(tmp_path, monkeypatch) -> None:
 
     assert result.exit_code == 0
     assert "ricky chat" in result.stdout
+
+
+def test_chat_send_it_flag_and_slash_commands(tmp_path, monkeypatch) -> None:
+    _isolated_project(tmp_path, monkeypatch, api_key="test-key")
+
+    result = runner.invoke(
+        app,
+        ["chat", "--send-it"],
+        input="/send-it\n/send-it off\n/send-it on\n/clear\n/quit\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Send-it mode is on" in result.stdout
+    assert "ricky (send-it)>" in result.stdout
+    assert result.stdout.count("Send-it mode is off") == 2
+    assert "Started a fresh session." in result.stdout
+
+    subsequent = runner.invoke(app, ["chat"], input="/send-it\n/quit\n")
+    assert subsequent.exit_code == 0, subsequent.output
+    assert "Send-it mode is off" in subsequent.stdout
+    assert "ricky (send-it)>" not in subsequent.stdout
+
+
+@pytest.mark.parametrize("command", [["ask"], ["session", "resume"], ["job", "run"]])
+def test_send_it_flag_is_unavailable_outside_chat(command) -> None:
+    result = runner.invoke(app, [*command, "--send-it"])
+
+    assert result.exit_code == 2
+    assert "No such option: --send-it" in result.output
 
 
 def test_ask_without_api_key_exits_with_provider_error(tmp_path, monkeypatch) -> None:

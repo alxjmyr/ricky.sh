@@ -64,11 +64,17 @@ permissions, guardrails, budgets, and effect coordination can all narrow use.
 
 `review_mode = "policy"` uses the ordinary ordered interactive permission
 decision. A tool may instead declare `review_mode = "fresh"` when every
-foreground occurrence requires a new trusted user response. For fresh review,
+foreground occurrence normally requires a new trusted user response. For fresh review,
 an ordered deny remains an absolute ceiling, but an allow rule or remembered
 session grant is converted to `ask`; the runner offers no grant, and a missing
 interactive responder denies. Fresh review is authority for only the exact
 canonical call and prepared effect. It does not grant unattended eligibility.
+
+The sole prompt exception is explicit send-it mode in interactive CLI chat. After
+ordered denial and normal preparation, it authorizes the exact call automatically,
+including `fresh` calls, without recording a remembered grant or a human response.
+It does not alter tool metadata, validation, prepared-effect identity, current
+policy revalidation, or unattended authority.
 
 Fresh-review external effects still prepare exactly once after static denial
 and argument validation but before the prompt. Interfaces render the request

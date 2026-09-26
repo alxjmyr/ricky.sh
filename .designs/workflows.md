@@ -112,7 +112,11 @@ records, and checkpoints before returning control.
 
 Every tool call uses the shared argument normalization, permission, dispatch,
 and event path. An approval step records human intent but never pre-authorizes a
-later tool call. Authored shell checks are trusted local executable content: they
+later tool call. In interactive CLI chat, explicit send-it mode automatically
+accepts confirmation checkpoints; stable-key selections still require input.
+Automatic confirmation evidence identifies send-it rather than human review.
+The mode is not workflow checkpoint authority and is never inherited by standalone
+workflow or job runtimes. Authored shell checks are trusted local executable content: they
 run as bounded subprocesses in the workflow working directory. The authoring
 contract requires them to be side-effect free, but the harness cannot prove
 that property, so they require the same review discipline as a local script.

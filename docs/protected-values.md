@@ -132,7 +132,8 @@ Protected policy is independent from ordinary browser destination policy:
 
 - `strict` permits only exact authored origins.
 - `confirm_new` prompts locally to deny, allow once, or durably approve an exact top-level and
-  target-frame origin pair.
+  target-frame origin pair. Chat send-it mode chooses allow once automatically and never saves a
+  durable destination approval.
 - `approved_only` permits authored and already approved exact origins without expanding policy
   during a chat.
 - `secure_web` permits public HTTPS origins. Ricky checks resolved addresses when materializing
@@ -161,11 +162,14 @@ model tool arguments cannot create an approval.
 Ask Ricky to use a qualified alias and safe field name. Ricky takes a current browser snapshot,
 derives the live protected control category and both origins locally, applies broker policy, and
 asks for ordinary external-effect permission. The review never includes the raw value.
+Interactive chat [send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically
+authorizes this permission request, while retaining destination policy and all secret-handling
+checks. Vault passwords and prompt-each-use secrets still require local input.
 
 One call fills one field and consumes the snapshot. Filling can trigger page JavaScript or
 autosave, so it is never automatically replayed after dispatch may have begun. Filling does not
 submit, click, press Enter, or authorize a later transaction. A consequential browser commit
-remains a separate destructive review.
+remains a separate destructive authorization, which chat send-it can also accept automatically.
 
 When a later financial commit uses a payment method filled on the current page, its approval may
 name that protected resource by profile-qualified alias. The browser retains only bounded,

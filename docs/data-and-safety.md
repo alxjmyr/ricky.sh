@@ -126,8 +126,9 @@ categories and estimated size. `/debug` can show non-secret user content in your
 Browser snapshots can include personal data rendered by signed-in pages. Persistent Chrome
 profiles retain cookies, local storage, cache, and account sessions below their owning Ricky
 profile. Ricky does not export those stores or add application-level encryption at rest. Opening a
-configured browser resource requires fresh local permission because bounded page observations may
-be sent to the configured model provider.
+configured browser resource requires fresh local permission by default because bounded page
+observations may be sent to the configured model provider. Interactive chat send-it mode
+automatically authorizes that request.
 
 Browser screenshots are untrusted model input and can contain ambient personal data even after
 Ricky masks editable, credential, payment, OTP, and file controls. They are denied unless the
@@ -150,11 +151,12 @@ tool receives an alias and field name, derives current origins locally, and send
 only to the exact browser control after policy and permission review. Filling never includes
 transaction commit authority.
 
-Every consequential browser commit requires a fresh financial or generic browser transaction
-approval. Financial reviews identify the proposed total, currency, payee, fees, recurrence, and
-safe funding-source alias or label. Generic reviews identify the intended action, destination,
-consequences, and disclosures. Proposed business details remain model-authored; locally verified
-browser binding is displayed separately. An allow rule cannot suppress this fresh review, and a
+Every consequential browser commit requires an exact financial or generic browser transaction
+authorization. By default, foreground chat requests a fresh approval. Financial reviews identify
+the proposed total, currency, payee, fees, recurrence, and safe funding-source alias or label.
+Generic reviews identify the intended action, destination, consequences, and disclosures.
+Proposed business details remain model-authored; locally verified browser binding is displayed
+separately. An allow rule cannot suppress this fresh review, and a
 completed click does not prove remote settlement or acceptance. See
 [Browser transaction approvals](browser-transactions.md).
 
@@ -166,8 +168,13 @@ completed click does not prove remote settlement or acceptance. See
 | Mutating | Ask |
 | Destructive | Ask |
 
-A denial policy takes priority over a session grant. Profile routing does not add a redundant
-approval; the normal permission and effect checks still apply to the selected operation.
+[Send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically authorizes approval
+requests in the current interactive chat, including purchases and submissions. It retains explicit
+deny rules, profile and destination restrictions, secret handling, and effect/replay checks.
+Background executions do not inherit it. `/clear` and exit discard it.
+
+A denial policy takes priority over a session grant or send-it mode. Profile routing does not add
+a redundant approval; the normal permission and effect checks still apply to the selected operation.
 
 External actions such as sending a message or email show an action-specific preview. If an
 interrupted call has an ambiguous result, Ricky records it as uncertain or in doubt instead of

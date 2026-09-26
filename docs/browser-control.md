@@ -65,8 +65,8 @@ lease until its owned processes have stopped.
 Controlled Chrome uses the same native credential-store selection as ordinary setup. Background
 workers must run as the same host user with access to the credential store used during setup.
 Later chat sessions can ask Ricky to list browser resources and open `personal/ricky-personal`.
-Ricky asks for fresh permission every time it opens a configured resource; that decision cannot be
-remembered as a session grant.
+By default, Ricky asks for fresh permission every time it opens a configured resource; that
+decision cannot be remembered as a session grant.
 
 Inspect readiness or delete one idle profile:
 
@@ -291,8 +291,13 @@ the exact live browser session, and the top-level and target-frame origins.
 
 Known submit, purchase, reservation, send, save, delete, and similar controls use the separate
 commit operation. Every semantic or coordinate commit requires either a financial or generic
-browser transaction envelope and a fresh action-specific approval. The commit cannot use a
-remembered session grant or an allow rule to skip review; an ordered deny remains authoritative.
+browser transaction envelope and, by default, a fresh action-specific approval. The commit cannot
+use a remembered session grant or an allow rule to skip review; an ordered deny remains authoritative.
+Interactive chat [send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically
+authorizes approval requests, including resource opens, uploads, downloads, protected fills,
+coordinate clicks, and consequential commits. Purchases and submissions can proceed without
+per-action review. Deny policies, destination and disclosure rules, and exact prepared-transaction
+checks still apply. Background approvals are unchanged.
 Denial and deterministic preflight rejection result in no browser dispatch. See
 [Browser transaction approvals](browser-transactions.md).
 
@@ -357,7 +362,7 @@ sizes, SHA-256 digests, and bytes. The review shows those facts without exposing
 If a source file changes while the prompt is open, Chrome still receives the reviewed bytes.
 File selection can run page JavaScript, so it is an external effect, is never replayed
 automatically, and does not offer a remembered permission grant. Ricky requires a fresh local
-decision for every upload; an allow rule cannot suppress it.
+decision for every upload unless chat send-it is enabled; an allow rule cannot suppress it.
 
 In a gateway-owned background execution, `browser_upload` accepts only exact durable-task artifact
 ids already compiled into that execution. Use `list_task_artifacts` to obtain the task id and
@@ -434,9 +439,9 @@ exact screenshot generation, viewport, fractional scroll position, image scale, 
 digest, bounds, nested hit-tested control, and any statically visible destination. File and
 recognized protected controls are rejected. Any change to the recaptured masked viewport pixels
 makes the target stale, so dynamic pages may require another visual snapshot. The coordinate commit
-still receives its own fresh approval; an ordinary coordinate click remains inside its exact
-interaction authority and cannot activate a target classified as consequential. The screenshot
-provider allowlist does not approve browser effects.
+receives its own fresh approval unless chat send-it is enabled; an ordinary coordinate click
+remains inside its exact interaction authority and cannot activate a target classified as
+consequential. The screenshot provider allowlist does not approve browser effects.
 
 Masked screenshots remain in private session storage until the resident runtime closes or `/clear`
 starts a fresh session. At most the latest two retained browser images are projected into one model

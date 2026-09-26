@@ -49,7 +49,9 @@ Browser control and protected values have separate enablement and setup. See
 
 Tools declare a risk level. Read-only tools can run automatically. Tools that change files or
 external services require permission unless a narrower policy already authorizes the action.
-Destructive tools require explicit review.
+Destructive tools require explicit review by default. Interactive chat
+[send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically accepts approval
+requests while preserving explicit deny policies and other runtime checks.
 
 At a permission prompt, inspect the tool name, exact action summary, and reason. Allow the action
 once, grant an offered session scope, or deny it. Session grants end with that chat and can be

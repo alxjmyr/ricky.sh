@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from io import BytesIO, StringIO
 from pathlib import Path
 
@@ -10,13 +11,16 @@ import pytest
 from PIL import Image
 from rich.console import Console
 
-from ricky.agent import AgentSession, PermissionGrant
+from ricky.agent import AgentLoop, AgentSession, PermissionGrant
 from ricky.agent.artifacts import SessionArtifactStore
 from ricky.config import RickySettings
 from ricky.interfaces.cli.chat import ChatController
+from ricky.interfaces.cli.chat_permissions import ChatPermissions
 from ricky.interfaces.cli.render import CliRenderer
+from ricky.llm import CompletionRequest, Message, MessageDone, StreamEvent, TextPart
 from ricky.media import SessionMediaError, SessionMediaStore
 from ricky.profiles import ProfileLabel
+from ricky.tools import ToolRegistry
 
 
 def _controller(
@@ -37,8 +41,107 @@ def _controller(
         skill_registry=None,  # type: ignore[arg-type]  # unused by /permissions
         session_artifacts=session_artifacts,
         session_media=session_media,
+        permissions=ChatPermissions(
+            permission_responder=renderer.request_permission,
+            approval_responder=renderer.request_workflow_approval,
+            destination_responder=renderer.request_protected_destination,
+        ),
     )
     return controller, output
+
+
+async def test_send_it_commands_are_explicit_reversible_and_do_not_create_grants() -> None:
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    controller, output = _controller(session)
+    assert controller.permissions is not None
+    original_state = session.model_dump_json()
+
+    await controller._handle_slash_command("/send-it")
+    assert not controller.permissions.enabled
+    assert "Send-it mode is off" in output.getvalue()
+
+    await controller._handle_slash_command("/send-it on")
+    assert controller.permissions.enabled
+    await controller._handle_slash_command("/send-it")
+    assert controller.permissions.enabled
+    assert "purchases and submissions" in output.getvalue()
+
+    await controller._handle_slash_command("/send-it invalid")
+    assert controller.permissions.enabled
+    assert "Usage: /send-it [on|off]" in output.getvalue()
+
+    await controller._handle_slash_command("/send-it off")
+    assert not controller.permissions.enabled
+    assert session.permission_grants == []
+    assert session.model_dump_json() == original_state
+
+
+async def test_clear_revokes_send_it_and_existing_grants() -> None:
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    session.permission_grants.append(PermissionGrant(tool_name="example"))
+    controller, output = _controller(session)
+    assert controller.permissions is not None
+    controller.permissions.enabled = True
+
+    await controller._handle_slash_command("/clear")
+
+    assert not controller.permissions.enabled
+    assert controller.session.permission_grants == []
+    assert "Send-it mode is off" in output.getvalue()
+
+
+async def test_current_send_it_mode_reaches_model_without_entering_session_history() -> None:
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    controller, _output = _controller(session)
+    requests: list[CompletionRequest] = []
+
+    class Provider:
+        name = "fake"
+
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            requests.append(request)
+            yield MessageDone(message=Message.text("assistant", "done"), stop_reason="stop")
+
+        async def aclose(self) -> None:
+            pass
+
+    controller.agent_loop = AgentLoop(
+        provider=Provider(), registry=ToolRegistry([]), settings=settings
+    )
+    for command in ("/send-it on", "/send-it off", "/send-it on", "/clear"):
+        await controller._handle_slash_command(command)
+        await controller._consume_turn("Continue the task")
+        assert all(message.role != "system" for message in controller.session.history)
+
+    guidance = [
+        [
+            part.text
+            for message in request.messages
+            if message.role == "system"
+            for part in message.content
+            if isinstance(part, TextPart) and "Send-it mode is" in part.text
+        ]
+        for request in requests
+    ]
+    assert all(len(sections) == 1 for sections in guidance)
+    for sections, state in zip(guidance, ("ON", "OFF", "ON", "OFF"), strict=True):
+        assert f"Send-it mode is {state}" in sections[0]
+
+
+async def test_permissions_clear_explains_that_send_it_is_still_active() -> None:
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    controller, output = _controller(session)
+    assert controller.permissions is not None
+    controller.permissions.enabled = True
+
+    await controller._handle_slash_command("/permissions clear")
+
+    assert controller.permissions.enabled
+    assert "Use /send-it off to restore approval prompts." in output.getvalue()
 
 
 async def test_permissions_command_lists_active_grants() -> None:

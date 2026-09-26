@@ -15,6 +15,7 @@ from ricky.agent.session import AgentSession
 from ricky.agent.workflow import WorkflowService
 from ricky.config import RickySettings
 from ricky.durable_tasks.store import TaskStoreError
+from ricky.interfaces.cli.chat_permissions import ChatPermissions
 from ricky.interfaces.cli.render import CliRenderer
 from ricky.llm.types import ImagePart, ProviderError, TextPart, UserContent, UserContentPart
 from ricky.media import ImageUpload, SessionMediaError, normalize_image_upload
@@ -56,6 +57,7 @@ class ChatController:
     workflow_registry: WorkflowRegistry | None = None
     session_artifacts: SessionArtifactStore | None = None
     session_media: SessionMediaStore | None = None
+    permissions: ChatPermissions | None = None
 
     async def run(self) -> None:
         """Run the REPL until the user exits."""
@@ -64,6 +66,8 @@ class ChatController:
             self._load_image, max_images=self.settings.context.media.upload_image_limit
         )
         self.renderer.render_welcome(self.session)
+        if self.permissions is not None and self.permissions.enabled:
+            self.renderer.render_send_it_status(True)
         self.renderer.render_skill_load_errors(self.skill_registry.errors)
         if self.workflow_registry is not None:
             self.renderer.render_workflow_load_errors(self.workflow_registry.errors)
@@ -72,7 +76,9 @@ class ChatController:
         idle_interrupt_seen = False
         while True:
             try:
-                user_input = await self.renderer.read_user_input()
+                user_input = await self.renderer.read_user_input(
+                    send_it=self.permissions is not None and self.permissions.enabled
+                )
             except EOFError:
                 await self._release_task_leases()
                 self.renderer.render_status("Exiting.")
@@ -155,7 +161,9 @@ class ChatController:
 
     async def _consume_turn(self, user_input: str | UserContent) -> None:
         finished: TurnFinishedEvent | None = None
-        async for event in self.agent_loop.run_turn(self.session, user_input):
+        async for event in self.agent_loop.run_turn(
+            self.session, user_input, extra_system_sections=self._approval_context()
+        ):
             self.renderer.render_event(event)
             if isinstance(event, TurnFinishedEvent):
                 finished = event
@@ -168,6 +176,28 @@ class ChatController:
         if self.workflow_runner is not None and queued is not None and not queued.started:
             async for event in self.workflow_runner.start(self.session, queued.name, queued.args):
                 self.renderer.render_event(event)
+
+    def _approval_context(self) -> dict[str, str]:
+        """Describe current chat authority without persisting it in conversation state."""
+        if self.permissions is None:
+            return {}
+        if self.permissions.enabled:
+            guidance = (
+                "Send-it mode is ON for this interactive chat. The user has opted into "
+                "automatic tool approvals, including consequential browser actions and workflow "
+                "confirmation checkpoints. Proceed with the requested work through the tools; "
+                "do not ask for a separate conversational confirmation solely for permission. "
+                "Explicit denies, profile scope, destination restrictions, validation, and "
+                "no-replay rules still apply. Ask for missing information or choices when needed; "
+                "passwords, verification codes, and local browser handoffs still use their "
+                "dedicated input tools. This mode grants no authority to background work."
+            )
+        else:
+            guidance = (
+                "Send-it mode is OFF for this interactive chat. Normal tool approval rules "
+                "apply. Earlier send-it status in the conversation does not authorize actions."
+            )
+        return {"chat approval mode": guidance}
 
     def _discard_queued_workflow(self) -> None:
         run_state = self.session.active_workflow
@@ -184,6 +214,17 @@ class ChatController:
             return False
         if command == "/help":
             self.renderer.render_help()
+            return True
+        if command == "/send-it":
+            if self.permissions is None:
+                self.renderer.render_status("Send-it mode is unavailable in this runtime.")
+                return True
+            if arg.lower() not in {"", "on", "off"}:
+                self.renderer.render_status("Usage: /send-it [on|off]", style="yellow")
+                return True
+            if arg:
+                self.permissions.enabled = arg.lower() == "on"
+            self.renderer.render_send_it_status(self.permissions.enabled)
             return True
         if command == "/debug":
             if arg.lower() in {"on", "true", "1"}:
@@ -202,7 +243,9 @@ class ChatController:
             await self._run_compaction(arg or None)
             return True
         if command == "/context":
-            report = self.agent_loop.inspect_context(self.session)
+            report = self.agent_loop.inspect_context(
+                self.session, extra_system_sections=self._approval_context()
+            )
             self.renderer.render_context(self.session, report)
             return True
         if command == "/model":
@@ -240,6 +283,8 @@ class ChatController:
                 self.renderer.render_status(f"Cleared {count} session permission grant(s).")
             else:
                 self.renderer.render_permissions(self.session)
+            if self.permissions is not None and self.permissions.enabled:
+                self.renderer.render_send_it_status(True)
             return True
         if command == "/workflow":
             if self.workflow_runner is None or self.workflow_registry is None:
@@ -295,6 +340,9 @@ class ChatController:
     async def _clear_session(self) -> None:
         """Complete one resident session generation transition."""
 
+        if self.permissions is not None and self.permissions.enabled:
+            self.permissions.enabled = False
+            self.renderer.render_send_it_status(False)
         self.renderer.input_session.clear_images()
         self.renderer.input_session.restore_draft("")
         current = self.session

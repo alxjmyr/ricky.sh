@@ -244,11 +244,23 @@ risk, capability membership, effect kind, unattended eligibility, and any
 required state guard. The complete declaration and testing contract is in
 [tool-authoring.md](tool-authoring.md).
 
-Interactive authority comes from ordered policy and explicit session grants; a
-matching deny remains a ceiling. Session grants are inspectable, revocable, and
-ephemeral. Background authority comes from exact compiled execution contracts,
+Interactive authority comes from ordered policy, explicit session grants, and the
+operator-selected interactive chat send-it mode; a matching deny remains a
+ceiling. Session grants are inspectable, revocable, and ephemeral. Background
+authority comes from exact compiled execution contracts,
 job policy, current capability policy, profile scope, budgets, and effect
 coordination. Interactive grants are never copied into background work.
+
+Interactive CLI chat alone may enable send-it with `--send-it` or `/send-it on`.
+The mode automatically authorizes approval requests, including fresh-review tools,
+workflow confirmation checkpoints, and one-use protected-value `confirm_new`
+destination decisions. Ordered denials and deterministic validation, scope,
+destination, disclosure, secret handling, and effect/replay checks remain binding.
+Selection and information-entry prompts remain interactive. The mode lives only
+in the resident runtime, is visibly indicated, and is neither configuration nor
+serializable session authority. `/send-it off`, `/clear`, and exit end it; no
+background or other interface inherits it. Automatic decisions must identify
+send-it as their source rather than claim a fresh human response.
 
 Every external-effect tool provides a deterministic `EffectIdentity` before
 dispatch and returns an `EffectReceipt`. When identity depends on mutable input,
