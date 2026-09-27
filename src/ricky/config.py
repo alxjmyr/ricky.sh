@@ -538,12 +538,15 @@ class WorkflowSettings(BaseModel):
     model_attempts: int = Field(default=2, ge=1)
     agent_iterations: int = Field(default=8, ge=1)
     run_dir: str = Field(default="workflow-runs", min_length=1)
+    visualization_dir: str = Field(default="workflow-views", min_length=1)
 
     @model_validator(mode="after")
     def _validate_run_dir(self) -> WorkflowSettings:
-        path = Path(self.run_dir)
-        if path.is_absolute() or self.run_dir in {".", ".."} or ".." in path.parts:
-            raise ValueError("workflow.run_dir must stay below its configured data root")
+        for name in ("run_dir", "visualization_dir"):
+            value = getattr(self, name)
+            path = Path(value)
+            if path.is_absolute() or value in {".", ".."} or ".." in path.parts:
+                raise ValueError(f"workflow.{name} must stay below its configured data root")
         return self
 
 

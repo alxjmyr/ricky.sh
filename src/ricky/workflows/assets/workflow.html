@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Ricky · Workflow blueprint</title>
+<style>/* WORKFLOW_CSS */</style>
+</head>
+<body>
+<header>
+  <div class="brand">R / WORKFLOW ATELIER <span>DESIGN INSPECTOR</span></div>
+  <button id="theme" aria-label="Toggle light and dark mode">Light / dark</button>
+</header>
+<section class="title-block">
+  <div><p class="eyebrow">WORKFLOW BLUEPRINT / STATIC DESIGN</p><h1 id="name"></h1><p id="description"></p></div>
+  <div class="stamp"><span id="counts"></span><code id="revision"></code><span>No workflow execution</span></div>
+</section>
+<nav aria-label="Graph controls">
+  <input id="search" type="search" placeholder="Find a step, field or instruction…" aria-label="Search workflow">
+  <label><input type="checkbox" id="dependency" checked> Dependencies</label>
+  <label><input type="checkbox" id="data" checked> Data</label>
+  <label><input type="checkbox" id="condition" checked> Conditions</label>
+  <button id="fit">Fit graph</button><button id="zoom-in" aria-label="Zoom in">+</button><button id="zoom-out" aria-label="Zoom out">−</button>
+  <button id="clear">Clear selection</button>
+</nav>
+<main>
+  <section class="drawing" aria-label="Workflow graph">
+    <div class="drawing-caption"><span>01 / EXECUTION & DATA FLOW</span><span>SELECT A STEP OR CONNECTION</span></div>
+    <div id="canvas"><svg id="graph" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Interactive workflow diagram"></svg></div>
+    <div class="legend"><span>── Dependency</span><span>┄┄ Data binding</span><span>··· Condition</span><span>Drag background to pan · scroll to zoom</span></div>
+  </section>
+  <aside id="inspector" aria-label="Step inspector" aria-live="polite"></aside>
+</main>
+<footer><span>RICKY / WORKFLOW DESIGN SERIES</span><span id="status" role="status">Local, self-contained document · no network required</span></footer>
+<script id="workflow-data" type="application/json">WORKFLOW_DATA</script>
+<script>/* WORKFLOW_JS */</script>
+</body>
+</html>

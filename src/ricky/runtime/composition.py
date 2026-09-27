@@ -88,6 +88,7 @@ from ricky.tools.integrations.google import (
 )
 from ricky.tools.integrations.slack import slack_toolset
 from ricky.tools.integrations.web_search import web_search_toolset
+from ricky.workflows.inspection_tools import InspectWorkflowTool, RenderWorkflowTool
 from ricky.workflows.registry import WorkflowRegistry, discover_workflows
 from ricky.workflows.tool import StartWorkflowTool, ValidateWorkflowTool
 
@@ -394,6 +395,10 @@ async def build_capability_runtime(
                     workflow_registry=workflows,
                     tool_registry=registry_factory(tools),
                 )
+            )
+            inspection_registry = registry_factory(tools)
+            tools.extend(
+                [InspectWorkflowTool(inspection_registry), RenderWorkflowTool(inspection_registry)]
             )
         # Browser tools never participate in workflow discovery. A foreground
         # runtime may own its interactive browser, while an execution runtime

@@ -109,7 +109,7 @@ equivalent fields.
 | Group | Subcommands |
 |---|---|
 | `profile` | `add`, `set-default`, `delete` |
-| `workflow` | `list`, `validate`, `show`, `run`, `status`, `resume`, `abandon`, `reconcile`, `dryrun` |
+| `workflow` | `list`, `validate`, `show`, `visualize`, `open-view`, `run`, `status`, `resume`, `abandon`, `reconcile`, `dryrun` |
 | `task` | `list`, `show`, `activity`, `artifacts`, `create`, `tag`, `complete`, `cancel`, `reopen` |
 | `job` | `list`, `validate`, `show`, `run`, `once`, `history`, `report`, `action` |
 | `schedule` | `list`, `show`, `add`, `set`, `enable`, `disable`, `remove`, `refresh`, `approve`, `sync`, `doctor`, `uninstall` |

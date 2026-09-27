@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import signal
+from contextlib import suppress
 from typing import ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -54,25 +57,43 @@ class RunShellTool:
     async def run(self, params: BaseModel, ctx: ToolContext) -> ToolResult:
         args = RunShellParams.model_validate(params)
         timeout = args.timeout_seconds or ctx.settings.shell_timeout_seconds
-        process = await asyncio.create_subprocess_shell(
-            args.command,
-            cwd=ctx.cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        startup = asyncio.create_task(
+            asyncio.create_subprocess_shell(
+                args.command,
+                cwd=ctx.cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
         )
+        try:
+            process = await asyncio.shield(startup)
+        except asyncio.CancelledError:
+            while not startup.done():
+                try:
+                    await asyncio.shield(startup)
+                except asyncio.CancelledError:
+                    pass
+                except OSError:
+                    break
+            try:
+                process = startup.result()
+            except OSError:
+                pass
+            else:
+                await _stop_shell(process)
+            raise
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout)
         except TimeoutError:
-            process.kill()
-            await process.communicate()
+            await _stop_shell(process)
             return ToolResult(
                 content=f"Command timed out after {timeout:g}s",
                 is_error=True,
                 effect_receipt=EffectReceipt(disposition="performed"),
             )
         except asyncio.CancelledError:
-            process.kill()
-            await process.communicate()
+            await _stop_shell(process)
             raise
 
         stdout = stdout_bytes.decode(errors="replace")
@@ -90,3 +111,23 @@ class RunShellTool:
                 provider_reference=f"exit:{process.returncode}",
             ),
         )
+
+
+async def _stop_shell(process: asyncio.subprocess.Process) -> None:
+    """Reap the command and pipe-holding children, even if its shell already exited."""
+    cleanup = asyncio.create_task(_reap_shell(process))
+    interrupted = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            interrupted = True
+    cleanup.result()
+    if interrupted:
+        raise asyncio.CancelledError
+
+
+async def _reap_shell(process: asyncio.subprocess.Process) -> None:
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    await process.communicate()

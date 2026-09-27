@@ -333,6 +333,15 @@ def _assert_exportable_host_path(
 ) -> None:
     """Reject generic access to Ricky-owned configuration and runtime state."""
 
+    from ricky.workflows.visualization import (
+        validate_visualization_path,
+        visualization_root,
+    )
+
+    if source.is_relative_to(visualization_root(settings, profile_scope)):
+        validate_visualization_path(source, settings=settings, scope=profile_scope)
+        return
+
     export_roots = (
         user_data_subpath(settings, settings.gmail.download_dir),
         user_data_subpath(settings, settings.slack.download_dir),

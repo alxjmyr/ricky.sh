@@ -43,8 +43,10 @@ from ricky.workflows import (
     load_workflow_bundle,
     resolve_trigger_args,
 )
+from ricky.workflows.inspection import inspect_workflow, render_ascii
 from ricky.workflows.run import WorkflowRun, WorkflowSourceIdentity
 from ricky.workflows.run_store import WorkflowRunStore
+from ricky.workflows.visualization import export_visualization, open_visualization
 
 _PROFILE_OPTION = typer.Option(
     None,
@@ -112,6 +114,82 @@ def workflow_show(
     run_with_provider_errors(
         lambda renderer: _workflow_show(name, profile, access_profiles or [], renderer)
     )
+
+
+def workflow_visualize(
+    name: str = typer.Argument(..., help="Workflow name."),
+    step: str | None = typer.Option(None, help="Expand one exact step id."),
+    section: str = typer.Option("all", help="all, instructions, inputs, outputs, policy, or body."),
+    html: bool = typer.Option(False, "--html", help="Export an interactive HTML blueprint."),
+    open_chrome: bool = typer.Option(
+        False, "--open-chrome", help="Export and open in local Chrome."
+    ),
+    profile: str | None = _PROFILE_OPTION,
+    access_profiles: list[str] | None = _ACCESS_PROFILE_OPTION,
+) -> None:
+    """Inspect workflow structure and prompts without executing any steps."""
+    run_with_provider_errors(
+        lambda renderer: _workflow_visualize(
+            name, step, section, html, open_chrome, profile, access_profiles or [], renderer
+        )
+    )
+
+
+async def _workflow_visualize(
+    name: str,
+    step: str | None,
+    section: str,
+    html: bool,
+    open_chrome: bool,
+    profile: str | None,
+    access_profiles: list[str],
+    renderer: CliRenderer,
+) -> None:
+    if section not in {"all", "instructions", "inputs", "outputs", "policy", "body"}:
+        raise ValueError("Unknown section; use all, instructions, inputs, outputs, policy or body")
+    if (html or open_chrome) and (step is not None or section != "all"):
+        raise ValueError("HTML includes the complete design; use step/section with the text view")
+    settings = load_settings()
+    scope = settings.resolve_profile_scope(profile, access_profiles=access_profiles)
+    async with AsyncExitStack() as resources:
+        runtime = await _workflow_context(settings, resources, profile_scope=scope)
+        runtime_settings = settings.resolve_profile_runtime_settings(scope)
+        view = inspect_workflow(
+            name, settings=runtime_settings, scope=scope, tools=runtime.full_registry
+        )
+        if html or open_chrome:
+            path = export_visualization(view, settings=runtime_settings, scope=scope)
+            renderer.console.print(str(path), markup=False, soft_wrap=True)
+            if open_chrome:
+                if not await open_visualization(path, settings=runtime_settings, scope=scope):
+                    raise ValueError(
+                        "Chrome did not accept the open request; the HTML file is saved"
+                    )
+                renderer.console.print("Sent the blueprint to Chrome on this host.")
+        else:
+            renderer.console.print(
+                render_ascii(view, step=step, section=section),
+                markup=False,
+                highlight=False,
+                soft_wrap=True,
+            )
+
+
+def workflow_open_view(
+    path: Path,
+    profile: str | None = _PROFILE_OPTION,
+    access_profiles: list[str] | None = _ACCESS_PROFILE_OPTION,
+) -> None:
+    """Open an existing scoped workflow blueprint in desktop Chrome on this host."""
+
+    async def run(renderer: CliRenderer) -> None:
+        settings = load_settings()
+        scope = settings.resolve_profile_scope(profile, access_profiles=access_profiles or [])
+        if not await open_visualization(path, settings=settings, scope=scope):
+            raise ValueError("Chrome did not accept the open request; the HTML file is saved")
+        renderer.console.print("Sent the blueprint to Chrome on this host.")
+
+    run_with_provider_errors(run)
 
 
 def workflow_run(
@@ -755,6 +833,8 @@ def register_workflow_commands(workflow_app: typer.Typer) -> None:
     workflow_app.command("list")(workflow_list)
     workflow_app.command("validate")(workflow_validate)
     workflow_app.command("show")(workflow_show)
+    workflow_app.command("visualize")(workflow_visualize)
+    workflow_app.command("open-view")(workflow_open_view)
     workflow_app.command("run")(workflow_run)
     workflow_app.command("status")(workflow_status)
     workflow_app.command("resume")(workflow_resume)

@@ -254,6 +254,8 @@ max_foreach_items = 100
 model_attempts = 2
 agent_iterations = 20
 run_dir = "workflow-runs"
+# Static HTML workflow blueprints, partitioned by the complete profile scope.
+visualization_dir = "workflow-views"
 
 # Persistent profile-owned memory limits.
 [memory]

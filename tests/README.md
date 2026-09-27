@@ -107,3 +107,16 @@ rollback use a separate wheel with a one-shot fault tied to each installation's
 own marker. All installation and database state remains per-test. No build cache
 survives into a later test invocation, so working-tree edits cannot reuse stale
 candidate code.
+
+Workflow design visualization uses `test_workflow_visualization.py` for prompt and
+binding fidelity, fresh-source reads, profile/export isolation, tool contracts, and
+CLI compatibility. `workflow_visualization_support.py` provides one small shared
+design fixture. `test_workflow_visualization_browser.py` owns the real Chrome boundary
+for offline document loading, text safety, theme persistence, loop expansion, search,
+edge inspection, zoom, and mobile layout. Extra parsing and policy cases belong in
+the focused inspector tests rather than additional Chrome journeys.
+
+`test_shell_lifecycle.py` owns real subprocess checks for desktop visualization
+handoff through captured shell output, and cancellation/timeout after a shell
+leaves a child holding its pipes. These tests use controlled local child processes;
+Chrome rendering remains in `test_workflow_visualization_browser.py`.

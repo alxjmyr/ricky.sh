@@ -178,3 +178,31 @@ When extending workflows, preserve these properties:
 6. Every owned async task or subprocess is cancelled, awaited, and checkpointed
    into a valid recoverable state.
 7. Persisted runs retain exact graph and profile-scope evidence.
+
+## Static design inspection
+
+`workflows.inspection` compiles fresh, scope-confined sources into a strict
+JSON-safe inspection model. It resolves instruction files and explicitly attached
+skill bodies without running steps or modifying the execution registry. Dependency,
+data-binding, and condition edges are distinct. `foreach` body scopes and projection
+references remain explicit; unresolved expressions never masquerade as runtime values.
+ASCII and offline HTML renderers consume the same model. The bundled
+`visualize-workflow` skill routes compact overview and focused follow-up requests to
+`inspect_workflow`, and HTML requests to `render_workflow`.
+
+HTML snapshots include resolved prompt guidance and carry the full inspection scope.
+`workflow.visualization_dir` below `user_data_dir` is partitioned by a digest of the
+complete profile set. Export and open APIs require that exact scope. Filenames hash
+the complete HTML bytes; attachment admission and desktop opening verify integrity
+and confinement through the visualization owner. Exports contain no run values or
+credentials. They are disposable documents, not workflow checkpoints or new executable
+bundles. The packaged viewer has no remote dependencies and renders authored text
+as text, never as executable markup.
+
+CLI `workflow visualize` and `workflow open-view` reuse scoped runtime/configuration
+resolution. Explicit Chrome opening hands the file to ordinary desktop Chrome;
+its standard streams and process session are detached so shell capture completes
+while the desktop window remains open. It does not lease a managed browser or create
+an automation connection. The existing
+shell tool supplies the normal permission/effect path when a chat requests that CLI
+action. Rendering and opening do not authorize attachment delivery.

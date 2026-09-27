@@ -194,3 +194,61 @@ before a live run.
 When an edited workflow is referenced by a named job, also follow the `update-job` skill. A valid
 workflow alone does not resolve the job's lineage decision or refresh its scheduled execution
 revision.
+
+## Visualize a workflow design
+
+Use the bundled `visualize-workflow` skill to explore a workflow while designing
+or revising it. Ask Ricky to show the workflow, then ask for a step's instructions,
+inputs, output schema, consumers, conditions, or loop body. The simple view uses
+ASCII and fits CLI and gateway chats. Focused details include the full resolved
+instruction file and attached skill guidance.
+
+```bash
+ricky workflow visualize shared/email-triage
+ricky workflow visualize shared/email-triage --step classify --section instructions
+ricky workflow visualize shared/email-triage --step classify --section outputs
+ricky workflow visualize shared/email-triage --html
+ricky workflow visualize shared/email-triage --open-chrome
+```
+
+Replace the example identity and step with your own. Add `--profile` and repeated
+`--access-profile` flags for the intended scope. Supported text sections are `all`,
+`instructions`, `inputs`, `outputs`, `policy`, and `body`. Omit `--step` for the
+compact dependency map. Existing `workflow show` output is unchanged.
+
+The HTML blueprint is a self-contained file with light and dark themes, search,
+zoom and pan, expandable loop bodies, and a step inspector. Select a connection
+to see the exact field mapping. Dependency lines show ordering; data lines show
+bindings; dotted condition lines show conditional reads. Selecting a step highlights
+its data sources and consumers. Full instructions, skill guidance, input expressions,
+and schemas remain available in the inspector.
+
+Visualization reads current sources and compiles the design without running any
+steps, shell checks, models, or workflow tools. Invalid definitions report compile
+errors. References remain unresolved: the document describes the declared context,
+not a populated prompt or a specific execution. A revision fingerprint includes
+resolved instructions and skill bodies. After editing a workflow, generate a new
+view; an already-open HTML file is a snapshot.
+
+`--open-chrome` exports the view and hands it to ordinary desktop Chrome on the
+host running Ricky. The command returns without waiting for Chrome to close, so
+you can continue the chat while the blueprint remains open. It does not use a
+managed automation browser. To open a file
+already returned by `render_workflow`, use:
+
+```bash
+ricky workflow open-view '<exported-html-path>'
+```
+
+Use the same profile scope that created the export. Host Chrome needs a graphical
+desktop; opening it from a gateway does not open a browser on your phone. Ask Ricky
+to send the HTML as an attachment through an available authorized messaging tool
+instead. Save the file and open it in a browser; no server or network connection
+is required.
+
+Exports live below `user_data_dir` in `workflow.visualization_dir` (default:
+`workflow-views`). They are partitioned by the complete profile scope, so an export
+containing guidance from another profile is not available to a narrower scope.
+Export files are content-addressed and checked before opening or attachment delivery.
+You can delete old exported HTML files when no longer needed; regeneration does not
+change the workflow or any run history.
