@@ -24,7 +24,7 @@ def release_uv_cache(test_run_root: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def plain_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep CLI text assertions independent of CI's forced terminal styling."""
+    """Keep CLI text assertions independent of the launching terminal."""
 
     from typer import rich_utils
 
@@ -32,6 +32,12 @@ def plain_cli_output(monkeypatch: pytest.MonkeyPatch) -> None:
     # tests can opt back into a terminal explicitly.
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
+    # Rich can discover the real terminal through file descriptors even when
+    # CliRunner captures sys.stdout. Pin geometry as well as styling so release
+    # runs and captured development runs wrap text identically. Rendering tests
+    # can still pass an explicit Console width or override these values.
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "25")
     # Typer reads GITHUB_ACTIONS/FORCE_COLOR at import time; changing the
     # environment in a fixture is too late. CliRunner captures plain text.
     monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", False)

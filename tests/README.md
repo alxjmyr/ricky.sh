@@ -75,6 +75,11 @@ fake has a similarly named test.
 
 ## Share setup, not mutable state
 
+CLI tests use plain output and a fixed 80-column, 25-line terminal through the
+shared fixture so wrapping does not depend on the developer's terminal or CI.
+Rendering tests can pass explicit console dimensions or override the environment
+when terminal geometry is part of the behavior under test.
+
 Compaction lease tests advance only the session store's clock and keep provider
 work blocked until renewals are observed. They retain the real heartbeat and
 fenced database commit, including renewal during commit, without requiring a
