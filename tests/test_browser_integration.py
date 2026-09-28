@@ -2393,6 +2393,17 @@ def _close_chrome_windows_on_test_display() -> int:
     class Event(ctypes.Union):
         _fields_ = [("client", ClientMessage), ("padding", ctypes.c_long * 24)]
 
+    class ErrorEvent(ctypes.Structure):
+        _fields_ = [
+            ("type", ctypes.c_int),
+            ("display", display_type),
+            ("resourceid", ctypes.c_ulong),
+            ("serial", ctypes.c_ulong),
+            ("error_code", ctypes.c_ubyte),
+            ("request_code", ctypes.c_ubyte),
+            ("minor_code", ctypes.c_ubyte),
+        ]
+
     xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
     xlib.XOpenDisplay.restype = display_type
     xlib.XDefaultRootWindow.argtypes = [display_type]
@@ -2421,10 +2432,24 @@ def _close_chrome_windows_on_test_display() -> int:
         ctypes.POINTER(Event),
     ]
     xlib.XFlush.argtypes = [display_type]
+    xlib.XSync.argtypes = [display_type, ctypes.c_int]
+    xlib.XSetErrorHandler.argtypes = [ctypes.c_void_p]
+    xlib.XSetErrorHandler.restype = ctypes.c_void_p
     xlib.XFree.argtypes = [ctypes.c_void_p]
     xlib.XCloseDisplay.argtypes = [display_type]
     display = xlib.XOpenDisplay(None)
     assert display, "isolated Xvfb display unavailable"
+    errors: list[tuple[int, int]] = []
+
+    @ctypes.CFUNCTYPE(ctypes.c_int, display_type, ctypes.POINTER(ErrorEvent))
+    def on_error(_display: Any, event: Any) -> int:
+        # QueryTree is a snapshot: Chrome may destroy a candidate before the
+        # following request. Xlib's default handler exits the entire worker.
+        if event.contents.error_code != 3:  # BadWindow: already closed
+            errors.append((event.contents.error_code, event.contents.request_code))
+        return 0
+
+    previous_handler = xlib.XSetErrorHandler(on_error)
     try:
         root = xlib.XDefaultRootWindow(display)
         returned_root, parent = window(), window()
@@ -2469,7 +2494,14 @@ def _close_chrome_windows_on_test_display() -> int:
         xlib.XFlush(display)
         return closed
     finally:
-        xlib.XCloseDisplay(display)
+        try:
+            # Flush and receive asynchronous errors while our callback is live,
+            # including any errors delivered as the connection is closed.
+            xlib.XSync(display, 0)
+            xlib.XCloseDisplay(display)
+        finally:
+            xlib.XSetErrorHandler(previous_handler)
+        assert not errors, f"unexpected X11 protocol errors (code, request): {errors}"
 
 
 async def _close_manual_chrome_normally(process: asyncio.subprocess.Process) -> None:
@@ -2479,6 +2511,68 @@ async def _close_manual_chrome_normally(process: asyncio.subprocess.Process) -> 
             await asyncio.sleep(0.05)
         await process.wait()
     assert process.returncode == 0
+
+
+@pytest.mark.parametrize("error", ["vanished_window", "bad_atom"])
+async def test_window_close_probe_handles_only_vanished_window_errors(
+    chrome_display: Any, monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    """Exercise actual Xlib errors without racing a Chrome shutdown."""
+    xlib = ctypes.CDLL("libX11.so.6")
+    display_type, window = ctypes.c_void_p, ctypes.c_ulong
+    xlib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    xlib.XOpenDisplay.restype = display_type
+    xlib.XDefaultRootWindow.argtypes = [display_type]
+    xlib.XDefaultRootWindow.restype = window
+    xlib.XCreateSimpleWindow.argtypes = [
+        display_type,
+        window,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.c_uint,
+        ctypes.c_uint,
+        ctypes.c_ulong,
+        ctypes.c_ulong,
+    ]
+    xlib.XCreateSimpleWindow.restype = window
+    xlib.XDestroyWindow.argtypes = [display_type, window]
+    xlib.XGetAtomName.argtypes = [display_type, ctypes.c_ulong]
+    xlib.XGetAtomName.restype = ctypes.c_void_p
+    xlib.XSync.argtypes = [display_type, ctypes.c_int]
+    xlib.XCloseDisplay.argtypes = [display_type]
+    display = xlib.XOpenDisplay(None)
+    assert display
+    try:
+        candidate = xlib.XCreateSimpleWindow(
+            display, xlib.XDefaultRootWindow(display), 0, 0, 10, 10, 0, 0, 0
+        )
+        xlib.XSync(display, 0)
+        original = xlib.XGetWMProtocols
+        injected = False
+
+        def inspect_after_error(probe_display: Any, target: int, *args: Any) -> int:
+            nonlocal injected
+            original.argtypes = inspect_after_error.argtypes  # type: ignore[attr-defined]
+            if target == candidate:
+                injected = True
+                if error == "vanished_window":
+                    # Destroy after QueryTree, before the real property read.
+                    xlib.XDestroyWindow(probe_display, target)
+                else:
+                    xlib.XGetAtomName(probe_display, 0)  # BadAtom must stay visible.
+            return original(probe_display, target, *args)
+
+        monkeypatch.setattr(xlib, "XGetWMProtocols", inspect_after_error)
+        monkeypatch.setattr(ctypes, "CDLL", lambda _name: xlib)
+        if error == "vanished_window":
+            assert _close_chrome_windows_on_test_display() == 0
+        else:
+            with pytest.raises(AssertionError, match="unexpected X11 protocol errors.*5"):
+                _close_chrome_windows_on_test_display()
+        assert injected
+    finally:
+        xlib.XCloseDisplay(display)
 
 
 async def test_real_manual_chrome_setup_owns_profile_without_automation(

@@ -399,7 +399,11 @@ class NotificationStore:
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:
-                await task
+                while not task.done():
+                    with suppress(Exception, asyncio.CancelledError):
+                        await asyncio.shield(task)
+                with suppress(Exception):
+                    task.result()
                 raise
         except NotificationStoreError:
             raise

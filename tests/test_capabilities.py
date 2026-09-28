@@ -876,3 +876,52 @@ def test_sandbox_guardrail_rejects_provenance_outside_authenticated_turns() -> N
     rejected = evaluator.validate_collected(fields, ())
 
     assert rejected.reason == "collected guardrail field lacks authenticated turn provenance"
+
+
+def test_flat_skill_digest_does_not_scan_neighboring_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    from ricky.capabilities.registry import skill_bundle_digest
+
+    source = tmp_path / "legacy.md"
+    source.write_bytes(b"legacy skill")
+
+    def unexpected_scan(*args: object, **kwargs: object) -> None:
+        pytest.fail("a flat skill must not traverse unrelated neighboring bundles")
+
+    monkeypatch.setattr(Path, "rglob", unexpected_scan)
+    expected = hashlib.sha256(b"legacy.md\0legacy skill\0").hexdigest()
+    assert skill_bundle_digest(str(source), None) == expected
+
+
+def test_skill_digest_streams_resources_without_changing_pinned_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+
+    from ricky.capabilities.registry import skill_bundle_digest
+
+    source = tmp_path / "SKILL.md"
+    source.write_bytes(b"skill body")
+    resource = tmp_path / "references" / "large.txt"
+    resource.parent.mkdir()
+    payload = b"resource contents" * 40_000
+    resource.write_bytes(payload)
+    expected = hashlib.sha256(
+        b"SKILL.md\0skill body\0references/large.txt\0" + payload + b"\0"
+    ).hexdigest()
+
+    def unexpected_full_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("capability discovery must not load entire resource files")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_full_read)
+    assert skill_bundle_digest(str(source), str(tmp_path)) == expected
+    resource.write_bytes(b"changed")
+    assert skill_bundle_digest(str(source), str(tmp_path)) != expected
+    resource.unlink()
+    resource.symlink_to(tmp_path.parent / "outside.txt")
+    resource.resolve().write_bytes(b"outside bundle")
+    with pytest.raises(CapabilityRegistryError, match="escapes its bundle"):
+        skill_bundle_digest(str(source), str(tmp_path))

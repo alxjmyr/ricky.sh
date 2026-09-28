@@ -7,7 +7,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -253,7 +253,7 @@ class SessionStore:
         inbound_ref: str,
         scope: ProfileScope,
     ) -> StoredTurn | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             session = self._stored_session(self._required_session(connection, session_id))
             _require_profile_access(scope, session.profile_label, "session", session_id)
             row = connection.execute(
@@ -269,9 +269,13 @@ class SessionStore:
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:
-                # SQLite cannot be cancelled once its worker thread starts.
-                # Join it so callers never race an indeterminate transaction.
-                await task
+                # A thread cannot be cancelled. Repeated owner cancellation must
+                # still wait for publication/transaction completion before returning.
+                while not task.done():
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.shield(task)
+                with suppress(asyncio.CancelledError, Exception):
+                    task.result()
                 raise
         except SessionStoreError:
             raise
@@ -330,7 +334,7 @@ class SessionStore:
         )
 
     def _get(self, session_id: str, scope: ProfileScope) -> StoredSession:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = self._required_session(connection, session_id)
             stored = self._stored_session(row)
             _require_profile_access(scope, stored.profile_label, "session", session_id)
@@ -342,7 +346,7 @@ class SessionStore:
         status: SessionStatus | None,
         limit: int,
     ) -> list[StoredSession]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if status is None:
                 rows = connection.execute(
                     "SELECT * FROM sessions ORDER BY updated_at DESC, id"
@@ -511,7 +515,7 @@ class SessionStore:
         now: datetime | None,
     ) -> list[StaleSessionLease]:
         moment = _utc(now or self._clock())
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT id, lease_owner, lease_fence, lease_expires_at FROM sessions
                    WHERE lease_token IS NOT NULL AND lease_expires_at IS NOT NULL
@@ -588,7 +592,7 @@ class SessionStore:
         )
 
     def _session_counts(self, scope: ProfileScope) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM sessions").fetchall()
         counts: dict[str, int] = {}
         for row in rows:
@@ -693,7 +697,7 @@ class SessionStore:
         scope: ProfileScope,
         limit: int,
     ) -> list[StoredTurn]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             session = self._stored_session(self._required_session(connection, session_id))
             _require_profile_access(scope, session.profile_label, "session", session_id)
             rows = connection.execute(

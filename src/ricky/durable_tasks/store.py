@@ -8,7 +8,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -486,8 +486,11 @@ class DurableTaskStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
+            while not worker.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(worker)
             with suppress(Exception):
-                await asyncio.shield(worker)
+                worker.result()
             raise
         except sqlite3.Error as exc:
             raise TaskStoreError("durable task store operation failed") from exc
@@ -578,7 +581,7 @@ class DurableTaskStore:
         return task
 
     def _get_task(self, task_id: str) -> DurableTask:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         if row is None:
             raise TaskNotFoundError(f"durable task not found: {task_id}")
@@ -634,7 +637,7 @@ class DurableTaskStore:
         sql = f"""SELECT * FROM tasks {where}
             ORDER BY priority DESC, due_at IS NULL ASC, due_at ASC,
                      updated_at DESC, id ASC LIMIT ? OFFSET ?"""
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(sql, params).fetchall()
         return [self._task_from_row(row) for row in rows]
 
@@ -692,7 +695,7 @@ class DurableTaskStore:
             return self._task_from_row(updated, connection=connection)
 
     def _activities(self, task_id: str, limit: int) -> list[TaskActivity]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             exists = connection.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if exists is None:
                 raise TaskNotFoundError(f"durable task not found: {task_id}")
@@ -1141,7 +1144,7 @@ class DurableTaskStore:
 
     def _verify_lease(self, task_id: str, lease: TaskLease, expected_revision: int) -> DurableTask:
         now = self._now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = self._required_leased_row(connection, task_id, lease, expected_revision, now)
             return self._task_from_row(row)
 

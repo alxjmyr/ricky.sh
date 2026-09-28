@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import threading
 from pathlib import Path
 from typing import Literal
 
@@ -88,6 +91,48 @@ async def test_failed_atomic_replace_preserves_prior_checkpoint(tmp_path: Path) 
 
     assert store.path(run.id, "project").read_bytes() == original
     assert (await store.load(run.id, profile_scope=run.profile_scope)).status == "pending"
+
+
+@pytest.mark.parametrize("fail_write", [False, True])
+async def test_cancelled_save_joins_write_before_interruption_checkpoint(
+    tmp_path: Path, fail_write: bool
+) -> None:
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def blocked_replace(source: str | Path, target: str | Path) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "checkpoint thread was not released"
+        if fail_write:
+            raise OSError("injected write failure")
+        os.replace(source, target)
+
+    settings = _settings(tmp_path)
+    store = WorkflowRunStore(settings, replace=blocked_replace)
+    run = _run()
+    run.status = "running"
+    saving = asyncio.create_task(store.save(run))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        saving.cancel()
+        # A barrier after each cancellation lets the owner enter its join path.
+        await asyncio.sleep(0)
+        assert not saving.done()
+        saving.cancel()
+        await asyncio.sleep(0)
+        assert not saving.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await saving
+
+    terminal_store = WorkflowRunStore(settings)
+    run.status = "interrupted"
+    await terminal_store.save(run)
+    loaded = await terminal_store.load(run.id, profile_scope=run.profile_scope)
+    assert loaded.status == "interrupted"
+    assert not list(store.root("project").glob("*.tmp"))
 
 
 async def test_corrupt_checkpoint_fails_closed(tmp_path: Path) -> None:

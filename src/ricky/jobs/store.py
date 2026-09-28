@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Callable
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, cast
 from uuid import uuid4
@@ -563,7 +564,16 @@ class JobRunStore:
 
     async def _call(self, operation: Callable[..., _T], *args: Any) -> _T:
         try:
-            return await asyncio.to_thread(operation, *args)
+            task = asyncio.create_task(asyncio.to_thread(operation, *args))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                while not task.done():
+                    with suppress(Exception, asyncio.CancelledError):
+                        await asyncio.shield(task)
+                with suppress(Exception):
+                    task.result()
+                raise
         except JobStoreError:
             raise
         except (OSError, sqlite3.Error, ValidationError) as exc:
@@ -613,7 +623,7 @@ class JobRunStore:
     def _migrate_or_create_sync(self) -> None:
         """Owner-local implementation used only by create-current and the adapter."""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             version = int(connection.execute("PRAGMA user_version").fetchone()[0])
             if version not in set(range(SCHEMA_VERSION + 1)):
                 raise JobStoreError(f"unsupported job run schema version: {version}")
@@ -992,7 +1002,7 @@ class JobRunStore:
         self.path.chmod(0o600)
 
     def _insert_sync(self, run: JobRun) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """INSERT INTO job_runs (
@@ -1012,7 +1022,7 @@ class JobRunStore:
             )
 
     def _finish_sync(self, run: JobRun) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE job_runs SET
@@ -1058,7 +1068,7 @@ class JobRunStore:
         workflow_run_id: str | None,
         workflow_status: str | None,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             cursor = connection.execute(
                 """UPDATE job_runs SET workflow_name = ?, workflow_args_json = ?,
                     workflow_run_id = COALESCE(?, workflow_run_id),
@@ -1076,12 +1086,12 @@ class JobRunStore:
                 raise JobStoreError(f"job run is missing or already finished: {run_id}")
 
     def _get_sync(self, run_id: str) -> JobRun | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute("SELECT * FROM job_runs WHERE id = ?", (run_id,)).fetchone()
         return _row_to_run(row) if row is not None else None
 
     def _list_sync(self, job_name: str | None, limit: int) -> list[JobRun]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if job_name is None:
                 rows = connection.execute(
                     "SELECT * FROM job_runs ORDER BY started_at DESC, id DESC LIMIT ?",
@@ -1102,7 +1112,7 @@ class JobRunStore:
         context_lineage: int,
         limit: int,
     ) -> list[JobRun]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT * FROM job_runs
                 WHERE job_name = ? AND dry_run = ? AND context_lineage = ?
@@ -1117,7 +1127,7 @@ class JobRunStore:
         dry_run: bool,
         context_lineage: int,
     ) -> list[tuple[int, str | None, ProfileScope]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT DISTINCT context_revision, context_definition_digest,
                     profile_scope_json
@@ -1136,7 +1146,7 @@ class JobRunStore:
         ]
 
     def _completed_transcripts_sync(self, scope: ProfileScope) -> list[tuple[str, str]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT id, transcript_path, profile_scope_json FROM job_runs
                 WHERE outcome IS NOT NULL AND transcript_path IS NOT NULL
@@ -1152,7 +1162,7 @@ class JobRunStore:
         self,
         scope: ProfileScope,
     ) -> list[tuple[str, str, str]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT id, transcript_path, session_id, profile_scope_json FROM job_runs
                 WHERE outcome IS NOT NULL AND transcript_path IS NOT NULL
@@ -1169,7 +1179,7 @@ class JobRunStore:
         session_id: str,
         scope: ProfileScope,
     ) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT profile_scope_json FROM job_runs
                 WHERE session_id = ? AND transcript_path IS NOT NULL""",
@@ -1183,7 +1193,7 @@ class JobRunStore:
         run_id: str,
         scope: ProfileScope,
     ) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT profile_scope_json FROM job_runs
                 WHERE session_id = ? AND id != ? AND transcript_path IS NOT NULL""",
@@ -1192,7 +1202,7 @@ class JobRunStore:
         return any(_row_scope_permitted(scope, row) for row in rows)
 
     def _clear_transcript_path_sync(self, run_id: str, path: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "UPDATE job_runs SET transcript_path = NULL WHERE id = ? AND transcript_path = ?",
@@ -1200,7 +1210,7 @@ class JobRunStore:
             )
 
     def _completed_batch_payloads_sync(self, scope: ProfileScope) -> list[tuple[str, str]]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT b.id, b.payload_path, r.profile_scope_json FROM job_batches b
                 JOIN job_runs r ON r.id = b.run_id
@@ -1219,7 +1229,7 @@ class JobRunStore:
         path: str,
         scope: ProfileScope,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             batch_scope = self._batch_scope(connection, batch_id)
             _require_scope_access(scope, batch_scope, "job batch", batch_id)
@@ -1229,7 +1239,7 @@ class JobRunStore:
             )
 
     def _insert_batch_sync(self, batch: PersistedBatch, item_ids: list[str]) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """INSERT INTO job_batches (
@@ -1261,14 +1271,14 @@ class JobRunStore:
         run_id: str,
         profile_scope: ProfileScope,
     ) -> list[PersistedBatch]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM job_batches WHERE run_id = ? ORDER BY id", (run_id,)
             ).fetchall()
         return [_row_to_batch(row, profile_scope) for row in rows]
 
     def _batch_scope_sync(self, batch_id: str) -> ProfileScope:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return self._batch_scope(connection, batch_id)
 
     def _batch_scope(self, connection: sqlite3.Connection, batch_id: str) -> ProfileScope:
@@ -1282,7 +1292,7 @@ class JobRunStore:
         return ProfileScope.model_validate_json(row["profile_scope_json"])
 
     def _record_disposition_sync(self, disposition: Disposition) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 connection.execute(
@@ -1308,7 +1318,7 @@ class JobRunStore:
         batch_id: str,
         profile_scope: ProfileScope,
     ) -> list[Disposition]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM job_dispositions WHERE batch_id = ? ORDER BY item_id",
                 (batch_id,),
@@ -1317,7 +1327,7 @@ class JobRunStore:
         return [Disposition.model_validate({**dict(row), "profile_label": label}) for row in rows]
 
     def _cursor_sync(self, job_name: str, source_name: str) -> JsonValue:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT cursor_json FROM job_stream_cursors WHERE job_name = ? AND source_name = ?",
                 (job_name, source_name),
@@ -1325,7 +1335,7 @@ class JobRunStore:
         return _load_json(row[0]) if row is not None else None
 
     def _commit_stream_cursors_sync(self, run_id: str, scope: ProfileScope) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 "SELECT outcome, dry_run FROM job_runs WHERE id = ?", (run_id,)
@@ -1363,7 +1373,7 @@ class JobRunStore:
                 )
 
     def _verify_run_accounting_sync(self, run_id: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             batches = connection.execute(
                 "SELECT id, kind, complete FROM job_batches WHERE run_id = ?", (run_id,)
             ).fetchall()
@@ -1396,7 +1406,7 @@ class JobRunStore:
     def _consideration_sync(
         self, job_name: str, task_id: str, revision: int
     ) -> tuple[str, datetime] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """SELECT disposition, considered_at FROM job_task_considerations
                 WHERE job_name = ? AND task_id = ? AND task_revision = ?""",
@@ -1412,7 +1422,7 @@ class JobRunStore:
         disposition: str,
         considered_at: datetime,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """INSERT INTO job_task_considerations (
@@ -1448,7 +1458,7 @@ class JobRunStore:
             created_at=now,
             updated_at=now,
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """SELECT status FROM job_actions WHERE job_name = ? AND action_key = ?
@@ -1501,7 +1511,7 @@ class JobRunStore:
         profile_scope: ProfileScope,
     ) -> None:
         now = datetime.now(UTC)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             termination = connection.execute(
                 "SELECT status, profile_scope_json FROM grant_budget_terminations "
@@ -1559,7 +1569,7 @@ class JobRunStore:
         status: str,
         profile_scope: ProfileScope,
     ) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             now = _iso(datetime.now(UTC))
             budget = connection.execute(
@@ -1618,7 +1628,7 @@ class JobRunStore:
         grant_id: str,
         scope: ProfileScope,
     ) -> dict[str, Any] | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM grant_budgets WHERE grant_id = ?", (grant_id,)
             ).fetchone()
@@ -1656,7 +1666,7 @@ class JobRunStore:
             created_at=now,
             updated_at=now,
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             budget = connection.execute(
                 "SELECT * FROM grant_budgets WHERE grant_id = ?", (grant_id,)
@@ -1741,7 +1751,7 @@ class JobRunStore:
         self, action_id: str, disposition: EffectDisposition, provider_reference: str | None
     ) -> JobAction:
         now = datetime.now(UTC)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE job_actions SET status = ?, provider_reference = ?, updated_at = ?
@@ -1759,7 +1769,7 @@ class JobRunStore:
         return _row_to_action(row)
 
     def _get_action_sync(self, action_id: str) -> JobAction | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM job_actions AS a
                 JOIN job_runs AS r ON r.id = a.run_id WHERE a.id = ?""",
@@ -1768,7 +1778,7 @@ class JobRunStore:
         return _row_to_action(row) if row is not None else None
 
     def _list_actions_sync(self, job_name: str | None, limit: int) -> list[JobAction]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if job_name is None:
                 rows = connection.execute(
                     """SELECT a.*, r.profile_scope_json FROM job_actions AS a
@@ -1786,7 +1796,7 @@ class JobRunStore:
         return [_row_to_action(row) for row in rows]
 
     def _actions_for_run_sync(self, run_id: str) -> list[JobAction]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM job_actions AS a
                 JOIN job_runs AS r ON r.id = a.run_id
@@ -1796,7 +1806,7 @@ class JobRunStore:
         return [_row_to_action(row) for row in rows]
 
     def _reserved_actions_sync(self) -> list[JobAction]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM job_actions AS a
                 JOIN job_runs AS r ON r.id = a.run_id
@@ -1806,7 +1816,7 @@ class JobRunStore:
 
     def _strand_reserved_action_sync(self, action_id: str, error: str) -> JobAction:
         now = datetime.now(UTC)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE job_actions SET status = 'in_doubt', provider_reference = ?,
@@ -1824,7 +1834,7 @@ class JobRunStore:
         return _row_to_action(row)
 
     def _action_counts_sync(self, scope: ProfileScope) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT a.status, r.profile_scope_json FROM job_actions AS a
                 JOIN job_runs AS r ON r.id = a.run_id"""
@@ -1840,7 +1850,7 @@ class JobRunStore:
         self, action_id: str, disposition: EffectDisposition, actor: str
     ) -> tuple[JobAction, ActionResolution]:
         now = datetime.now(UTC)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE job_actions SET status = ?, updated_at = ?
@@ -1875,7 +1885,7 @@ class JobRunStore:
         return _row_to_action(action_row), resolution
 
     def _escalation_task_sync(self, job_name: str, blocked_key: str) -> str | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT task_id FROM job_escalations WHERE job_name = ? AND blocked_key = ?",
                 (job_name, blocked_key),
@@ -1885,7 +1895,7 @@ class JobRunStore:
     def _correlate_escalation_sync(
         self, job_name: str, blocked_key: str, task_id: str, run_id: str
     ) -> str:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """INSERT INTO job_escalations (

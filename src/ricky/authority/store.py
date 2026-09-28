@@ -12,7 +12,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Any
 
@@ -199,8 +199,11 @@ class AuthorityStore:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
+            while not task.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(task)
             with suppress(Exception):
-                await asyncio.shield(task)
+                task.result()
             raise
         except sqlite3.Error as exc:
             raise AuthorityStoreError("authority store operation failed") from exc
@@ -233,7 +236,7 @@ class AuthorityStore:
         os.chmod(self.db_path, 0o600)
 
     def _issue(self, grant: DelegationGrant) -> DelegationGrant:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 f"INSERT INTO delegation_grants ({','.join(_COLUMNS)}) "
@@ -245,7 +248,7 @@ class AuthorityStore:
         return grant
 
     def _get(self, grant_id: str) -> DelegationGrant | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM delegation_grants WHERE id = ?", (grant_id,)
             ).fetchone()
@@ -267,11 +270,11 @@ class AuthorityStore:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY issued_at DESC, id DESC LIMIT ?"
         params.append(limit)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return [_row(row) for row in connection.execute(sql, params).fetchall()]
 
     def _active_execution_request_ids(self, scope: ProfileScope) -> tuple[str, ...]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM delegation_grants
@@ -287,7 +290,7 @@ class AuthorityStore:
         )
 
     def _attach_execution(self, grant_id: str, execution_request_id: str) -> DelegationGrant:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._required(connection, grant_id)
             if current.status != "active":
@@ -319,7 +322,7 @@ class AuthorityStore:
         return updated
 
     def _load_active(self, grant_id: str, now: datetime) -> DelegationGrant:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._required(connection, grant_id)
             if current.status != "active":
@@ -348,7 +351,7 @@ class AuthorityStore:
     def _terminate(
         self, grant_id: str, status: GrantStatus, kind: GrantActivityKind, summary: str
     ) -> DelegationGrant:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             current = self._required(connection, grant_id)
             if current.status != "active":
@@ -373,7 +376,7 @@ class AuthorityStore:
         disposition: EffectDisposition | None,
         profile_scope: ProfileScope,
     ) -> GrantActivity:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._required(connection, grant_id)
             activity = self._append(
@@ -396,7 +399,7 @@ class AuthorityStore:
         profile_scope: ProfileScope,
         limit: int,
     ) -> list[GrantActivity]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM grant_activities WHERE grant_id = ? ORDER BY id LIMIT ?",
                 (grant_id, limit),

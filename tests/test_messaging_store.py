@@ -237,3 +237,45 @@ async def test_reopening_tolerates_a_disappearing_sqlite_sidecar(
 
     assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
     assert stat.S_IMODE(store.db_path.stat().st_mode) == 0o600
+
+
+async def test_clear_poller_lease_checks_expiry_without_expected_lease(tmp_path: Path) -> None:
+    clock = MutableClock()
+    store = MessagingStore(_settings(tmp_path), clock=clock)
+    await store.initialize()
+    await store.acquire_poller("telegram", "personal", owner="one", lease_seconds=30)
+    assert not await store.clear_poller_lease("telegram", "personal")
+    assert len(await store.active_poller_leases()) == 1
+    clock.now += timedelta(seconds=30)
+    assert await store.clear_poller_lease("telegram", "personal")
+    assert not await store.clear_poller_lease("telegram", "personal")
+
+
+@pytest.mark.parametrize("field", ["owner", "fence", "expires_at", "transport", "account"])
+async def test_clear_poller_lease_requires_exact_expected_occurrence(
+    tmp_path: Path, field: str
+) -> None:
+    clock = MutableClock()
+    store = MessagingStore(_settings(tmp_path), clock=clock)
+    await store.initialize()
+    await store.acquire_poller("telegram", "personal", owner="one", lease_seconds=1)
+    later = clock.now + timedelta(seconds=10)
+    expected = (await store.stale_poller_leases(now=later))[0]
+    changed = expected.model_copy(
+        update={
+            field: {
+                "owner": "other",
+                "fence": expected.fence + 1,
+                "expires_at": expected.expires_at + timedelta(seconds=1),
+                "transport": "other",
+                "account": "other",
+            }[field]
+        }
+    )
+    assert not await store.clear_poller_lease(
+        "telegram", "personal", expected_lease=changed, now=later
+    )
+    assert await store.stale_poller_leases(now=later) == [expected]
+    assert await store.clear_poller_lease(
+        "telegram", "personal", expected_lease=expected, now=later
+    )

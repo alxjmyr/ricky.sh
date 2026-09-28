@@ -137,7 +137,8 @@ class GatewayRetention:
             keep=self.config.turn_results,
             before=cutoff,
         )
-        result_ids = [item for item in result_ids if item not in set(protected)]
+        protected_message_ids = set(protected)
+        result_ids = [item for item in result_ids if item not in protected_message_ids]
         groups.append(
             await self._group(
                 "turn_results",
@@ -164,8 +165,9 @@ class GatewayRetention:
                 }
             )
         )
+        protected_conversation_ids = set(protected_conversations)
         conversation_ids = [
-            item for item in conversation_ids if item not in set(protected_conversations)
+            item for item in conversation_ids if item not in protected_conversation_ids
         ]
         groups.append(
             await self._group(
@@ -348,6 +350,7 @@ class GatewayRetention:
             total += item.stat().st_size
             if total > self.config.log_byte_limit:
                 removable.append(item)
+        removable = [item for item in removable if item.stat().st_mtime < cutoff.timestamp()]
         removed = 0
         if apply_changes:
             for item in removable:

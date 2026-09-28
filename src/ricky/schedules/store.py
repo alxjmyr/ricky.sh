@@ -8,6 +8,7 @@ import os
 import tempfile
 import tomllib
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
@@ -76,7 +77,7 @@ class ScheduleStore:
                 raise ScheduleStoreError(f"schedule already exists: {schedule.id}")
             return [*items, schedule], schedule
 
-        return await asyncio.to_thread(self._mutate_sync, mutate)
+        return await self._mutate(mutate)
 
     async def replace(self, schedule: ScheduleSpec) -> ScheduleSpec:
         self._require(schedule)
@@ -88,7 +89,7 @@ class ScheduleStore:
             self._require(current)
             return [schedule if item.id == schedule.id else item for item in items], schedule
 
-        return await asyncio.to_thread(self._mutate_sync, mutate)
+        return await self._mutate(mutate)
 
     async def remove(self, schedule_id: str) -> ScheduleSpec:
         def mutate(items: list[ScheduleSpec]) -> tuple[list[ScheduleSpec], ScheduleSpec]:
@@ -98,7 +99,24 @@ class ScheduleStore:
             self._require(removed)
             return [item for item in items if item.id != schedule_id], removed
 
-        return await asyncio.to_thread(self._mutate_sync, mutate)
+        return await self._mutate(mutate)
+
+    async def _mutate(
+        self,
+        operation: Callable[[list[ScheduleSpec]], tuple[list[ScheduleSpec], _T]],
+    ) -> _T:
+        worker = asyncio.create_task(asyncio.to_thread(self._mutate_sync, operation))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Keep ownership of the file write and reconciliation lock until
+            # the worker has settled, including repeated shutdown cancellation.
+            while not worker.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(worker)
+            with suppress(Exception):
+                worker.result()
+            raise
 
     def _require(self, schedule: ScheduleSpec) -> None:
         if not self.scope.permits(schedule.profile_scope.label()):

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -229,16 +230,19 @@ class AgentLoop:
                 raise
 
         try:
-            async for event in self._run_turn_unlocked(
-                session,
-                canonical_input,
-                max_iterations=max_iterations,
-                max_completion_tokens_per_request=max_completion_tokens_per_request,
-                extra_system_sections=extra_system_sections,
-            ):
-                if isinstance(event, TurnFinishedEvent):
-                    await cleanup_once()
-                yield event
+            async with aclosing(
+                self._run_turn_unlocked(
+                    session,
+                    canonical_input,
+                    max_iterations=max_iterations,
+                    max_completion_tokens_per_request=max_completion_tokens_per_request,
+                    extra_system_sections=extra_system_sections,
+                )
+            ) as events:
+                async for event in events:
+                    if isinstance(event, TurnFinishedEvent):
+                        await cleanup_once()
+                    yield event
         finally:
             try:
                 await cleanup_once()
@@ -286,7 +290,7 @@ class AgentLoop:
         max_iterations: int | None = None,
         max_completion_tokens_per_request: int | None = None,
         extra_system_sections: Mapping[str, str] | None = None,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent]:
         """Run a turn after the public operation gate has been acquired."""
         turn_id = f"turn_{uuid4().hex}"
         turn_usage = Usage()
@@ -408,43 +412,51 @@ class AgentLoop:
                 runtime_limit_error: str | None = None
                 rejected_in_response: dict[str, str] = {}
                 failures_in_response: dict[tuple[str, str, str], ToolCallFinishedEvent] = {}
-                async for event in self._dispatch_tool_calls(
-                    session,
-                    turn_id,
-                    tool_calls,
-                    iteration_registry,
-                ):
-                    yield event
-                    if isinstance(event, (UserInteractionRequiredEvent, BackgroundHandoffEvent)):
-                        interaction_required = True
-                    if isinstance(event, ToolCallRejectedEvent):
-                        rejected_in_response.setdefault(event.input_digest, event.tool_name)
-                    if isinstance(event, ToolCallFinishedEvent) and event.input_digest is not None:
-                        current_failure = event.runtime_failure
-                        for prior_key in (
-                            runtime_failure_counts.keys() | failures_in_response.keys()
+                async with aclosing(
+                    self._dispatch_tool_calls(
+                        session,
+                        turn_id,
+                        tool_calls,
+                        iteration_registry,
+                    )
+                ) as events:
+                    async for event in events:
+                        yield event
+                        if isinstance(
+                            event, (UserInteractionRequiredEvent, BackgroundHandoffEvent)
                         ):
-                            if prior_key[0] == event.input_digest and (
-                                not event.is_error
-                                or current_failure is None
-                                or prior_key[1:]
-                                != (
-                                    current_failure.kind,
-                                    current_failure.state_fingerprint,
-                                )
+                            interaction_required = True
+                        if isinstance(event, ToolCallRejectedEvent):
+                            rejected_in_response.setdefault(event.input_digest, event.tool_name)
+                        if (
+                            isinstance(event, ToolCallFinishedEvent)
+                            and event.input_digest is not None
+                        ):
+                            current_failure = event.runtime_failure
+                            for prior_key in (
+                                runtime_failure_counts.keys() | failures_in_response.keys()
                             ):
-                                runtime_failure_counts.pop(prior_key, None)
-                                failures_in_response.pop(prior_key, None)
-                    if (
-                        isinstance(event, ToolCallFinishedEvent)
-                        and event.is_error
-                        and event.runtime_failure is not None
-                        and event.input_digest is not None
-                        and event.effect_disposition in (None, "not_performed")
-                    ):
-                        failure = event.runtime_failure
-                        key = (event.input_digest, failure.kind, failure.state_fingerprint)
-                        failures_in_response.setdefault(key, event)
+                                if prior_key[0] == event.input_digest and (
+                                    not event.is_error
+                                    or current_failure is None
+                                    or prior_key[1:]
+                                    != (
+                                        current_failure.kind,
+                                        current_failure.state_fingerprint,
+                                    )
+                                ):
+                                    runtime_failure_counts.pop(prior_key, None)
+                                    failures_in_response.pop(prior_key, None)
+                        if (
+                            isinstance(event, ToolCallFinishedEvent)
+                            and event.is_error
+                            and event.runtime_failure is not None
+                            and event.input_digest is not None
+                            and event.effect_disposition in (None, "not_performed")
+                        ):
+                            failure = event.runtime_failure
+                            key = (event.input_digest, failure.kind, failure.state_fingerprint)
+                            failures_in_response.setdefault(key, event)
                 recovery_messages: list[str] = []
                 for key, failed_event in failures_in_response.items():
                     count = runtime_failure_counts.get(key, 0) + 1
@@ -509,6 +521,9 @@ class AgentLoop:
                 error=message,
                 usage=turn_usage,
             )
+        except GeneratorExit:
+            _close_dangling_tool_calls(session, "tool call aborted: turn closed")
+            raise
         except asyncio.CancelledError:
             _close_dangling_tool_calls(session, "tool call aborted: turn interrupted")
             yield TurnFinishedEvent(
@@ -552,7 +567,7 @@ class AgentLoop:
         turn_id: str,
         tool_calls: list[ToolCallPart],
         registry: ToolRegistry,
-    ) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncGenerator[AgentEvent]:
         resolved: dict[str, _ResolvedCall] = {}
         runnable: list[tuple[ToolCallPart, PreparedEffect | None]] = []
         tool_ctx = ToolContext(
@@ -598,21 +613,21 @@ class AgentLoop:
                 )
 
         tasks: list[asyncio.Task[_ResolvedCall]] = []
-        for call, prepared_effect in runnable:
-            yield ToolCallStartedEvent(turn_id=turn_id, call_id=call.id, tool_name=call.name)
-            tasks.append(
-                asyncio.create_task(
-                    self._run_tool(
-                        session,
-                        turn_id,
-                        call,
-                        registry,
-                        prepared_effect=prepared_effect,
+        try:
+            for call, prepared_effect in runnable:
+                yield ToolCallStartedEvent(turn_id=turn_id, call_id=call.id, tool_name=call.name)
+                tasks.append(
+                    asyncio.create_task(
+                        self._run_tool(
+                            session,
+                            turn_id,
+                            call,
+                            registry,
+                            prepared_effect=prepared_effect,
+                        )
                     )
                 )
-            )
 
-        try:
             for task in asyncio.as_completed(tasks):
                 resolved_call = await task
                 resolved[resolved_call.call.id] = resolved_call

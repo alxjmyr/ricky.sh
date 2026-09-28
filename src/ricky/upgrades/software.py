@@ -291,7 +291,8 @@ def _verify_artifact(path: Path, artifact: ReleaseArtifact) -> None:
         or path.stat().st_size != artifact.size
     ):
         raise SoftwareReplacementError("cached release artifact identity changed")
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if digest != artifact.sha256:
         raise SoftwareReplacementError("cached release artifact checksum changed")
 

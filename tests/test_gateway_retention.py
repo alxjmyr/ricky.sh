@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -428,6 +429,29 @@ async def test_service_logs_are_bounded_by_total_bytes(tmp_path: Path) -> None:
     assert group is not None and group.removed >= 1
     total = sum(item.stat().st_size for item in directory.iterdir())
     assert total <= 16_000
+
+
+async def test_service_log_pruning_preserves_recent_files_beyond_count_limit(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, log_file_limit=1, min_age_seconds=3600.0)
+    directory = tmp_path / "user" / "logs"
+    directory.mkdir(parents=True)
+    now = datetime.now(UTC)
+    for name, age in (("old.log", 7200), ("recent.log", 60), ("current.log", 0)):
+        path = directory / name
+        path.write_text("log evidence", encoding="utf-8")
+        modified = now.timestamp() - age
+        os.utime(path, (modified, modified))
+
+    retention = GatewayRetention(config, scope=PROFILE_SCOPE)
+    plan = await retention.plan(now=now)
+    group = plan.group("service_logs")
+    assert group is not None
+    assert group.removable_paths == (str(directory / "old.log"),)
+    applied = await retention.apply(now=now)
+    assert applied.group("service_logs").removed == 1  # type: ignore[union-attr]
+    assert {path.name for path in directory.iterdir()} == {"recent.log", "current.log"}
 
 
 async def test_pruning_is_idempotent(tmp_path: Path) -> None:

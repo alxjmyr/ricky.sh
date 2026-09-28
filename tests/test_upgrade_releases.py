@@ -8,6 +8,7 @@ import json
 import zipfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -396,3 +397,44 @@ async def test_cache_accepts_a_wheel_whose_description_body_looks_like_metadata_
     cached_wheel, _constraints = await cache_release_artifacts(descriptor, tmp_path / "cache")
 
     assert cached_wheel.name == descriptor.wheel.name
+
+
+async def test_cached_artifacts_are_verified_without_whole_file_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    descriptor_path, _ = _local_descriptor(tmp_path / "release")
+    descriptor = await LocalReleaseResolver((descriptor_path,)).resolve(None)
+    assert descriptor is not None
+    destination = tmp_path / "cache"
+    wheel, constraints = await cache_release_artifacts(descriptor, destination)
+
+    def unexpected_full_read(*args: object, **kwargs: object) -> None:
+        pytest.fail("cached artifacts must be hashed with bounded memory")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_full_read)
+    assert await cache_release_artifacts(descriptor, destination) == (wheel, constraints)
+    # Equal length is insufficient: every reuse must still verify the checksum.
+    constraints.write_bytes(b"x" * descriptor.constraints.size)
+    with pytest.raises(ReleaseResolutionError, match="does not match"):
+        await cache_release_artifacts(descriptor, destination)
+
+
+async def test_oversized_local_artifact_is_rejected_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    descriptor_path, _ = _local_descriptor(tmp_path / "release")
+    descriptor = await LocalReleaseResolver((descriptor_path,)).resolve(None)
+    assert descriptor is not None
+    source = descriptor_path.parent / descriptor.wheel.name
+    with source.open("ab") as stream:
+        stream.write(b"extra")
+    original_open = Path.open
+
+    def guarded_open(path: Path, *args: Any, **kwargs: Any):
+        if path == source:
+            pytest.fail("wrong-sized local artifact must be rejected before reading")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    with pytest.raises(ReleaseResolutionError, match="size does not match"):
+        await cache_release_artifacts(descriptor, tmp_path / "cache")

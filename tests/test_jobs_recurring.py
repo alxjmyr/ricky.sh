@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,7 +29,7 @@ from ricky.durable_tasks.store import (
 from ricky.durable_tasks.types import DurableTask, TaskSearchQuery
 from ricky.durable_tasks.upgrade import DurableTasksUpgradeAdapter
 from ricky.interfaces.cli.app import app
-from ricky.jobs.batches import persist_batch, prune_batch_payloads
+from ricky.jobs.batches import _exclusive_write, persist_batch, prune_batch_payloads
 from ricky.jobs.briefing import job_system_sections
 from ricky.jobs.effects import EffectIdentity, GuardedEffectTool
 from ricky.jobs.escalation import escalate_blocked
@@ -37,6 +38,7 @@ from ricky.jobs.sources import (
     CandidateBatch,
     CollectedBatch,
     Disposition,
+    PersistedBatch,
     SourceItem,
 )
 from ricky.jobs.spec import JobPermissions, JobSpec, JobTools, TaskSourceSpec
@@ -384,6 +386,81 @@ async def test_task_pool_discovers_unassigned_work_deduplicates_and_cools_down(
         total_limit=10,
     )
     assert {item.id for item in returned.candidates} == {due.id, later.id}
+
+
+@pytest.mark.parametrize("fail_insert", [False, True])
+async def test_cancelled_batch_persistence_settles_payload_and_ledger_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_insert: bool
+) -> None:
+    store = JobRunStore(_settings(tmp_path))
+    await store.initialize()
+    run = _run_record()
+    assert run.job_name is not None
+    await store.insert(run, scope=SCOPE)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    insert = store._insert_batch_sync
+
+    def blocked_insert(batch: PersistedBatch, item_ids: list[str]) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "batch insertion was not released"
+        if fail_insert:
+            raise JobStoreError("injected insertion failure")
+        insert(batch, item_ids)
+
+    monkeypatch.setattr(store, "_insert_batch_sync", blocked_insert)
+    payload = CandidateBatch(candidates=[])
+    operation = asyncio.create_task(
+        persist_batch(
+            store,
+            run_id=run.id,
+            job_name=run.job_name,
+            source_name="tasks",
+            kind="task_pool",
+            payload=payload,
+            item_ids=[],
+            complete=True,
+            dry_run=False,
+            profile_scope=SCOPE,
+        )
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    batches = await store.batches_for_run(run.id, scope=SCOPE)
+    if fail_insert:
+        assert batches == []
+        assert not list((store.root / "batches" / run.id).glob("*.json"))
+    else:
+        assert len(batches) == 1
+        saved = CandidateBatch.model_validate_json(Path(batches[0].payload_path).read_text())
+        assert saved == payload
+
+
+def test_batch_write_failure_cleans_only_its_owned_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "batch.json"
+    path.write_bytes(b"existing")
+    with pytest.raises(FileExistsError):
+        _exclusive_write(tmp_path, path, b"replacement")
+    assert path.read_bytes() == b"existing"
+    path.unlink()
+
+    def fail_sync(descriptor: int) -> None:
+        raise OSError("injected sync failure")
+
+    monkeypatch.setattr("ricky.jobs.batches.os.fsync", fail_sync)
+    with pytest.raises(OSError, match="injected sync failure"):
+        _exclusive_write(tmp_path, path, b"incomplete")
+    assert not path.exists()
 
 
 @pytest.mark.asyncio

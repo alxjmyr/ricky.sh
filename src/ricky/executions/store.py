@@ -7,7 +7,7 @@ import json
 import secrets
 import sqlite3
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 from uuid import uuid4
@@ -116,7 +116,7 @@ class ExecutionStore:
         return _permitted(scope, await self._run(self._list_pending_acknowledgements))
 
     def _list_pending_acknowledgements(self) -> list[ExecutionRequest]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM execution_requests WHERE handoff_title IS NOT NULL "
                 "AND acknowledgement_delivered_at IS NULL ORDER BY created_at, id"
@@ -159,7 +159,7 @@ class ExecutionStore:
         release: bool,
         now: datetime,
     ) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._required(connection, request_id)
             if before.acknowledgement_outbox_id not in {None, outbox_id}:
@@ -948,8 +948,11 @@ class ExecutionStore:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
+            while not task.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(task)
             with suppress(Exception):
-                await asyncio.shield(task)
+                task.result()
             raise
         except sqlite3.Error as exc:
             raise ExecutionStoreError("execution store operation failed") from exc
@@ -982,7 +985,7 @@ class ExecutionStore:
         self.db_path.chmod(0o600)
 
     def _submit(self, request: ExecutionRequest) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT * FROM execution_requests WHERE request_key = ?", (request.request_key,)
@@ -1012,7 +1015,7 @@ class ExecutionStore:
         return request
 
     def _create_draft(self, draft: ExecutionDraft) -> ExecutionDraft:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT data_json FROM execution_drafts WHERE id=?", (draft.id,)
@@ -1056,14 +1059,14 @@ class ExecutionStore:
         return draft
 
     def _get_draft(self, draft_id: str) -> ExecutionDraft | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT data_json FROM execution_drafts WHERE id=?", (draft_id,)
             ).fetchone()
         return ExecutionDraft.model_validate_json(row["data_json"]) if row is not None else None
 
     def _find_open_draft(self, conversation_id: str, task_id: str) -> ExecutionDraft | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT data_json FROM execution_drafts
@@ -1076,7 +1079,7 @@ class ExecutionStore:
         return ExecutionDraft.model_validate_json(row["data_json"]) if row is not None else None
 
     def _find_drafts_by_message(self, message_id: str, limit: int) -> list[ExecutionDraft]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT d.data_json FROM execution_drafts AS d
@@ -1089,7 +1092,7 @@ class ExecutionStore:
         return [ExecutionDraft.model_validate_json(row["data_json"]) for row in rows]
 
     def _find_draft_for_contract(self, contract_id: str) -> ExecutionDraft | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT data_json FROM execution_drafts ORDER BY updated_at DESC"
             ).fetchall()
@@ -1106,7 +1109,7 @@ class ExecutionStore:
         kind: DraftActivityKind,
         summary: str,
     ) -> ExecutionDraft:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT data_json, revision FROM execution_drafts WHERE id=?", (draft.id,)
@@ -1220,7 +1223,7 @@ class ExecutionStore:
             params.append(status)
         sql += " ORDER BY updated_at DESC, id DESC LIMIT ?"
         params.append(limit)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(sql, params).fetchall()
         return [ExecutionDraft.model_validate_json(row["data_json"]) for row in rows]
 
@@ -1230,7 +1233,7 @@ class ExecutionStore:
         profile_scope: ProfileScope,
         limit: int,
     ) -> list[ExecutionDraftActivity]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_draft_activity
@@ -1245,7 +1248,7 @@ class ExecutionStore:
         ]
 
     def _get_confirmation(self, confirmation_id: str) -> ConfirmationRef | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT data_json FROM execution_contract_confirmations WHERE id=?",
                 (confirmation_id,),
@@ -1259,7 +1262,7 @@ class ExecutionStore:
         expected_revision: int,
         now: datetime,
     ) -> ExecutionDraft:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             draft_row = connection.execute(
                 "SELECT data_json, revision FROM execution_drafts WHERE id=?",
@@ -1351,7 +1354,7 @@ class ExecutionStore:
         return attached
 
     def _get_contract(self, contract_id_or_digest: str) -> ExecutionContract | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT data_json FROM execution_contracts WHERE id=? OR digest=?",
                 (contract_id_or_digest, contract_id_or_digest),
@@ -1359,7 +1362,7 @@ class ExecutionStore:
         return ExecutionContract.model_validate_json(row["data_json"]) if row is not None else None
 
     def _list_contracts(self, limit: int) -> list[ExecutionContract]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT data_json FROM execution_contracts "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
@@ -1368,7 +1371,7 @@ class ExecutionStore:
         return [ExecutionContract.model_validate_json(row["data_json"]) for row in rows]
 
     def _request_for_contract(self, contract_id: str) -> ExecutionRequest | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM execution_requests WHERE contract_id=? "
                 "ORDER BY created_at DESC LIMIT 1",
@@ -1437,7 +1440,7 @@ class ExecutionStore:
         )
 
     def _get(self, request_id: str) -> ExecutionRequest | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM execution_requests WHERE id = ?", (request_id,)
             ).fetchone()
@@ -1449,7 +1452,7 @@ class ExecutionStore:
         token: str,
         fence: int,
     ) -> ParkedBrowserApproval:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(
                 connection,
@@ -1522,7 +1525,7 @@ class ExecutionStore:
         return approval
 
     def _get_browser_approval(self, approval_id: str) -> ParkedBrowserApproval | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT data_json FROM execution_browser_approvals WHERE id=?",
                 (approval_id,),
@@ -1530,7 +1533,7 @@ class ExecutionStore:
         return _APPROVAL_ADAPTER.validate_json(row["data_json"]) if row is not None else None
 
     def _browser_approvals_for_request(self, request_id: str) -> list[ParkedBrowserApproval]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT data_json FROM execution_browser_approvals
                 WHERE request_id=? ORDER BY rowid""",
@@ -1548,7 +1551,7 @@ class ExecutionStore:
         supplied_challenge_digest: str,
         now: datetime,
     ) -> ParkedBrowserApproval:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             approval = self._required_browser_approval(connection, approval_id)
             request = self._required(connection, approval.request_id)
@@ -1593,7 +1596,7 @@ class ExecutionStore:
         now: datetime,
     ) -> list[ParkedBrowserApproval]:
         expired: list[ParkedBrowserApproval] = []
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT approvals.data_json, requests.profile_scope_json
@@ -1630,7 +1633,7 @@ class ExecutionStore:
         consume: bool,
         now: datetime,
     ) -> ParkedBrowserApproval:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             approval = self._required_browser_approval(connection, approval_id)
             before = self._fenced(
@@ -1689,7 +1692,7 @@ class ExecutionStore:
         reason: str,
         now: datetime,
     ) -> ParkedBrowserApproval:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             approval = self._required_browser_approval(connection, approval_id)
             before = self._fenced(
@@ -1741,7 +1744,7 @@ class ExecutionStore:
         note: str,
         now: datetime,
     ) -> tuple[ExecutionRequest, BrowserTransactionAttestation]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             approval = self._required_browser_approval(connection, transaction_id)
             if not isinstance(approval, ParkedBrowserTransaction):
@@ -1806,7 +1809,7 @@ class ExecutionStore:
     def _browser_transaction_attestations(
         self, transaction_id: str
     ) -> list[BrowserTransactionAttestation]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT * FROM execution_browser_attestations
                 WHERE transaction_id=? ORDER BY id""",
@@ -1892,11 +1895,11 @@ class ExecutionStore:
             params.append(status)
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return [_row(row) for row in connection.execute(sql, params).fetchall()]
 
     def _list_for_notification_projection(self) -> list[ExecutionRequest]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_requests
@@ -1919,12 +1922,12 @@ class ExecutionStore:
             params.extend(statuses)
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         params.append(limit)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(sql, params).fetchall()
         return [_row(row) for row in rows]
 
     def _list_by_source_message(self, message_id: str, limit: int) -> list[ExecutionRequest]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_requests
@@ -1936,7 +1939,7 @@ class ExecutionStore:
         return [_row(row) for row in rows]
 
     def _protected_message_ids(self, scope: ProfileScope) -> tuple[str, ...]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             draft_rows = connection.execute(
                 """
                 SELECT s.message_id, d.data_json
@@ -1970,7 +1973,7 @@ class ExecutionStore:
         return tuple(sorted(protected))
 
     def _protected_parent_request_ids(self, scope: ProfileScope) -> tuple[str, ...]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT data_json
@@ -1999,7 +2002,7 @@ class ExecutionStore:
         now_text = _dt(now)
         expiry = _dt(now + timedelta(seconds=self.settings.claim_seconds))
         claimed: list[ExecutionRequest] = []
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """
@@ -2054,7 +2057,7 @@ class ExecutionStore:
         run_id: str | None,
         error: str | None,
     ) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, request_id, token, fence, required="claimed")
             if target == "running":
@@ -2073,7 +2076,7 @@ class ExecutionStore:
             return current
 
     def _renew(self, request_id: str, token: str, fence: int, now: datetime) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, request_id, token, fence)
             expiry = now + timedelta(seconds=self.settings.claim_seconds)
@@ -2101,7 +2104,7 @@ class ExecutionStore:
         status: ExecutionStatus,
         error: str | None,
     ) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, request_id, token, fence)
             if before.status not in {"running", *_PARKED, "cancel_requested"}:
@@ -2144,7 +2147,7 @@ class ExecutionStore:
             return current
 
     def _cancel(self, request_id: str) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._required(connection, request_id)
             if before.status in _TERMINAL:
@@ -2204,7 +2207,7 @@ class ExecutionStore:
             return current
 
     def _retry(self, request_id: str, created_at: datetime) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             original = self._required(connection, request_id)
             if not is_retryable_execution_status(original.status):
@@ -2259,7 +2262,7 @@ class ExecutionStore:
         note: str,
         created_at: datetime,
     ) -> ExecutionRequest:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._required(connection, request_id)
             if before.status != "uncertain":
@@ -2290,7 +2293,7 @@ class ExecutionStore:
         now: datetime,
     ) -> list[ExecutionRequest]:
         recovered: list[ExecutionRequest] = []
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             held = connection.execute(
                 "SELECT * FROM execution_requests "
@@ -2381,7 +2384,7 @@ class ExecutionStore:
         return recovered
 
     def _counts(self, scope: ProfileScope) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM execution_requests").fetchall()
         counts: dict[str, int] = {}
         for row in rows:
@@ -2391,7 +2394,7 @@ class ExecutionStore:
         return counts
 
     def _prunable(self, scope: ProfileScope, keep: int, before: datetime) -> list[str]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_requests
@@ -2409,7 +2412,7 @@ class ExecutionStore:
         if not request_ids:
             return 0
         removed = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for request_id in request_ids:
                 row = connection.execute(
@@ -2444,7 +2447,7 @@ class ExecutionStore:
         return removed
 
     def _find_by_task(self, task_id: str, limit: int) -> list[ExecutionRequest]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_requests
@@ -2460,7 +2463,7 @@ class ExecutionStore:
         profile_scope: ProfileScope,
         limit: int,
     ) -> list[ExecutionActivity]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM execution_activities
@@ -2478,7 +2481,7 @@ class ExecutionStore:
         request_id: str,
         profile_scope: ProfileScope,
     ) -> list[ExecutionResolution]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM execution_resolutions WHERE request_id=? ORDER BY id",
                 (request_id,),

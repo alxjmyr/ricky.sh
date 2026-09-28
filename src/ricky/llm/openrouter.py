@@ -175,10 +175,14 @@ class OpenRouterProvider:
                         finished = True
                         break
                     chunk = loads_json_object(data, provider="OpenRouter")
+                    if "error" in chunk:
+                        _raise_stream_error(chunk["error"])
                     chunk_usage = _usage_from_chunk(chunk)
                     if chunk_usage is not None:
                         usage = chunk_usage
                     for choice in chunk.get("choices", []):
+                        if choice.get("finish_reason") == "error":
+                            raise ProviderError("OpenRouter stream terminated with an error")
                         stop_reason = choice.get("finish_reason") or stop_reason
                         delta = choice.get("delta") or {}
 
@@ -373,6 +377,21 @@ async def _raise_for_status(response: httpx.Response) -> None:
     if response.status_code >= 500:
         raise TransportError(error_message("OpenRouter server error", detail))
     raise ProviderError(error_message(f"OpenRouter HTTP {response.status_code}", detail))
+
+
+def _raise_stream_error(error: Any) -> None:
+    if not isinstance(error, dict):
+        raise ProviderError("OpenRouter stream error")
+    code = error.get("code")
+    message = error.get("message")
+    detail = message if isinstance(message, str) else ""
+    if code in (401, 403):
+        raise AuthError(error_message("OpenRouter authentication failed", detail))
+    if code == 429:
+        raise RateLimitError(error_message("OpenRouter rate limit exceeded", detail))
+    if code == "server_error" or (isinstance(code, int) and code >= 500):
+        raise TransportError(error_message("OpenRouter server error", detail))
+    raise ProviderError(error_message("OpenRouter stream error", detail))
 
 
 def _usage_from_chunk(chunk: dict[str, Any]) -> Usage | None:

@@ -182,3 +182,30 @@ and regression tests. Keep the lesson in the appropriate profile or the
 repository's current code and documentation. A new automatic learning or
 promotion subsystem needs its own approved contract; do not infer success from
 the model's assessment of its own answer.
+
+### Preserve ownership during cleanup
+
+A SQLite connection's context manager controls its transaction; it does not
+close the connection. For an owner that returns a raw `sqlite3.Connection`, use
+`with closing(owner._connect()) as connection, connection:` inside that owner.
+The transaction exits before the connection closes. Stores whose `_connect()`
+already yields through a context manager close it in `finally` instead. Keep
+these two patterns distinct, and test closure with retained connection references
+so garbage collection cannot hide leaks.
+
+Cancelling an `asyncio.to_thread()` await does not stop its worker. Checkpoint,
+media, and batch owners must wait for filesystem and database work to settle
+before releasing their lock or propagating cancellation. Test cancellation while
+the worker is blocked, including repeated cancellation, then inspect both the
+file and its durable record. Use unique temporary files for overlapping writes.
+
+An async generator that forwards another owned generator should close it when
+its consumer closes early. Start child tasks inside the cleanup boundary and
+cancel and join unfinished siblings if one fails. Cover early closure at a
+started-event boundary as well as cancellation during execution.
+
+Keep context catalog formatting proportional to the catalog size. Preserve
+bounded-output formatting and exact capability digests when optimizing discovery:
+stream resource hashes, and avoid scanning a bundle tree for a flat-file skill.
+Provider stream errors must remain errors even after HTTP success; retry only
+before output has become observable.

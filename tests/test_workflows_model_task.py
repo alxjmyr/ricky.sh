@@ -236,6 +236,74 @@ async def test_read_only_agent_uses_private_tool_transcript_and_validates_final_
     assert all(spec.name != "complete_step" for spec in provider.requests[0].tools)
 
 
+@pytest.mark.parametrize("cancel_owner", [False, True])
+async def test_agent_tool_batch_joins_children_on_failure_or_cancellation(
+    cancel_owner: bool,
+) -> None:
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+    children: list[asyncio.Task[object]] = []
+    provider = ScriptedProvider(
+        [
+            MessageDone(
+                message=Message(
+                    role="assistant",
+                    content=[
+                        ToolCallPart(id="blocked", name="reader", args={}),
+                        ToolCallPart(id="failure", name="reader", args={}),
+                    ],
+                )
+            )
+        ]
+    )
+
+    async def execute(call: ToolCallPart) -> ToolExecutionResult:
+        task = asyncio.current_task()
+        assert task is not None
+        children.append(task)
+        if call.id == "failure":
+            await started.wait()
+            if not cancel_owner:
+                raise RuntimeError("tool failed")
+            await asyncio.Event().wait()
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            cleaned.set()
+        raise AssertionError("blocked tool unexpectedly finished")
+
+    owner = asyncio.create_task(
+        run_agent_task(
+            provider=provider,
+            model="model",
+            instruction="Read.",
+            inputs={},
+            result_schema_name="classification",
+            result_schema=_schema(),
+            tools=[ToolSpec(name="reader", description="Read.", parameters={})],
+            execute_tool=execute,
+            max_iterations=1,
+            max_attempts=1,
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        if cancel_owner:
+            owner.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel_owner else RuntimeError):
+            await asyncio.wait_for(owner, timeout=2)
+        assert cleaned.is_set()
+        assert len(children) == 2
+        assert all(child.done() for child in children)
+    finally:
+        owner.cancel()
+        for child in children:
+            child.cancel()
+        await asyncio.gather(owner, *children, return_exceptions=True)
+
+
 async def test_model_task_cancellation_propagates() -> None:
     provider = ScriptedProvider([asyncio.CancelledError()])
 

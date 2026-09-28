@@ -643,3 +643,28 @@ async def test_handoff_recovery_inspection_uses_committed_source_evidence(
         await recovery.executions.get(held.id, scope=PROFILE_SCOPE)
     ).status == "awaiting_acknowledgement"
     assert await recovery.executions.claim(scope=PROFILE_SCOPE, worker_id="worker", limit=1) == []
+
+
+async def test_poller_recovery_cannot_delete_a_replacement_live_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = settings(tmp_path)
+    moment = datetime(2026, 8, 11, 12, tzinfo=UTC)
+    messaging = MessagingStore(config, clock=lambda: moment)
+    await messaging.initialize()
+    await messaging.acquire_poller("telegram", "personal", owner="dead", lease_seconds=1)
+    moment += timedelta(seconds=10)
+    original = messaging.stale_poller_leases
+
+    async def stale_then_replace(*, now=None):
+        observed = await original(now=now)
+        await messaging.acquire_poller("telegram", "personal", owner="fresh", lease_seconds=60)
+        return observed
+
+    monkeypatch.setattr(messaging, "stale_poller_leases", stale_then_replace)
+    plan = await GatewayRecovery(config, scope=PROFILE_SCOPE, messaging=messaging).apply(now=moment)
+
+    leases = await messaging.active_poller_leases(now=moment)
+    assert len(leases) == 1
+    assert leases[0].owner == "fresh"
+    assert not plan.by_subsystem("poller")[0].applied

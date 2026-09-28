@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -38,7 +39,6 @@ async def persist_batch(
     directory = store.root / "batches" / run_id
     path = directory / f"{batch_id}.json"
     content = payload.model_dump_json(indent=2).encode("utf-8")
-    await asyncio.to_thread(_exclusive_write, directory, path, content)
     batch = PersistedBatch(
         id=batch_id,
         run_id=run_id,
@@ -54,10 +54,26 @@ async def persist_batch(
         profile_label=profile_scope.label(),
         created_at=datetime.now(UTC),
     )
+
+    async def persist() -> None:
+        await asyncio.to_thread(_exclusive_write, directory, path, content)
+        try:
+            await store.insert_batch(batch, item_ids, scope=profile_scope)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    # The payload and ledger row form one owned operation. Cancelling a raw
+    # to_thread await can leave a committed row referring to a deleted payload.
+    operation = asyncio.create_task(persist())
     try:
-        await store.insert_batch(batch, item_ids, scope=profile_scope)
-    except BaseException:
-        path.unlink(missing_ok=True)
+        await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        while not operation.done():
+            with suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(operation)
+        with suppress(Exception):
+            operation.result()
         raise
     return batch
 
@@ -67,10 +83,14 @@ def _exclusive_write(directory: Path, path: Path, content: bytes) -> None:
     if os.name == "posix":
         directory.chmod(0o700)
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "wb") as handle:
-        handle.write(content)
-        handle.flush()
-        os.fsync(handle.fileno())
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 async def prune_batch_payloads(store: JobRunStore, *, scope: ProfileScope, keep: int) -> None:

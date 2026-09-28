@@ -125,3 +125,18 @@ the focused inspector tests rather than additional Chrome journeys.
 handoff through captured shell output, and cancellation/timeout after a shell
 leaves a child holding its pipes. These tests use controlled local child processes;
 Chrome rendering remains in `test_workflow_visualization_browser.py`.
+
+`test_automation_store_resources.py` and `test_conversation_store_connections.py`
+check connection lifetime and repeated cancellation at durable-store worker
+boundaries. Connections are retained through closure assertions so garbage
+collection cannot mask a leak. Controlled worker events verify that cancellation
+returns only after the worker settles; these cases do not need real browser or
+release environments. Workflow checkpoint, batch publication, schedule mutation,
+and session media tests separately inspect the resulting files and durable state.
+
+The headed Chrome setup tests close windows through an isolated Xvfb display.
+`test_window_close_probe_handles_only_vanished_window_errors` deliberately destroys
+a window after enumeration to verify the native close helper tolerates `BadWindow`
+without allowing Xlib to terminate pytest. It also injects `BadAtom` to prove that
+unexpected protocol errors still fail. The setup journeys retain normal Chrome
+exit, flushed login state, and browser-resource lease assertions.

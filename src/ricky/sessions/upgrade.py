@@ -353,7 +353,7 @@ class SessionsUpgradeAdapter:
             return
         if inspection.state != "migration_required":
             raise SessionsUpgradeError(inspection.detail)
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "ALTER TABLE turns ADD COLUMN background_handoffs TEXT NOT NULL DEFAULT '[]'"

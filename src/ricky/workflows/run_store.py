@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Literal
 
@@ -51,7 +52,18 @@ class WorkflowRunStore:
         """Write one atomic checkpoint without replacing a valid file on failure."""
 
         snapshot = run.model_copy(deep=True)
-        await asyncio.to_thread(self._save_sync, snapshot)
+        operation = asyncio.create_task(asyncio.to_thread(self._save_sync, snapshot))
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            # A thread cannot be cancelled. Settle its write before a caller
+            # checkpoints interruption, so the older snapshot cannot win later.
+            while not operation.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(operation)
+            with suppress(Exception):
+                operation.result()
+            raise
 
     async def load(
         self,
@@ -144,20 +156,20 @@ class WorkflowRunStore:
         root.mkdir(parents=True, exist_ok=True)
         root.chmod(0o700)
         target = self.path(run.id, run.storage_scope)
-        temporary = root / f".{run.id}.{os.getpid()}.tmp"
         lock_path = root / f".{run.id}.lock"
         payload = run.model_dump_json(indent=2).encode("utf-8")
-        try:
-            with _advisory_lock(lock_path):
-                with temporary.open("wb") as stream:
-                    os.chmod(temporary, 0o600)
+        with _advisory_lock(lock_path):
+            descriptor, name = tempfile.mkstemp(prefix=f".{run.id}.", suffix=".tmp", dir=root)
+            temporary = Path(name)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
                     stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
                 self._replace(temporary, target)
                 fsync_directory(root)
-        finally:
-            temporary.unlink(missing_ok=True)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     def _load_sync(
         self,

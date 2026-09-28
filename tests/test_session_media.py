@@ -7,6 +7,7 @@ from io import BytesIO
 
 import pytest
 from PIL import Image
+from pydantic import ValidationError
 
 from ricky.agent import AgentSession
 from ricky.agent.context import assemble_context
@@ -294,6 +295,79 @@ async def test_media_admission_cancellation_removes_completed_atomic_write(
 
     assert session.media == []
     assert not store.root.exists() or not any(store.root.iterdir())
+
+
+async def test_invalid_media_metadata_cannot_publish_an_orphan_file(tmp_path) -> None:
+    settings = _settings(tmp_path)
+    scope = settings.resolve_profile_scope()
+    session = AgentSession.create(settings, profile_scope=scope, provider="openrouter")
+    store = SessionMediaStore.create(settings, session.id)
+    with pytest.raises(ValidationError, match="provenance"):
+        await store.admit_png(
+            session,
+            content=_png(),
+            source_label=ProfileLabel.owned_by(scope.primary),
+            source_owner=scope.primary,
+            provenance="invalid metadata",
+            disclosure_class="explicit_provider",
+            admitted_provider="openrouter",
+        )
+    assert session.media == []
+    assert not store.root.exists()
+
+
+@pytest.mark.parametrize("operation", ["admit", "retention"])
+async def test_media_mutation_joins_worker_after_repeated_cancellation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    settings = _settings(tmp_path)
+    scope = settings.resolve_profile_scope()
+    session = AgentSession.create(settings, profile_scope=scope, provider="openrouter")
+    store = SessionMediaStore.create(settings, session.id)
+
+    async def admit():
+        return await store.admit_png(
+            session,
+            content=_png(),
+            source_label=ProfileLabel.owned_by(scope.primary),
+            source_owner=scope.primary,
+            provenance="synthetic_fixture",
+            disclosure_class="explicit_provider",
+            admitted_provider="openrouter",
+        )
+
+    if operation == "retention":
+        await admit()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    method = "_write_atomic" if operation == "admit" else "_remove_file"
+    original = getattr(store, method)
+
+    def blocked(*args):
+        loop.call_soon_threadsafe(started.set)
+        asyncio.run_coroutine_threadsafe(release.wait(), loop).result(timeout=5)
+        original(*args)
+
+    monkeypatch.setattr(store, method, blocked)
+    task = asyncio.create_task(
+        admit() if operation == "admit" else store.remove_retention(session, "runtime")
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        for _ in range(2):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+        assert session.media == []
+        assert not store.root.exists() or not any(store.root.iterdir())
+        assert not (tmp_path / "project-data").exists()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_media_reset_joins_namespace_deletion_before_rebinding_on_cancellation(

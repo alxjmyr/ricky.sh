@@ -179,3 +179,32 @@ def test_preflight_groups_shared_physical_store_and_dispatches_owner(
     assert alpha.applied == ["migrate"]
     assert beta.applied == []
     assert inspection.target == alpha_target
+
+
+def test_plan_rejects_steps_claiming_another_registered_owner(tmp_path: Path) -> None:
+    target = _target(tmp_path, "beta", "beta", tmp_path / "shared.sqlite3")
+    registry = UpgradeRegistry(
+        (
+            _Adapter("alpha", (), (_step("beta", "migrate", target),)),
+            _Adapter("beta", (target,)),
+        )
+    )
+    with pytest.raises(ValueError, match="step owned by another adapter"):
+        registry.build_plan(source_data_generation=1, target_data_generation=1)
+
+
+@pytest.mark.parametrize("operation", ["inspect_step", "verify_step"])
+@pytest.mark.parametrize("invalid_discovery", ["wrong_owner", "duplicate"])
+def test_recovery_revalidates_discovered_target_ownership(
+    tmp_path: Path, operation: str, invalid_discovery: str
+) -> None:
+    target = _target(tmp_path, "alpha", "data", tmp_path / "shared.sqlite3")
+    step = _step("alpha", "migrate", target)
+    targets = (
+        (target.model_copy(update={"adapter_id": "beta"}),)
+        if invalid_discovery == "wrong_owner"
+        else (target, target)
+    )
+    registry = UpgradeRegistry((_Adapter("alpha", targets, (step,)),))
+    with pytest.raises(ValueError, match="wrong adapter|duplicate target identity"):
+        getattr(registry, operation)(step, user_data_dir=tmp_path)

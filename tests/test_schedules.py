@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import json
 import os
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -476,6 +477,45 @@ async def test_schedule_store_atomic_crud_modes_and_concurrency(tmp_path: Path) 
     assert (await store.get(first.id)).cron == "0 9 * * 1"
     assert (await store.remove(second.id)).id == second.id
     assert "[[schedules]]" in store.path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("mutation", ["create", "replace", "remove"])
+async def test_schedule_mutation_cancellation_joins_writer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    settings = _settings(tmp_path)
+    store = ScheduleStore(settings, scope=_scope(settings))
+    schedule = _schedule(tmp_path)
+    if mutation != "create":
+        await store.create(schedule)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    write = store._write_sync
+
+    def blocked_write(schedules: list[ScheduleSpec]) -> None:
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "schedule writer was not released"
+        write(schedules)
+
+    monkeypatch.setattr(store, "_write_sync", blocked_write)
+    if mutation == "remove":
+        operation = asyncio.create_task(store.remove(schedule.id))
+    elif mutation == "replace":
+        schedule = schedule.model_copy(update={"enabled": False})
+        operation = asyncio.create_task(store.replace(schedule))
+    else:
+        operation = asyncio.create_task(store.create(schedule))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        operation.cancel()
+        await asyncio.sleep(0)
+        assert not operation.done()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+    assert await store.list() == ([] if mutation == "remove" else [schedule])
 
 
 @pytest.mark.asyncio

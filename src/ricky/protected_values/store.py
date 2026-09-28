@@ -8,7 +8,7 @@ import json
 import os
 import sqlite3
 from collections.abc import Callable, Mapping
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
@@ -303,8 +303,13 @@ class ProfileVaultStore:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            with suppress(Exception):
-                await asyncio.shield(task)
+            # A thread cannot be cancelled. Repeated owner cancellation must
+            # still wait for publication/transaction completion before returning.
+            while not task.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(task)
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
             raise
         except ProtectedValueStoreError:
             raise
@@ -353,7 +358,7 @@ class ProfileVaultStore:
 
         inspect_protected_values_store(self.path, allow_supported_old=False)
         uri = self.path.resolve().as_uri() + "?mode=ro"
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection, connection:
             connection.row_factory = sqlite3.Row
             row = connection.execute("SELECT profile FROM vault_header WHERE id = 1").fetchone()
         if row is None or row["profile"] != self.profile:
@@ -440,7 +445,7 @@ class ProfileVaultStore:
             raise VaultNotInitializedError(
                 f"protected-value vault is not initialized for profile {self.profile}"
             )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             header = connection.execute("SELECT * FROM vault_header WHERE id = 1").fetchone()
             slot = connection.execute(
                 "SELECT * FROM unlock_slots WHERE id = 'interactive-passphrase'"
@@ -464,7 +469,7 @@ class ProfileVaultStore:
         salt = os.urandom(16)
         parameters = self._configured_kdf_parameters()
         wrapped = self._wrap_key(data_key, passphrase, salt, parameters=parameters)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -608,7 +613,7 @@ class ProfileVaultStore:
 
     def _list(self, limit: int, kind: ProtectedValueKind | None) -> list[ProtectedValueDescriptor]:
         self._require_initialized_sync()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if kind is None:
                 rows = connection.execute(
                     "SELECT * FROM protected_resources ORDER BY profile, name LIMIT ?",
@@ -626,14 +631,14 @@ class ProfileVaultStore:
 
     def _count(self) -> int:
         self._require_initialized_sync()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute("SELECT count(*) FROM protected_resources").fetchone()
         assert row is not None
         return int(row[0])
 
     def _get(self, name: str) -> ProtectedValueDescriptor | None:
         self._require_initialized_sync()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM protected_resources WHERE name = ?", (name,)
             ).fetchone()
@@ -642,7 +647,7 @@ class ProfileVaultStore:
     def _create(
         self, descriptor: ProtectedValueDescriptor, payload: bytes
     ) -> ProtectedValueDescriptor:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 connection.execute(
@@ -664,7 +669,7 @@ class ProfileVaultStore:
     def _replace(
         self, descriptor: ProtectedValueDescriptor, expected_revision: int, payload: bytes
     ) -> ProtectedValueDescriptor:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -693,7 +698,7 @@ class ProfileVaultStore:
         return descriptor
 
     def _delete(self, name: str, expected_revision: int) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 "DELETE FROM protected_resources WHERE name = ? AND revision = ?",
@@ -704,7 +709,7 @@ class ProfileVaultStore:
             connection.commit()
 
     def _payload(self, name: str, revision: int) -> bytes:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT payload FROM protected_resources WHERE name = ? AND revision = ?",
                 (name, revision),
@@ -714,7 +719,7 @@ class ProfileVaultStore:
         return bytes(row["payload"])
 
     def _approve(self, approval: ProtectedDestinationApproval) -> ProtectedDestinationApproval:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
@@ -735,7 +740,7 @@ class ProfileVaultStore:
         return approval
 
     def _revoke_approval(self, name: str, top_origin: str, frame_origin: str) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -748,7 +753,7 @@ class ProfileVaultStore:
         return cursor.rowcount == 1
 
     def _approvals(self, ref: ProfileResourceRef, limit: int) -> list[ProtectedDestinationApproval]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """
                 SELECT * FROM destination_approvals
@@ -768,7 +773,7 @@ class ProfileVaultStore:
         ]
 
     def _is_approved(self, name: str, top_origin: str, frame_origin: str) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """
                 SELECT 1 FROM destination_approvals
@@ -783,7 +788,7 @@ class ProfileVaultStore:
         record: ProtectedUseRecord,
         materialization_limit: int | None,
     ) -> ProtectedUseRecord:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT revision, enabled FROM protected_resources WHERE name = ?",
@@ -836,7 +841,7 @@ class ProfileVaultStore:
     def _finalize(self, record: ProtectedUseRecord, disposition: str) -> ProtectedUseRecord:
         finalized = record.model_copy(update={"disposition": disposition, "finalized_at": _now()})
         assert finalized.finalized_at is not None
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
@@ -851,7 +856,7 @@ class ProfileVaultStore:
         return ProtectedUseRecord.model_validate(finalized.model_dump(), strict=True)
 
     def _uses(self, limit: int) -> list[ProtectedUseRecord]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM protected_uses ORDER BY created_at DESC, id DESC LIMIT ?",
                 (limit,),
@@ -877,7 +882,7 @@ class ProfileVaultStore:
         record: ProtectedCommitRecord,
         commit_limit: int,
     ) -> ProtectedCommitRecord:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT revision, enabled FROM protected_resources WHERE name = ?",
@@ -935,7 +940,7 @@ class ProfileVaultStore:
     ) -> ProtectedCommitRecord:
         finalized = record.model_copy(update={"disposition": disposition, "finalized_at": _now()})
         assert finalized.finalized_at is not None
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """

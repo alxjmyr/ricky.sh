@@ -134,15 +134,21 @@ class MemoryStore:
         if limit < 1:
             raise ValueError("memory index character limit must be positive")
 
+        lines = self._index_lines(entries)
+        rendered_length = sum(map(len, lines)) + len(lines) - 1
         for included in range(len(entries), -1, -1):
-            lines = self._index_lines(entries[:included])
+            marker = None
             if included < len(entries):
                 dropped = len(entries) - included
                 noun = "entry" if dropped == 1 else "entries"
-                lines.append(f"[{dropped} catalog {noun} omitted; use recall.]")
-            rendered = "\n".join(lines)
-            if len(rendered) <= limit:
-                return rendered
+                marker = f"[{dropped} catalog {noun} omitted; use recall.]"
+            candidate_length = rendered_length + (len(marker) + 1 if marker else 0)
+            if candidate_length <= limit:
+                return "\n".join([*lines, marker] if marker else lines)
+            if included:
+                rendered_length -= len(lines.pop()) + 1
+                if included == 1 or entries[included - 2].type != entries[included - 1].type:
+                    rendered_length -= len(lines.pop()) + 1
 
         marker = f"[{len(entries)} catalog entries omitted; use recall.]"
         return marker[:limit]

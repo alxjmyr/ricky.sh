@@ -260,7 +260,14 @@ async def run_agent_task(
         calls = [part for part in message.content if isinstance(part, ToolCallPart)]
         if calls:
             messages.append(message)
-            results = await asyncio.gather(*(execute_tool(call) for call in calls))
+            tasks = [asyncio.ensure_future(execute_tool(call)) for call in calls]
+            try:
+                results = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             for call, result in zip(calls, results, strict=True):
                 messages.append(
                     Message(

@@ -12,6 +12,7 @@ import pytest
 
 from ricky.config import MemorySettings, RickySettings
 from ricky.memory import MemoryStore, memory_note_counts
+from ricky.memory import store as memory_store
 from ricky.memory.types import MemoryNoteInput, NoteType
 from ricky.profiles import ProfileName, ProfileScope
 
@@ -376,6 +377,54 @@ def test_truncation_marker_counts_every_entry_removed_to_make_it_fit(
             following_group = lines[line_index + 1 :]
             assert following_group and following_group[0].startswith("- ")
     assert saw_marker
+
+
+@pytest.mark.parametrize("note_types", [["topic"], ["account", "account", "org", "topic"]])
+def test_index_matches_original_format_at_every_character_budget(
+    tmp_path: Path, note_types: list[NoteType]
+) -> None:
+    store = MemoryStore.create(_settings(tmp_path), scope=_scope())
+    for index, note_type in enumerate(note_types):
+        store.write(
+            _input(slug=f"entry-{index}", profile="personal", body="body", note_type=note_type)
+        )
+    entries = store.catalog()
+    full = store.render_index(10_000)
+    assert full is not None
+    for limit in range(1, len(full) + 2):
+        expected = f"[{len(entries)} catalog entries omitted; use recall.]"[:limit]
+        for included in range(len(entries), -1, -1):
+            lines = store._index_lines(entries[:included])
+            dropped = len(entries) - included
+            if dropped:
+                noun = "entry" if dropped == 1 else "entries"
+                lines.append(f"[{dropped} catalog {noun} omitted; use recall.]")
+            candidate = "\n".join(lines)
+            if len(candidate) <= limit:
+                expected = candidate
+                break
+        assert store.render_index(limit) == expected
+
+
+def test_bounded_index_formats_each_catalog_entry_only_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = MemoryStore.create(_settings(tmp_path), scope=_scope())
+    for index in range(20):
+        store.write(_input(slug=f"entry-{index}", profile="personal", body="body"))
+    calls = 0
+    original = memory_store._catalog_line
+
+    def counted(entry: memory_store.MemoryCatalogEntry) -> str:
+        nonlocal calls
+        calls += 1
+        return original(entry)
+
+    monkeypatch.setattr(memory_store, "_catalog_line", counted)
+    rendered = store.render_index(200)
+    assert rendered is not None and len(rendered) <= 200
+    assert "omitted" in rendered
+    assert calls == 20
 
 
 def test_read_only_counts_do_not_create_roots_and_store_avoids_project_data(

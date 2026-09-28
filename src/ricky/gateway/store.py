@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from collections.abc import Callable, Sequence
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -243,7 +243,7 @@ class GatewayStore:
         response_outbox_id: str,
     ) -> GatewayInboundResult:
         now = self._now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT result_json FROM gateway_inbound_results WHERE message_id = ?",
@@ -423,8 +423,13 @@ class GatewayStore:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            with suppress(Exception):
-                await asyncio.shield(task)
+            # A thread cannot be cancelled. Repeated owner cancellation must
+            # still wait for publication/transaction completion before returning.
+            while not task.done():
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(task)
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
             raise
         except GatewayStoreError:
             raise
@@ -448,7 +453,7 @@ class GatewayStore:
         create_current_gateway_store(self.db_path)
 
     def _create(self, conversation: Conversation) -> Conversation:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             try:
                 connection.execute(
                     """INSERT INTO conversations(
@@ -473,7 +478,7 @@ class GatewayStore:
         return conversation
 
     def _get(self, conversation_id: str, scope: ProfileScope) -> Conversation:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone()
@@ -488,7 +493,7 @@ class GatewayStore:
         key: ConversationKey,
         scope: ProfileScope,
     ) -> Conversation | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """SELECT * FROM conversations
                    WHERE key_digest = ? AND status = 'active'""",
@@ -508,7 +513,7 @@ class GatewayStore:
         inbound_message_id: str,
         scope: ProfileScope,
     ) -> Conversation | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT * FROM conversations
                    WHERE key_digest = ? AND status = 'archived'
@@ -530,7 +535,7 @@ class GatewayStore:
         limit: int,
         scope: ProfileScope,
     ) -> list[Conversation]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             if status is None:
                 rows = connection.execute(
                     """SELECT * FROM conversations
@@ -585,7 +590,7 @@ class GatewayStore:
         scope: ProfileScope,
     ) -> Conversation:
         now = self._now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
@@ -621,7 +626,7 @@ class GatewayStore:
         return changed
 
     def _begin_result(self, result: GatewayInboundResult) -> GatewayInboundResult:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             conversation_row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?",
                 (result.conversation_id,),
@@ -658,7 +663,7 @@ class GatewayStore:
         message_id: str,
         scope: ProfileScope,
     ) -> GatewayInboundResult | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT result_json FROM gateway_inbound_results WHERE message_id = ?",
                 (message_id,),
@@ -682,7 +687,7 @@ class GatewayStore:
         scope: ProfileScope,
     ) -> tuple[Conversation, GatewayInboundResult]:
         now = self._now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             conversation_row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
@@ -755,7 +760,7 @@ class GatewayStore:
         limit: int,
         scope: ProfileScope,
     ) -> list[GatewayInboundResult]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             conversation_row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone()
@@ -771,7 +776,7 @@ class GatewayStore:
             return [self._result(row["result_json"]) for row in rows]
 
     def _running_results(self, scope: ProfileScope) -> list[GatewayInboundResult]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT result_json FROM gateway_inbound_results
                    WHERE status = 'running' ORDER BY started_at, message_id"""
@@ -786,7 +791,7 @@ class GatewayStore:
         scope: ProfileScope,
     ) -> tuple[Conversation, GatewayInboundResult]:
         now = self._now()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             result_row = connection.execute(
                 """SELECT result_json, status, conversation_id FROM gateway_inbound_results
@@ -839,7 +844,7 @@ class GatewayStore:
         return changed, result
 
     def _result_counts(self, scope: ProfileScope) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT result_json FROM gateway_inbound_results").fetchall()
         counts: dict[str, int] = {}
         for row in rows:
@@ -850,7 +855,7 @@ class GatewayStore:
         return counts
 
     def _conversation_counts(self, scope: ProfileScope) -> dict[str, int]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute("SELECT * FROM conversations").fetchall()
         counts: dict[str, int] = {}
         for row in rows:
@@ -866,7 +871,7 @@ class GatewayStore:
         before: datetime,
         scope: ProfileScope,
     ) -> list[str]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT message_id, result_json FROM gateway_inbound_results
                    WHERE status = 'committed' AND finished_at IS NOT NULL AND finished_at < ?
@@ -888,7 +893,7 @@ class GatewayStore:
         if not message_ids:
             return 0
         removed = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for message_id in message_ids:
                 row = connection.execute(
@@ -912,7 +917,7 @@ class GatewayStore:
         before: datetime,
         scope: ProfileScope,
     ) -> list[str]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT c.* FROM conversations c
                    WHERE c.status = 'archived' AND c.updated_at < ?
@@ -937,7 +942,7 @@ class GatewayStore:
         if not conversation_ids:
             return 0
         removed = 0
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             for conversation_id in conversation_ids:
                 conversation_row = connection.execute(
@@ -980,7 +985,7 @@ class GatewayStore:
         conversation_id: str,
         profile_label: ProfileLabel,
     ) -> Conversation:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM conversations WHERE id = ?", (conversation_id,)
             ).fetchone()

@@ -22,6 +22,7 @@ from ricky.llm.types import (
     ImagePart,
     MediaArtifactRef,
     Message,
+    ProviderError,
     RateLimitError,
     TextDelta,
     TextPart,
@@ -502,3 +503,62 @@ async def test_malformed_stream_raises_transport_error() -> None:
             await collect(
                 provider.stream(CompletionRequest(model="m", messages=[Message.text("user", "hi")]))
             )
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_error", "attempts_expected"),
+    [
+        ({"code": 401, "message": "denied"}, AuthError, 1),
+        ({"code": 429, "message": "limited"}, RateLimitError, 2),
+        ({"code": 503, "message": "unavailable"}, TransportError, 2),
+        ({"code": "server_error", "message": "disconnected"}, TransportError, 2),
+        ({"code": 402, "message": "credits exhausted"}, ProviderError, 1),
+        (None, ProviderError, 1),
+    ],
+)
+async def test_stream_error_before_output_is_classified_and_never_completes(
+    error: object, expected_error: type[ProviderError], attempts_expected: int
+) -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, content=_sse({"error": error}))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenRouterProvider(
+            _settings(), client=client, max_retries=2, retry_base_seconds=0
+        )
+        with pytest.raises(expected_error):
+            await collect(provider.stream(CompletionRequest(model="m", messages=[])))
+    assert attempts == attempts_expected
+
+
+@pytest.mark.parametrize("include_error", [True, False])
+async def test_stream_reported_failure_after_output_never_replays_or_completes(
+    include_error: bool,
+) -> None:
+    attempts = 0
+    failure: dict[str, Any] = {"choices": [{"delta": {}, "finish_reason": "error"}]}
+    if include_error:
+        failure["error"] = {"code": "server_error", "message": "disconnected"}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            content=_sse({"choices": [{"delta": {"content": "partial"}}]}, failure),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenRouterProvider(
+            _settings(), client=client, max_retries=3, retry_base_seconds=0
+        )
+        events = []
+        with pytest.raises(ProviderError):
+            async for event in provider.stream(CompletionRequest(model="m", messages=[])):
+                events.append(event)
+    assert events == [TextDelta(delta="partial")]
+    assert attempts == 1

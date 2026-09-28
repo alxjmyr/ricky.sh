@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import stat
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from authority_support import COMPLETE_CONSTRAINTS, grant_source, settings
 from ricky.authority.store import (
     AuthorityStore,
+    AuthorityStoreError,
     GrantNotFoundError,
     GrantStateError,
 )
@@ -62,6 +64,23 @@ async def test_issue_read_and_list_round_trip(tmp_path: Path) -> None:
     assert await store.list(scope=SCOPE, status="revoked") == []
     with pytest.raises(GrantNotFoundError):
         await store.get("grant_" + "f" * 32, scope=SCOPE)
+
+
+async def test_failed_issue_rolls_back_before_releasing_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = await _store(tmp_path)
+
+    def fail_activity(*args: object) -> None:
+        raise sqlite3.OperationalError("injected activity failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_append", fail_activity)
+        with pytest.raises(AuthorityStoreError, match="authority store operation failed"):
+            await store.issue(_grant(), scope=SCOPE)
+    assert await store.list(scope=SCOPE) == []
+    grant = await store.issue(_grant(), scope=SCOPE)
+    assert await store.get(grant.id, scope=SCOPE) == grant
 
 
 async def test_issue_records_activity_and_every_use_is_inspectable(tmp_path: Path) -> None:

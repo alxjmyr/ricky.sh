@@ -341,6 +341,11 @@ class GatewayRecovery:
 
         actions: list[RecoveryAction] = []
         for stale in await self.messaging.stale_poller_leases(now=now):
+            applied = False
+            if apply_changes:
+                applied = await self.messaging.clear_poller_lease(
+                    stale.transport, stale.account, expected_lease=stale, now=now
+                )
             actions.append(
                 RecoveryAction(
                     subsystem="poller",
@@ -349,11 +354,9 @@ class GatewayRecovery:
                     to_state="free",
                     disposition="released",
                     reason=_POLLER_SAFE,
-                    applied=apply_changes,
+                    applied=applied,
                 )
             )
-            if apply_changes:
-                await self.messaging.clear_poller_lease(stale.transport, stale.account)
         return actions
 
     async def _recover_foreground_turns(

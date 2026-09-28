@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
@@ -333,8 +333,11 @@ class BrowserRunLedger:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
+            while not task.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(task)
             with suppress(Exception):
-                await asyncio.shield(task)
+                task.result()
             raise
         except (OSError, sqlite3.Error) as exc:
             raise JobStoreError(f"browser run ledger failed: {exc}") from exc
@@ -384,7 +387,7 @@ class BrowserRunLedger:
             started_at=now,
             updated_at=now,
         )
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
                 "SELECT outcome, trigger, trigger_id, profile_scope_json FROM job_runs WHERE id=?",
@@ -434,7 +437,7 @@ class BrowserRunLedger:
         return BrowserAttemptLease(attempt=attempt, owner_token=owner_token)
 
     def _get_attempt(self, attempt_id: str) -> BrowserAttempt | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM browser_attempts AS a
                 JOIN job_runs AS r ON r.id=a.run_id WHERE a.id=?""",
@@ -443,7 +446,7 @@ class BrowserRunLedger:
         return _row_to_attempt(row) if row is not None else None
 
     def _attempts_for_run(self, run_id: str) -> list[BrowserAttempt]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM browser_attempts AS a
                 JOIN job_runs AS r ON r.id=a.run_id
@@ -453,7 +456,7 @@ class BrowserRunLedger:
         return [_row_to_attempt(row) for row in rows]
 
     def _active_attempts(self, scope: ProfileScope) -> list[BrowserAttempt]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM browser_attempts AS a
                 JOIN job_runs AS r ON r.id=a.run_id
@@ -467,7 +470,7 @@ class BrowserRunLedger:
         ]
 
     def _has_ambiguous_effect_evidence(self, attempt_id: str) -> bool:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             return self._effect_evidence(connection, attempt_id)
 
     def _recover_lost_attempt(
@@ -476,7 +479,7 @@ class BrowserRunLedger:
         reason: str,
         now: datetime,
     ) -> BrowserAttempt:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._joined_attempt(connection, attempt_id)
             if before["status"] in _TERMINAL:
@@ -505,7 +508,7 @@ class BrowserRunLedger:
         error: str | None,
         now: datetime,
     ) -> BrowserAttempt:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, attempt_id, owner_token, claim_fence)
             if before["status"] in _TERMINAL:
@@ -543,7 +546,7 @@ class BrowserRunLedger:
         claim_fence: int,
         now: datetime,
     ) -> BrowserBudgetUsage:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, attempt_id, owner_token, claim_fence)
             if before["status"] not in {"starting", "running"}:
@@ -585,7 +588,7 @@ class BrowserRunLedger:
     ) -> BrowserBudgetUsage:
         if operation not in _LIVE_BUDGETS:
             raise JobStoreError("only live browser resource budgets can be released")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._fenced(connection, attempt_id, owner_token, claim_fence)
             cursor = connection.execute(
@@ -614,7 +617,7 @@ class BrowserRunLedger:
         claim_fence: int,
         now: datetime,
     ) -> BrowserBudgetReservation:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, attempt_id, owner_token, claim_fence)
             if before["status"] != "running":
@@ -663,7 +666,7 @@ class BrowserRunLedger:
         return reservation
 
     def _reservation_attempt(self, reservation_id: str) -> str:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT attempt_id FROM browser_budget_reservations WHERE id=?",
                 (reservation_id,),
@@ -681,7 +684,7 @@ class BrowserRunLedger:
         claim_fence: int,
         now: datetime,
     ) -> BrowserBudgetReservation:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT * FROM browser_budget_reservations WHERE id=?",
@@ -725,7 +728,7 @@ class BrowserRunLedger:
         return _row_to_budget_reservation(current)
 
     def _budget_usage(self, attempt_id: str) -> list[BrowserBudgetUsage]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT * FROM browser_attempt_budgets
                 WHERE attempt_id=? ORDER BY operation""",
@@ -739,7 +742,7 @@ class BrowserRunLedger:
         owner_token: str,
         claim_fence: int,
     ) -> BrowserNavigationCheckpoint:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, checkpoint.attempt_id, owner_token, claim_fence)
             if before["status"] != "running":
@@ -768,7 +771,7 @@ class BrowserRunLedger:
         owner_token: str,
         claim_fence: int,
     ) -> BrowserActionEvidence:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             before = self._fenced(connection, evidence.attempt_id, owner_token, claim_fence)
             if before["status"] not in {"running", "parked"}:
@@ -811,7 +814,7 @@ class BrowserRunLedger:
         return evidence.model_copy(update={"id": evidence_id})
 
     def _action_evidence(self, attempt_id: str) -> list[BrowserActionEvidence]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 """SELECT * FROM browser_action_evidence
                 WHERE attempt_id=? ORDER BY id""",
@@ -821,7 +824,7 @@ class BrowserRunLedger:
 
     def _recover_orphaned(self, scope: ProfileScope, now: datetime) -> list[BrowserAttempt]:
         recovered: list[BrowserAttempt] = []
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 """SELECT a.*, r.profile_scope_json FROM browser_attempts AS a

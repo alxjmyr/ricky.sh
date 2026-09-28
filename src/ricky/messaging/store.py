@@ -264,10 +264,21 @@ class MessagingStore:
 
         return await self._run(self._active_poller_leases, now)
 
-    async def clear_poller_lease(self, transport: str, account: str) -> bool:
-        """Delete one expired poller lease. Returns False when it was already gone."""
+    async def clear_poller_lease(
+        self,
+        transport: str,
+        account: str,
+        *,
+        expected_lease: PollerLeaseRecord | None = None,
+        now: datetime | None = None,
+    ) -> bool:
+        """Delete an expired lease only if it still matches the inspected occurrence.
 
-        return await self._run(self._clear_poller_lease, transport, account)
+        Without an expected lease, expiration is still checked atomically. Returns
+        False for an absent, live, or replaced lease.
+        """
+
+        return await self._run(self._clear_poller_lease, transport, account, expected_lease, now)
 
     async def inbox_counts(self) -> dict[str, int]:
         """Count inbox messages by status without loading any message body."""
@@ -311,7 +322,13 @@ class MessagingStore:
             try:
                 return await asyncio.shield(task)
             except asyncio.CancelledError:
-                await task
+                # A thread cannot be cancelled. Repeated owner cancellation must
+                # still wait for publication/transaction completion before returning.
+                while not task.done():
+                    with suppress(asyncio.CancelledError, Exception):
+                        await asyncio.shield(task)
+                with suppress(asyncio.CancelledError, Exception):
+                    task.result()
                 raise
         except MessagingStoreError:
             raise
@@ -846,12 +863,27 @@ class MessagingStore:
             for row in rows
         ]
 
-    def _clear_poller_lease(self, transport: str, account: str) -> bool:
-        with self._connect() as connection, self._transaction(connection):
-            cursor = connection.execute(
-                "DELETE FROM poller_leases WHERE transport = ? AND account = ?",
-                (transport, account),
+    def _clear_poller_lease(
+        self,
+        transport: str,
+        account: str,
+        expected_lease: PollerLeaseRecord | None,
+        now: datetime | None,
+    ) -> bool:
+        moment = now or self._now()
+        query = "DELETE FROM poller_leases WHERE transport = ? AND account = ? AND expires_at <= ?"
+        parameters: tuple[object, ...] = (transport, account, _iso(moment))
+        if expected_lease is not None:
+            if expected_lease.transport != transport or expected_lease.account != account:
+                return False
+            query += " AND owner = ? AND fence = ? AND expires_at = ?"
+            parameters += (
+                expected_lease.owner,
+                expected_lease.fence,
+                _iso(expected_lease.expires_at),
             )
+        with self._connect() as connection, self._transaction(connection):
+            cursor = connection.execute(query, parameters)
             return cursor.rowcount == 1
 
     def _inbox_counts(self) -> dict[str, int]:

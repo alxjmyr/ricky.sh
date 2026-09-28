@@ -290,7 +290,14 @@ class SlackClient:
         wanted: list[ChannelKind] = list(dict.fromkeys(requested))
         missing: list[ChannelKind] = [kind for kind in wanted if kind not in self._channels_cache]
         if missing:
-            fetched = await asyncio.gather(*(self._fetch_kind(kind) for kind in missing))
+            tasks = [asyncio.create_task(self._fetch_kind(kind)) for kind in missing]
+            try:
+                fetched = await asyncio.gather(*tasks)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             for kind, (items, truncated) in zip(missing, fetched, strict=True):
                 self._channels_cache[kind] = items
                 self._channels_truncated[kind] = truncated

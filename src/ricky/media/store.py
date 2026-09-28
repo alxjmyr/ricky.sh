@@ -40,8 +40,8 @@ class SessionMediaLimitError(SessionMediaError):
     """A media operation exceeds a configured storage or request ceiling."""
 
 
-async def _join_namespace_deletion(operation: asyncio.Task[None]) -> bool:
-    """Join filesystem deletion while deferring cancellation of its owner."""
+async def _join_filesystem_operation(operation: asyncio.Task[None]) -> bool:
+    """Join filesystem work while deferring cancellation of its owner."""
 
     interrupted = False
     while not operation.done():
@@ -116,18 +116,6 @@ class SessionMediaStore:
 
             media_id = f"media_{uuid4().hex}"
             relative_path = f"{media_id}.png"
-            operation = asyncio.create_task(
-                asyncio.to_thread(self._write_atomic, relative_path, content)
-            )
-            try:
-                await asyncio.shield(operation)
-            except asyncio.CancelledError:
-                with suppress(Exception):
-                    await asyncio.shield(operation)
-                with suppress(Exception):
-                    await asyncio.to_thread(self._remove_file, relative_path)
-                raise
-
             record = SessionMediaRecord(
                 id=media_id,
                 media_type="image/png",
@@ -145,6 +133,15 @@ class SessionMediaStore:
                     source_owner=source_owner,
                 ),
             )
+            operation = asyncio.create_task(
+                asyncio.to_thread(self._write_atomic, relative_path, content)
+            )
+            interrupted = await _join_filesystem_operation(operation)
+            if interrupted:
+                cleanup = asyncio.create_task(asyncio.to_thread(self._remove_file, relative_path))
+                await _join_filesystem_operation(cleanup)
+                raise asyncio.CancelledError
+
             try:
                 session.media.append(record)
             except BaseException:
@@ -218,7 +215,7 @@ class SessionMediaStore:
             if len(session.media) + len(records) > 1_000:
                 raise SessionMediaLimitError("session media manifest is full; start a new chat")
             operation = asyncio.create_task(asyncio.to_thread(write_batch))
-            interrupted = await _join_namespace_deletion(operation)
+            interrupted = await _join_filesystem_operation(operation)
             if interrupted:
                 for record in records:
                     self._remove_file(record.relative_path)
@@ -239,7 +236,7 @@ class SessionMediaStore:
                 self._remove_empty_namespace()
 
             operation = asyncio.create_task(asyncio.to_thread(remove))
-            interrupted = await _join_namespace_deletion(operation)
+            interrupted = await _join_filesystem_operation(operation)
             session.media = [record for record in session.media if record.id not in ids]
             if interrupted:
                 raise asyncio.CancelledError
@@ -310,18 +307,25 @@ class SessionMediaStore:
         self._require_session(session)
         async with self._lock:
             removed = [record for record in session.media if record.retention == retention]
-            for record in removed:
-                await asyncio.to_thread(self._remove_file, record.relative_path)
+
+            def remove() -> None:
+                for record in removed:
+                    self._remove_file(record.relative_path)
+                self._remove_empty_namespace()
+
+            operation = asyncio.create_task(asyncio.to_thread(remove))
+            interrupted = await _join_filesystem_operation(operation)
             removed_ids = {record.id for record in removed}
             session.media = [record for record in session.media if record.id not in removed_ids]
-            await asyncio.to_thread(self._remove_empty_namespace)
+            if interrupted:
+                raise asyncio.CancelledError
 
     async def remove_all(self, session: AgentSession) -> None:
         """Remove this validated session media namespace and clear its manifest."""
         self._require_session(session)
         async with self._lock:
             operation = asyncio.create_task(asyncio.to_thread(self._remove_all_sync))
-            interrupted = await _join_namespace_deletion(operation)
+            interrupted = await _join_filesystem_operation(operation)
             session.media = []
             if interrupted:
                 raise asyncio.CancelledError
@@ -333,7 +337,7 @@ class SessionMediaStore:
             raise ValueError("invalid session id for media storage")
         async with self._lock:
             operation = asyncio.create_task(asyncio.to_thread(self._remove_all_sync))
-            interrupted = await _join_namespace_deletion(operation)
+            interrupted = await _join_filesystem_operation(operation)
             session.media = []
             self._bind(new_session_id)
             if interrupted:

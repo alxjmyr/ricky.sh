@@ -77,20 +77,20 @@ class UpgradeRegistry:
         supported = set(SUPPORTED_DATA_GENERATIONS)
         if source_data_generation not in supported or target_data_generation not in supported:
             raise ValueError("upgrade registry does not support the requested data generation")
-        discovered_steps = tuple(
-            step
-            for adapter in self._adapters
-            for step in adapter.plan_steps(
+        discovered: list[MigrationStep] = []
+        for adapter in self._adapters:
+            steps = adapter.plan_steps(
                 source_data_generation=source_data_generation,
                 target_data_generation=target_data_generation,
             )
-        )
-        adapter_ids = {adapter.adapter_id for adapter in self._adapters}
-        mismatched = sorted({step.adapter_id for step in discovered_steps} - adapter_ids)
-        if mismatched:
-            raise ValueError(
-                "upgrade adapter returned a step owned by another adapter: " + ", ".join(mismatched)
-            )
+            mismatched = sorted({step.adapter_id for step in steps} - {adapter.adapter_id})
+            if mismatched:
+                raise ValueError(
+                    "upgrade adapter returned a step owned by another adapter: "
+                    + ", ".join(mismatched)
+                )
+            discovered.extend(steps)
+        discovered_steps = tuple(discovered)
         if source_data_generation != target_data_generation and not discovered_steps:
             raise ValueError("no migration path exists for the requested data-generation change")
         steps = _topological_steps(discovered_steps)
@@ -217,10 +217,13 @@ class UpgradeRegistry:
         user_data_dir: Path,
     ) -> tuple[UpgradeAdapter, AdapterTarget]:
         adapter = self._adapter(step.adapter_id)
-        targets = {
-            target.target_id: target
-            for target in adapter.discover(user_data_dir=user_data_dir.expanduser().resolve())
-        }
+        targets: dict[str, AdapterTarget] = {}
+        for discovered in adapter.discover(user_data_dir=user_data_dir.expanduser().resolve()):
+            if discovered.adapter_id != adapter.adapter_id:
+                raise ValueError("upgrade target is owned by the wrong adapter")
+            if discovered.target_id in targets:
+                raise ValueError("upgrade inventory contains a duplicate target identity")
+            targets[discovered.target_id] = discovered
         target = targets.get(step.target_id)
         if target is None or step.physical_path != target.physical_path:
             raise ValueError("migration step target does not match current discovery")

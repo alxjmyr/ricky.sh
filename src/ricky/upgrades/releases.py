@@ -195,7 +195,10 @@ async def _cache_artifact(
             or not source.is_file()
         ):
             raise ReleaseResolutionError("local release artifact is not a canonical file")
-        payload = source.read_bytes()
+        if source.stat().st_size != artifact.size:
+            raise ReleaseResolutionError("release artifact size does not match its descriptor")
+        with source.open("rb") as stream:
+            payload = stream.read(artifact.size + 1)
     else:
         owned = client is None
         active_client = client or httpx.AsyncClient(
@@ -316,8 +319,11 @@ def _require_exact_github_asset_url(url: str, version: ReleaseVersion, filename:
 def _verify_cached_file(path: Path, artifact: ReleaseArtifact) -> None:
     if path.is_symlink() or not path.is_file():
         raise ReleaseResolutionError("release cache contains an invalid artifact path")
-    payload = path.read_bytes()
-    if len(payload) != artifact.size or hashlib.sha256(payload).hexdigest() != artifact.sha256:
+    if path.stat().st_size != artifact.size:
+        raise ReleaseResolutionError("release cache artifact does not match its descriptor")
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if digest != artifact.sha256:
         raise ReleaseResolutionError("release cache artifact does not match its descriptor")
 
 

@@ -5,6 +5,7 @@ All Slack traffic goes through ``httpx.MockTransport`` — no network.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -1431,3 +1432,36 @@ SearchProbe = SearchParams
 SendProbe = SendMessageParams
 UnreadProbe = ListUnreadParams
 MarkReadProbe = MarkReadParams
+
+
+async def test_channel_directory_failure_joins_other_inflight_requests() -> None:
+    started = asyncio.Event()
+    cleaned = asyncio.Event()
+    calls = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if "public_channel" in request.content.decode():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cleaned.set()
+        await started.wait()
+        return httpx.Response(200, json={"ok": False, "error": "missing_scope"})
+
+    client = SlackClient(
+        token=SecretStr("test-token"),
+        base_url="https://slack.test/api",
+        timeout_seconds=5,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(SlackApiError, match="missing_scope"):
+            await asyncio.wait_for(client.channels(["public", "private"]), timeout=2)
+        assert calls == 2
+        assert cleaned.is_set()
+    finally:
+        await client.aclose()

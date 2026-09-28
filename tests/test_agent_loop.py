@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -995,6 +995,83 @@ async def test_parallel_tool_calls_are_started_before_finishing(tmp_path: Path) 
     assert isinstance(second_result, ToolResultPart)
     assert first_result.call_id == "call_a"
     assert second_result.call_id == "call_b"
+
+
+async def test_closing_turn_during_batch_start_joins_tools_before_runtime_cleanup(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    children: list[asyncio.Task[object]] = []
+
+    class BlockedParams(BaseModel):
+        model_config = ConfigDict(extra="forbid", strict=True)
+
+    class Tool:
+        name: ClassVar[str] = "blocked_reader"
+        description: ClassVar[str] = "Wait for cancellation."
+        Params: ClassVar[type[BaseModel]] = BlockedParams
+        risk: ClassVar[Risk] = "read_only"
+
+        async def run(self, params: BaseModel, ctx: ToolContext) -> ToolResult:
+            task = asyncio.current_task()
+            assert task is not None
+            children.append(task)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                cancelled.set()
+            raise AssertionError("tool unexpectedly completed")
+
+    async def cleanup() -> None:
+        assert cancelled.is_set()
+
+    settings = RickySettings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    provider = FakeProvider(
+        [
+            [
+                MessageDone(
+                    message=Message(
+                        role="assistant",
+                        content=[
+                            ToolCallPart(id="first", name=Tool.name, args={}),
+                            ToolCallPart(id="second", name=Tool.name, args={}),
+                        ],
+                    )
+                )
+            ]
+        ]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([Tool()]),
+        settings=settings,
+        cwd=tmp_path,
+        turn_cleanup=cleanup,
+    )
+    events = cast(AsyncGenerator[AgentEvent], loop.run_turn(session, "read both"))
+    try:
+        async for event in events:
+            if event.kind == "tool_call_started" and event.call_id == "second":
+                await asyncio.wait_for(started.wait(), timeout=2)
+                break
+        await events.aclose()
+        assert cancelled.is_set()
+        assert len(children) == 1 and children[0].done()
+        assert [
+            part.call_id
+            for message in session.history
+            for part in message.content
+            if isinstance(part, ToolResultPart)
+        ] == ["first", "second"]
+    finally:
+        for child in children:
+            child.cancel()
+        await asyncio.gather(*children, return_exceptions=True)
+        await events.aclose()
 
 
 class _RuntimeConflictParams(BaseModel):

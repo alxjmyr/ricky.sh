@@ -352,15 +352,19 @@ def skill_bundle_digest(source_path: str, bundle_path: str | None) -> str:
     digest = hashlib.sha256()
     source = Path(source_path).resolve()
     root = Path(bundle_path).resolve() if bundle_path is not None else source.parent
-    candidates = sorted(path for path in root.rglob("*") if path.is_file())
-    if bundle_path is None:
-        candidates = [source]
+    candidates = (
+        [source]
+        if bundle_path is None
+        else sorted(path for path in root.rglob("*") if path.is_file())
+    )
     for path in candidates:
         if not path.resolve().is_relative_to(root):
             raise CapabilityRegistryError("skill resource escapes its bundle")
         relative = path.relative_to(root).as_posix()
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        with path.open("rb") as stream:
+            while chunk := stream.read(256 * 1024):
+                digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
