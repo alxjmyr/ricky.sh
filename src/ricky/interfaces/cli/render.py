@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -53,6 +54,7 @@ from ricky.config import RickySettings, user_data_path
 from ricky.interfaces.cli.input import CHAT_COMMANDS, CliInputSession
 from ricky.memory.types import MemoryLoadError
 from ricky.permissions import PermissionResponse
+from ricky.profiles import BUNDLED_OWNER
 from ricky.protected_values import (
     DestinationApprovalRequest,
     DestinationApprovalResponse,
@@ -903,8 +905,15 @@ class CliRenderer:
             table = Table(title="Skills", show_header=True)
             table.add_column("Name")
             table.add_column("Description")
+            counts = Counter(skill.name for skill in skills)
             for skill in skills:
-                table.add_row(skill.name, skill.description)
+                name = skill.qualified_name if counts[skill.name] > 1 else skill.name
+                label = "built-in" if skill.profile == BUNDLED_OWNER else skill.profile
+                title = Text(name)
+                title.append(f" [{label}]", style="dim")
+                if skill.profile == BUNDLED_OWNER and counts[skill.name] > 1:
+                    title.append(" (shadowed)", style="dim")
+                table.add_row(title, Text(skill.description))
             self.console.print(table)
         else:
             self.console.print(Text("No skills loaded.", style="dim"))
@@ -925,14 +934,23 @@ class CliRenderer:
     def render_workflow_list(self, workflow_registry: WorkflowRegistry) -> None:
         """Render loaded workflows and load errors."""
         self.finish_stream()
-        workflows = workflow_registry.workflows()
+        workflows = workflow_registry.loaded_workflows()
         if workflows:
             table = Table(title="Workflows", show_header=True)
             table.add_column("Name")
             table.add_column("Steps", justify="right")
             table.add_column("Description")
-            for spec in workflows:
-                table.add_row(spec.name, str(len(spec.steps)), spec.description)
+            counts = Counter(item.spec.name for item in workflows)
+            for item in workflows:
+                spec = item.spec
+                name = item.resource.qualified if counts[spec.name] > 1 else spec.name
+                owner = item.resource.profile
+                label = "built-in" if owner == BUNDLED_OWNER else owner
+                title = Text(name)
+                title.append(f" [{label}]", style="dim")
+                if owner == BUNDLED_OWNER and counts[spec.name] > 1:
+                    title.append(" (shadowed)", style="dim")
+                table.add_row(title, str(len(spec.steps)), Text(spec.description))
             self.console.print(table)
         else:
             self.console.print(Text("No workflows loaded.", style="dim"))

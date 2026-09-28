@@ -11,6 +11,7 @@ import pytest
 from pydantic import SecretStr
 from rich.console import Console
 
+from catalog_listing_support import write_catalogs
 from ricky.agent.events import (
     AgentErrorEvent,
     ContextAssembledEvent,
@@ -31,13 +32,15 @@ from ricky.interfaces.cli.input import CliInputSession
 from ricky.interfaces.cli.protected_values import _read_values
 from ricky.interfaces.cli.render import CliRenderer, summarize_tool_call
 from ricky.permissions import GrantOption
-from ricky.profiles import ProfileResourceRef
+from ricky.profiles import ProfileResourceRef, ProfileScope
 from ricky.protected_values import (
     DestinationApprovalRequest,
     ProtectedFieldDescriptor,
     SecureValueInputRequest,
 )
-from ricky.workflows.registry import WorkflowLoadError
+from ricky.skills.registry import discover_skills
+from ricky.tools import ToolRegistry
+from ricky.workflows.registry import WorkflowLoadError, discover_workflows
 
 
 def _renderer(*, debug: bool = False) -> tuple[CliRenderer, StringIO]:
@@ -681,3 +684,36 @@ def test_permission_decided_shows_remembered_label() -> None:
     )
 
     assert "remembered: gmail_trash on personal" in output.getvalue()
+
+
+@pytest.mark.parametrize("kind", ["skill", "workflow"])
+def test_catalog_labels_and_duplicate_names(tmp_path: Path, bundled_root: Path, kind: str) -> None:
+    settings = RickySettings(user_data_dir=str(tmp_path / "user"))
+    write_catalogs(settings, bundled_root)
+    scope = ProfileScope.create("personal")
+    skills = discover_skills(settings=settings, profile_scope=scope)
+    renderer, output = _renderer()
+    if kind == "skill":
+        renderer.render_skills(skills)
+    else:
+        workflows = discover_workflows(
+            settings=settings,
+            profile_scope=scope,
+            skill_names=skills.identifiers(),
+            tool_registry=ToolRegistry([]),
+        )
+        assert workflows.errors == []
+        renderer.render_workflow_list(workflows)
+    rendered = output.getvalue()
+    for name in (
+        "shipped [built-in]",
+        "bundled/override [built-in]",
+        "personal/override [personal]",
+        "personal/review [personal]",
+        "shared/review [shared]",
+        "common [shared]",
+    ):
+        assert name in rendered
+    assert "Catalog description" in rendered
+    assert "private" not in rendered
+    assert "Private instructions" not in rendered

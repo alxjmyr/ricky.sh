@@ -12,6 +12,11 @@ ongoing judgment.
 ricky workflow list
 ```
 
+Use `/workflow` in CLI or Telegram chat to list workflows. Listings show
+`[built-in]` or the owning profile beside each name, and use qualified names
+when names repeat. Telegram listings are read-only; run workflows there through
+a named workflow-backed job.
+
 Ricky discovers bundles in this order:
 
 1. `<user_data_dir>/profiles/<name>/workflows/<workflow-name>/workflow.toml` for every accessible profile

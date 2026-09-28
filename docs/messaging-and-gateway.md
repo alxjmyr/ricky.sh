@@ -182,6 +182,8 @@ Send these commands to the bot:
 | `/compact` | Compact older persistent context. |
 | `/context` | Show the current foreground session's prospective context details. |
 | `/status` | Show conversation and background-work status. |
+| `/skill` | List skills with built-in or profile labels. |
+| `/workflow` | List workflows with built-in or profile labels; does not run them. |
 | `/cancel execution_<id>` | Request cancellation of one background execution. |
 | `/approve browser_<approval-id> <one-time-code>` | Approve one exact parked browser transaction or protected destination occurrence. |
 | `/deny browser_<approval-id> <one-time-code>` | Deny that exact occurrence. |

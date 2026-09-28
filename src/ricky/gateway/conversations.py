@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import math
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection
 from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
@@ -87,7 +88,7 @@ from ricky.notifications.types import (
 )
 from ricky.owned_operation import run_with_lease_heartbeat
 from ricky.permissions import PermissionEngine, Policy, PolicyRule
-from ricky.profiles import ProfileScope
+from ricky.profiles import BUNDLED_OWNER, ProfileScope
 from ricky.project_scope import ProjectScope
 from ricky.protected_values import ResidentProtectedValueRegistry
 from ricky.runtime.composition import (
@@ -790,7 +791,8 @@ class ConversationCoordinator:
         command_name = command.split(maxsplit=1)[0] if command else ""
         if command == "/help":
             return (
-                "Gateway commands: /new, /compact, /context, /status, /cancel ID, "
+                "Gateway commands: /new, /compact, /context, /status, /skill, /workflow, "
+                "/cancel ID, "
                 "/approve APPROVAL CODE, /deny APPROVAL CODE, "
                 "/reconcile TRANSACTION performed|not_performed NOTE, /help",
                 (
@@ -800,6 +802,8 @@ class ConversationCoordinator:
                     )
                 ).revision,
             )
+        if command in {"/skill", "/workflow"}:
+            return await self._resource_listing(command, conversation)
         if command == "/status":
             return await self._status(conversation), (
                 await self.sessions.get(
@@ -954,6 +958,53 @@ class ConversationCoordinator:
             if any(approval.state == "pending" for approval in approvals):
                 return True
         return False
+
+    async def _resource_listing(self, command: str, conversation: Conversation) -> tuple[str, int]:
+        """Inspect scoped catalogs without invoking a provider or running a workflow."""
+        stored = await self.sessions.get(conversation.session_id, scope=conversation.profile_scope)
+        route = self.settings.gateway.routes[conversation.route_name]
+        async with build_capability_runtime(
+            self.settings,
+            session=stored.session.model_copy(deep=True),
+            project_scope=_project_scope(route),
+            protected_value_registry=getattr(self, "protected_value_registry", None),
+        ) as runtime:
+            if command == "/skill":
+                skills = runtime.skill_registry.skills()
+                counts = Counter(skill.name for skill in skills)
+                lines = ["Skills"] if skills else ["No skills loaded."]
+                for skill in skills:
+                    name = skill.qualified_name if counts[skill.name] > 1 else skill.name
+                    label = "built-in" if skill.profile == BUNDLED_OWNER else skill.profile
+                    shadowed = (
+                        " (shadowed)"
+                        if skill.profile == BUNDLED_OWNER and counts[skill.name] > 1
+                        else ""
+                    )
+                    lines.append(f"- {name} [{label}]{shadowed} — {skill.description}")
+                error_count = len(runtime.skill_registry.errors)
+            else:
+                registry = runtime.workflow_registry
+                if registry is None:
+                    return "Workflows are disabled for this session.", stored.revision
+                workflows = registry.loaded_workflows()
+                counts = Counter(item.spec.name for item in workflows)
+                lines = ["Workflows"] if workflows else ["No workflows loaded."]
+                for item in workflows:
+                    spec = item.spec
+                    name = item.resource.qualified if counts[spec.name] > 1 else spec.name
+                    owner = item.resource.profile
+                    label = "built-in" if owner == BUNDLED_OWNER else owner
+                    shadowed = (
+                        " (shadowed)" if owner == BUNDLED_OWNER and counts[spec.name] > 1 else ""
+                    )
+                    steps = "1 step" if len(spec.steps) == 1 else f"{len(spec.steps)} steps"
+                    lines.append(f"- {name} [{label}]{shadowed} — {steps} — {spec.description}")
+                error_count = len(registry.errors)
+                lines.append("Run workflows through a named workflow-backed job in this chat.")
+            if error_count:
+                lines.append(f"{error_count} bundle(s) could not be loaded.")
+            return "\n".join(lines), stored.revision
 
     async def _context(
         self,

@@ -14,7 +14,11 @@ Start a chat, then run:
 /skill
 ```
 
-Ricky lists every loaded skill and reports malformed bundles separately.
+Ricky lists every loaded skill with `[built-in]` or its owning profile, such as
+`[personal]` or `[shared]`, beside the name. Duplicate names use their qualified
+form, such as `personal/review`. Overridden built-ins are marked `(shadowed)`.
+CLI chat reports malformed bundles separately.
+Telegram also supports `/skill` as a read-only catalog listing.
 
 ## Activate a skill
 

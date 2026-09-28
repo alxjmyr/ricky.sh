@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 
 from authority_support import install_sandbox_runtime
+from catalog_listing_support import write_catalogs
 from gateway_conversation_support import (
     _SCOPE,
     COMPACTION_SUMMARY,
@@ -1816,3 +1817,71 @@ async def test_browser_delegation_repairs_model_arguments_and_pins_scoped_resour
     assert len(provider.requests) == foreground_count
     assert await dispatcher.worker_once(scope=_SCOPE) == []
     assert await messaging.deliver_once() == 0
+
+
+@pytest.mark.parametrize("command", ["/skill", "/workflow"])
+async def test_catalog_commands_show_sources_without_a_model_turn(
+    tmp_path: Path, bundled_root: Path, command: str
+) -> None:
+    settings = _settings(tmp_path)
+    settings.workflow.enabled = True
+    write_catalogs(settings, bundled_root)
+    provider = ScriptedProvider([])
+    inbound = await _ingest(settings, suffix="a", text=command)
+    result = await ConversationCoordinator(
+        settings, provider_factory=lambda _name, _settings: provider
+    ).process(inbound.id)
+    from ricky.notifications.store import NotificationStore
+
+    assert result.response_outbox_id is not None
+    reply = await NotificationStore(settings).get_by_outbox(
+        result.response_outbox_id, scope=_SCOPE
+    )
+    for name in (
+        "shipped [built-in]",
+        "bundled/override [built-in]",
+        "personal/override [personal]",
+        "personal/review [personal]",
+        "shared/review [shared]",
+        "common [shared]",
+    ):
+        assert name in reply.request.body
+    assert "bundled/override [built-in] (shadowed)" in reply.request.body
+    assert "Catalog description" in reply.request.body
+    assert "private" not in reply.request.body
+    assert "Private instructions" not in reply.request.body
+    if command == "/workflow":
+        assert "1 step" in reply.request.body
+        assert "workflow-backed job" in reply.request.body
+    stored = await SessionStore(settings).get(result.session_id, scope=_SCOPE)
+    assert stored.revision == 0
+    assert stored.session.history == []
+    assert provider.requests == []
+
+
+@pytest.mark.parametrize(
+    ("command", "enabled", "expected"),
+    [
+        ("/skill", True, "No skills loaded."),
+        ("/workflow", True, "No workflows loaded."),
+        ("/workflow", False, "Workflows are disabled for this session."),
+    ],
+)
+async def test_empty_catalog_commands(
+    tmp_path: Path, command: str, enabled: bool, expected: str
+) -> None:
+    settings = _settings(tmp_path)
+    settings.workflow.enabled = enabled
+    provider = ScriptedProvider([])
+    inbound = await _ingest(settings, suffix="a", text=command)
+    result = await ConversationCoordinator(
+        settings, provider_factory=lambda _name, _settings: provider
+    ).process(inbound.id)
+    from ricky.notifications.store import NotificationStore
+
+    assert result.response_outbox_id is not None
+    reply = await NotificationStore(settings).get_by_outbox(
+        result.response_outbox_id, scope=_SCOPE
+    )
+    assert expected in reply.request.body
+    assert provider.requests == []
