@@ -205,12 +205,13 @@ Destination enforcement uses the exact URL locally. Provider-facing observations
 fragments and query values by default while retaining the origin, path, and query-key names needed
 to understand location. Locally known protected values and common credential-bearing parameters
 are removed from every URL projection. Link targets remain locally actionable through opaque
-snapshot references without requiring their complete URLs in model context. Values of password
-controls and controls identifiable as credential or payment fields are suppressed. These bounded
-rules do not claim to identify all ambient personal data rendered by a page.
+snapshot references without requiring their complete URLs in model context. Values and nested
+content of all editable controls are suppressed, independently of credential markup; protected and
+file-control subtrees are also suppressed. These bounded rules do not claim to identify all
+ambient personal data rendered by a page.
 
 Ordinary agent-driven fill and key entry rejects recognizable password, OTP, credential, payment,
-and file controls. A separate protected-value consumer may fill one recognized protected field
+and file controls. A separate protected-value consumer may fill one supported editable text field
 from an opaque profile-qualified reference after local scope, field, destination, approval,
 revision, and permission checks. File controls are exposed only through safe
 snapshot metadata and the prepared upload operation; their values and selected local filenames
@@ -602,11 +603,15 @@ to the model. Protected-value materialization belongs to the separate protected-
 and is enforced locally against the actual top-level and target-frame destinations.
 
 Protected fill reuses the page action lock and snapshot-consumption rules. It preflights a current
-recognized protected field, derives live origins and field category locally, reserves and prepares
-an exact resource revision, then revalidates page generation, target, origins, current broker
-policy, approval, and revision after permission review. It fills one field without submit, Enter,
+enabled editable text field, derives live origins and any recognized field category locally,
+reserves and prepares an exact resource revision, then revalidates page generation, target,
+origins, current broker policy, approval, and revision after permission review. It fills one field without submit, Enter,
 click, or automatic replay. The page retains only bounded safe alias/field evidence for a later
-separately reviewed commit.
+separately reviewed commit. Unclassified text controls accept protected fill without credential
+markup; recognized incompatible categories and unsupported protected controls still fail.
+Semantic redaction and visual masking cover
+all editable controls before and after fill, including rich-text descendants, without relying on
+page-authored protected flags or a successful dispatch receipt.
 
 Web content never grants authority. Prompt text from a page cannot enable capabilities, alter the
 issued profile scope, approve an effect, widen a destination policy, or override an execution

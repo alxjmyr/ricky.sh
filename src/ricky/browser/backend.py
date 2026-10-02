@@ -81,6 +81,29 @@ class BackendTargetDescriptor:
     accept: tuple[str, ...] = ()
     restricted_interaction: Literal["captcha", "passkey", "sso"] | None = None
 
+    @property
+    def supports_protected_fill(self) -> bool:
+        """Allow locally verified text entry, independent of credential markup."""
+        return (
+            self.editable
+            and not self.disabled
+            and not self.file
+            and self.restricted_interaction is None
+            and (not self.protected or self.protected_kind is not None)
+            and self.control_kind
+            in {
+                "text",
+                "search",
+                "email",
+                "telephone",
+                "url",
+                "date",
+                "number",
+                "textarea",
+                "contenteditable",
+            }
+        )
+
     def provider_descriptor(self) -> BrowserTargetDescriptor:
         """Drop private backend identity before returning target facts to a provider."""
 

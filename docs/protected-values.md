@@ -159,9 +159,17 @@ model tool arguments cannot create an approval.
 
 ## Use a protected value in browser chat
 
-Ask Ricky to use a qualified alias and safe field name. Ricky takes a current browser snapshot,
-derives the live protected control category and both origins locally, applies broker policy, and
-asks for ordinary external-effect permission. The review never includes the raw value.
+When a browser task needs credentials or payment details, Ricky checks the available vault catalog
+before asking you to enter them. It chooses using safe metadata and task context; aliases do not
+need to match website names. It asks when no suitable entry exists or the account choice is
+ambiguous. You can also specify a qualified alias and safe field name.
+
+Protected fill works with ordinary editable inputs, including username and card-number fields
+without credential markup or password masking. Recognized field categories must still be
+compatible with the selected vault field. Ricky checks both live origins, applies destination
+policy, and asks for external-effect permission. The review never includes the raw value.
+Editable values and nested editor content are suppressed in semantic snapshots, and editable
+controls are masked in browser screenshots.
 Interactive chat [send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically
 authorizes this permission request, while retaining destination policy and all secret-handling
 checks. Vault passwords and prompt-each-use secrets still require local input.

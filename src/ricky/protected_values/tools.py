@@ -30,7 +30,9 @@ class ProtectedValuesCatalogTool:
     name: ClassVar[str] = "protected_values_catalog"
     description: ClassVar[str] = (
         "List safe protected-value aliases, fields, and destination policies available "
-        "in the current profile scope. This never reveals stored values."
+        "in the current profile scope. Check this before requesting manual credential "
+        "entry; select contextually using safe metadata and ask if ambiguous. "
+        "This never reveals stored values."
     )
     Params: ClassVar[type[BaseModel]] = ProtectedValuesCatalogParams
     risk: ClassVar[Risk] = "read_only"

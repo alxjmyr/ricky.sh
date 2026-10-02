@@ -186,7 +186,9 @@ class ProtectedUseRequest(BaseModel):
     ref: ProfileResourceRef
     field: str = Field(min_length=1, max_length=64)
     consumer_id: str = Field(min_length=1, max_length=128)
-    control_kind: ProtectedControlKind
+    # None means the trusted consumer found no semantic field category.
+    # It does not mean the consumer skipped destination or target validation.
+    control_kind: ProtectedControlKind | None
     top_level_origin: str = Field(min_length=1, max_length=500)
     frame_origin: str = Field(min_length=1, max_length=500)
     occurrence: str = Field(min_length=1, max_length=500)

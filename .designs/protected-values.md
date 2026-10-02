@@ -134,9 +134,9 @@ scheduled jobs, workflows, and a gateway started locked expose no unattended mat
 ## Materialization and consumers
 
 The broker releases raw values only to a registered in-process consumer after resource scope,
-state, revision, field compatibility, destination policy, approval, execution mode, and ceilings
-pass and a use is reserved. Raw payloads use an in-process-only `SecretStr` container with no useful
-string or repr. The reservation is finalized conservatively when material is released, cancelled,
+state, revision, recognized field compatibility, destination policy, approval, execution mode,
+and ceilings pass and a use is reserved. Raw payloads use an in-process-only `SecretStr` container
+with no useful string or repr. The reservation is finalized conservatively when material is released, cancelled,
 or fails.
 
 There is no generic reveal, clipboard, shell, arbitrary HTTP, header, template, or plugin secret
@@ -145,10 +145,15 @@ with its own destination, effect, permission, and evidence contract and receives
 explicit runtime composition.
 
 The initial browser consumer fills one snapshot-bound field per call. It locally derives the live
-top-level and target-frame origins and protected field category, then prepares exact secret
-material after protected policy and secure input. Standard permission review contains only the
-alias and safe target facts. Dispatch revalidates page generation, target, origins, policy,
-approval, and resource revision and sends the raw value only through a dedicated in-process backend
+top-level and target-frame origins and any recognized protected field category, then prepares exact
+secret material after protected policy and secure input. The browser consumer may also fill an
+unclassified, enabled editable text control. It reports a null category rather than inventing one
+from the requested vault field. Recognized categories must match the field compatibility policy;
+only the registered `browser.fill` consumer may materialize with an unclassified destination.
+This does not change stored field descriptors or destination and unattended policy. Standard
+permission review contains only the alias and safe target facts. Dispatch revalidates page
+generation, target, origins, policy, approval, and resource revision and sends the raw value only
+through a dedicated in-process backend
 request. Ordinary fill, key entry, and coordinate actions continue to reject protected controls.
 
 For an unattended `confirm_new` destination, the generic broker request carries an optional
@@ -157,6 +162,11 @@ The gateway browser consumer requires it, parks one source-bound approval, and c
 The binding contains no browser handle or protected material and does not create a durable
 destination approval. A consumer that cannot provide an exact binding cannot use this approval
 path.
+
+The agent checks the safe catalog before requesting manual credential entry when the catalog is
+available. It selects contextually from safe metadata and task context, without deterministic
+alias-to-site matching, and asks when no suitable entry exists or account choice remains ambiguous.
+Selection never grants destination or use authority.
 
 Protected fill is an external effect because page JavaScript may observe or autosave a field. It
 is never retried after dispatch may begin. Filling never submits, clicks, presses Enter, or grants

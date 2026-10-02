@@ -559,6 +559,44 @@ async def test_prompt_each_use_value_is_never_persisted(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_unclassified_browser_fill_preserves_destination_and_revision_checks(
+    tmp_path: Path,
+) -> None:
+    broker, ref = await _broker(tmp_path)
+    try:
+        request = _request(ref, field="username").model_copy(update={"control_kind": None})
+        request = ProtectedUseRequest.model_validate_json(request.model_dump_json())
+        denied = request.model_copy(update={"frame_origin": "https://other.example"})
+        with pytest.raises(ProtectedValueStoreError, match="destination policy"):
+            await broker.prepare(denied)
+        assert await broker.uses("personal") == []
+
+        other_consumer = ProtectedValueBroker(
+            _settings(tmp_path),
+            scope=ProfileScope.create("personal"),
+            consumer_ids=frozenset({"fixture.consumer"}),
+        )
+        try:
+            with pytest.raises(ProtectedValueStoreError, match="classified destination"):
+                await other_consumer.prepare(
+                    request.model_copy(update={"consumer_id": "fixture.consumer"})
+                )
+        finally:
+            await other_consumer.aclose()
+
+        material = await broker.prepare(request)
+        assert material.value.get_secret_value() == "ricky-user"
+        assert material.use.request.control_kind is None
+        assert (await broker.uses("personal"))[0].request == request
+        await broker.revalidate(material)
+        await broker.set_enabled(ref, enabled=False, expected_revision=material.descriptor.revision)
+        with pytest.raises(ProtectedValueConflictError, match="changed after review"):
+            await broker.revalidate(material)
+    finally:
+        await broker.aclose()
+
+
+@pytest.mark.asyncio
 async def test_scope_consumer_field_and_destination_are_independent_ceilings(
     tmp_path: Path,
 ) -> None:

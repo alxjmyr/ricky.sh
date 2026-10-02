@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -132,8 +133,10 @@ async def _protected_broker(tmp_path: Path, settings: RickySettings) -> Protecte
     return broker
 
 
+@pytest.mark.parametrize("classified", [True, False])
 async def test_protected_fill_uses_dedicated_request_and_safe_evidence(
     tmp_path: Path,
+    classified: bool,
 ) -> None:
     target_descriptor = BackendTargetDescriptor(
         ref="e1",
@@ -142,8 +145,8 @@ async def test_protected_fill_uses_dedicated_request_and_safe_evidence(
         control_kind="text",
         frame_origin=_SECURE_LOCAL_ORIGIN,
         editable=True,
-        protected=True,
-        protected_kind="password",
+        protected=classified,
+        protected_kind="password" if classified else None,
     )
     page = FakeBrowserPage(
         url=_SECURE_LOCAL_ORIGIN + "/login",
@@ -160,13 +163,13 @@ async def test_protected_fill_uses_dedicated_request_and_safe_evidence(
         snapshot.targets[0].model_dump(exclude={"navigation_generation"}), strict=True
     )
     context = await service.protected_action_context(target)
-    assert context.descriptor.protected_kind == "password"
+    assert context.descriptor.protected_kind == ("password" if classified else None)
     material = await broker.prepare(
         ProtectedUseRequest(
             ref=ProfileResourceRef(profile="personal", name="fixture-login"),
             field="password",
             consumer_id="browser.fill",
-            control_kind="password",
+            control_kind="password" if classified else None,
             top_level_origin=_SECURE_LOCAL_ORIGIN,
             frame_origin=_SECURE_LOCAL_ORIGIN,
             occurrence=service.protected_occurrence(target),
@@ -185,6 +188,105 @@ async def test_protected_fill_uses_dedicated_request_and_safe_evidence(
     assert result.page.latest_action.protected_field == "password"
     await broker.aclose()
     await service.aclose()
+
+
+@pytest.mark.parametrize("change", ["disabled", "readonly", "category", "frame", "file"])
+async def test_unclassified_protected_fill_rejects_target_changes_before_dispatch(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    descriptor = BackendTargetDescriptor(
+        ref="e1",
+        role="textbox",
+        name="Account",
+        control_kind="text",
+        frame_origin=_SECURE_LOCAL_ORIGIN,
+        editable=True,
+    )
+    page = FakeBrowserPage(
+        url=f"{_SECURE_LOCAL_ORIGIN}/login",
+        snapshot='- textbox "Account" [ref=e1]',
+        targets=(descriptor,),
+    )
+    backend = FakeBrowserBackend()
+    backend.pending_sessions.append(FakeBrowserSession([page]))
+    service, _, settings = _service(tmp_path, backend)
+    broker = await _protected_broker(tmp_path, settings)
+    try:
+        opened = await service.open_session()
+        snapshot = await service.snapshot(opened.session_id, page_id=None)
+        target = BrowserActionTarget.model_validate(
+            snapshot.targets[0].model_dump(exclude={"navigation_generation"}), strict=True
+        )
+        await service.protected_action_context(target)
+        material = await broker.prepare(
+            ProtectedUseRequest(
+                ref=ProfileResourceRef(profile="personal", name="fixture-login"),
+                field="password",
+                consumer_id="browser.fill",
+                control_kind=None,
+                top_level_origin=_SECURE_LOCAL_ORIGIN,
+                frame_origin=_SECURE_LOCAL_ORIGIN,
+                occurrence=service.protected_occurrence(target),
+            )
+        )
+        changed = {
+            "disabled": replace(descriptor, disabled=True),
+            "readonly": replace(descriptor, editable=False),
+            "category": replace(descriptor, protected=True, protected_kind="card_number"),
+            "frame": replace(descriptor, frame_origin="https://other.example"),
+            "file": replace(descriptor, control_kind="file", file=True),
+        }[change]
+        page.targets = (changed,)
+        result = await service.protected_fill(target, material, broker)
+        assert result.disposition == "not_performed"
+        assert result.failure is not None
+        assert result.failure.code == "stale_target"
+        assert page.protected_fills == []
+    finally:
+        await broker.aclose()
+        await service.aclose()
+
+
+@pytest.mark.parametrize("control", ["unsupported_protected", "file", "select", "label"])
+async def test_protected_fill_preparation_rejects_unsupported_controls(
+    tmp_path: Path,
+    control: str,
+) -> None:
+    descriptor = BackendTargetDescriptor(
+        ref="e1",
+        role="textbox",
+        name="Entry",
+        control_kind="text",
+        frame_origin=_SECURE_LOCAL_ORIGIN,
+        editable=True,
+    )
+    descriptor = {
+        "unsupported_protected": replace(descriptor, protected=True),
+        "file": replace(descriptor, file=True, control_kind="file"),
+        "select": replace(descriptor, control_kind="select"),
+        "label": replace(descriptor, control_kind="other"),
+    }[control]
+    page = FakeBrowserPage(
+        url=f"{_SECURE_LOCAL_ORIGIN}/login",
+        snapshot='- textbox "Entry" [ref=e1]',
+        targets=(descriptor,),
+    )
+    backend = FakeBrowserBackend()
+    backend.pending_sessions.append(FakeBrowserSession([page]))
+    service, _, _ = _service(tmp_path, backend)
+    try:
+        opened = await service.open_session()
+        snapshot = await service.snapshot(opened.session_id, page_id=None)
+        target = BrowserActionTarget.model_validate(
+            snapshot.targets[0].model_dump(exclude={"navigation_generation"}), strict=True
+        )
+        with pytest.raises(BrowserError) as rejected:
+            await service.protected_action_context(target)
+        assert rejected.value.failure.code == "incompatible_target"
+        assert page.protected_fills == []
+    finally:
+        await service.aclose()
 
 
 async def test_payment_card_alias_binds_current_generation_and_is_consumed_by_commit(
@@ -408,8 +510,10 @@ async def test_payment_card_alias_tracks_latest_field_fill_and_revalidates_befor
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("classified", [True, False])
 async def test_cancelled_protected_dispatch_is_recorded_in_doubt_without_replay(
     tmp_path: Path,
+    classified: bool,
 ) -> None:
     descriptor = BackendTargetDescriptor(
         ref="e1",
@@ -418,8 +522,8 @@ async def test_cancelled_protected_dispatch_is_recorded_in_doubt_without_replay(
         control_kind="text",
         frame_origin=_SECURE_LOCAL_ORIGIN,
         editable=True,
-        protected=True,
-        protected_kind="password",
+        protected=classified,
+        protected_kind="password" if classified else None,
     )
     page = FakeBrowserPage(
         url=f"{_SECURE_LOCAL_ORIGIN}/login",
@@ -442,7 +546,7 @@ async def test_cancelled_protected_dispatch_is_recorded_in_doubt_without_replay(
             ref=ProfileResourceRef(profile="personal", name="fixture-login"),
             field="password",
             consumer_id="browser.fill",
-            control_kind="password",
+            control_kind="password" if classified else None,
             top_level_origin=_SECURE_LOCAL_ORIGIN,
             frame_origin=_SECURE_LOCAL_ORIGIN,
             occurrence=service.protected_occurrence(target),
@@ -469,8 +573,10 @@ async def test_cancelled_protected_dispatch_is_recorded_in_doubt_without_replay(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("classified", [True, False])
 async def test_protected_fill_revalidates_resource_policy_before_dispatch(
     tmp_path: Path,
+    classified: bool,
 ) -> None:
     target_descriptor = BackendTargetDescriptor(
         ref="e1",
@@ -479,8 +585,8 @@ async def test_protected_fill_revalidates_resource_policy_before_dispatch(
         control_kind="text",
         frame_origin=_SECURE_LOCAL_ORIGIN,
         editable=True,
-        protected=True,
-        protected_kind="password",
+        protected=classified,
+        protected_kind="password" if classified else None,
     )
     page = FakeBrowserPage(
         url=f"{_SECURE_LOCAL_ORIGIN}/login",
@@ -502,7 +608,7 @@ async def test_protected_fill_revalidates_resource_policy_before_dispatch(
             ref=ref,
             field="password",
             consumer_id="browser.fill",
-            control_kind="password",
+            control_kind="password" if classified else None,
             top_level_origin=_SECURE_LOCAL_ORIGIN,
             frame_origin=_SECURE_LOCAL_ORIGIN,
             occurrence=service.protected_occurrence(target),
@@ -793,8 +899,10 @@ async def test_navigation_projection_generation_scroll_and_snapshot_bounds(
     await service.aclose()
 
 
+@pytest.mark.parametrize("classified", [True, False])
 async def test_snapshot_suppresses_nested_content_for_backend_protected_targets(
     tmp_path: Path,
+    classified: bool,
 ) -> None:
     service, backend, _settings_value = _service(tmp_path)
     opened = await service.open_session()
@@ -812,7 +920,7 @@ async def test_snapshot_suppresses_nested_content_for_backend_protected_targets(
             name="Credential editor",
             control_kind="contenteditable",
             editable=True,
-            protected=True,
+            protected=classified,
         ),
         BackendTargetDescriptor(ref="e3", role="heading", name="Public status"),
     )

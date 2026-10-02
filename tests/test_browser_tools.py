@@ -806,7 +806,10 @@ async def test_coordinate_commit_passes_prepared_external_effect_contract(
     assert tool.review_mode == "fresh"
 
 
-async def test_protected_fill_tool_never_projects_prepared_material(tmp_path: Path) -> None:
+@pytest.mark.parametrize("classified", [True, False])
+async def test_protected_fill_tool_never_projects_prepared_material(
+    tmp_path: Path, classified: bool
+) -> None:
     sentinel = "protected-tool-sentinel-4662"
     ref = ProfileResourceRef(profile="personal", name="fixture-login")
     field = ProtectedFieldDescriptor(
@@ -821,7 +824,7 @@ async def test_protected_fill_tool_never_projects_prepared_material(tmp_path: Pa
         ref=ref,
         field="password",
         consumer_id="browser.fill",
-        control_kind="password",
+        control_kind="password" if classified else None,
         top_level_origin="https://example.com",
         frame_origin="https://example.com",
         occurrence=f"{SESSION_ID}/{PAGE_ID}/{SNAPSHOT_ID}/e1",
@@ -872,8 +875,8 @@ async def test_protected_fill_tool_never_projects_prepared_material(tmp_path: Pa
                     control_kind="text",
                     frame_origin="https://example.com",
                     editable=True,
-                    protected=True,
-                    protected_kind="password",
+                    protected=classified,
+                    protected_kind="password" if classified else None,
                 ),
                 headless=True,
             )

@@ -1114,8 +1114,9 @@ class PreparedBrowserCoordinateClick:
 class BrowserProtectedFillTool(_BrowserEffectActionMixin):
     name = "browser_fill_protected"
     description = (
-        "Fill one recognized protected browser field from a qualified local alias. "
-        "Arguments never contain the protected value."
+        "Fill one editable browser field from a qualified protected-value alias. "
+        "Ordinary text inputs are supported without credential or payment markup. "
+        "Recognized field categories must be compatible. Arguments never contain the value."
     )
     Params = BrowserProtectedFillParams
     Result = BrowserActionToolResult
@@ -1194,11 +1195,7 @@ class BrowserProtectedFillTool(_BrowserEffectActionMixin):
             protected_field=parsed.field,
         )
         descriptor = context.descriptor
-        if (
-            context.origin is None
-            or descriptor.frame_origin is None
-            or descriptor.protected_kind is None
-        ):
+        if context.origin is None or descriptor.frame_origin is None:
             raise ValueError("protected browser target has no exact supported destination")
         material = await self._broker.prepare(
             ProtectedUseRequest(
@@ -1237,7 +1234,8 @@ class BrowserProtectedFillTool(_BrowserEffectActionMixin):
                 (
                     "Page-provided target: "
                     f"name={_quoted(descriptor.name or '(unnamed)')} "
-                    f"protected_control={descriptor.protected_kind}"
+                    f"control={descriptor.control_kind} "
+                    f"recognized_category={descriptor.protected_kind or 'unclassified'}"
                 ),
                 "This fills one field and does not submit or activate a commit control.",
             )
@@ -2029,7 +2027,9 @@ class BrowserCoordinateCommitTool(_BrowserEffectActionMixin):
 class BrowserHandoffTool:
     name = "browser_handoff"
     description = (
-        "Bring a headed browser page forward and ask the user to complete one fixed local step."
+        "Bring a headed browser page forward and ask the user to complete one fixed local step. "
+        "For credential entry, first check protected_values_catalog and use "
+        "browser_fill_protected when a suitable entry is available."
     )
     Params = BrowserHandoffParams
     Result = BrowserHandoff

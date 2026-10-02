@@ -15,7 +15,7 @@ import threading
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
@@ -321,6 +321,14 @@ class _FixtureHandler(BaseHTTPRequestHandler):
   <body>
     <h1>Protected form fixture</h1>
     <form method="post" action="/submitted">
+      <label>Portal account <input name="account" aria-label="Portal account"></label>
+      <label>Funding digits
+        <input name="digits" aria-label="Funding digits" inputmode="numeric">
+      </label>
+      <div role="textbox" aria-label="Entry editor" contenteditable="true"
+           style="width:200px;height:30px"
+           oninput="document.querySelector('[name=editor]').value=this.textContent"></div>
+      <input type="hidden" name="editor">
       <label>Account username
         <input name="username" autocomplete="username">
       </label>
@@ -1217,6 +1225,9 @@ async def test_real_chrome_classifies_and_fills_protected_field_without_commit(
                     "headless": True,
                     "allowed_private_origins": [origin],
                 },
+                "profile_configs": {
+                    "personal": {"browser": {"screenshot_allowed_providers": ["openrouter"]}}
+                },
             }
         )
         service = BrowserService(
@@ -1230,6 +1241,7 @@ async def test_real_chrome_classifies_and_fills_protected_field_without_commit(
             await service.navigate(session.session_id, page_id=None, url=f"{origin}/phase5")
             snapshot = await service.snapshot(session.session_id, page_id=None)
             kinds = {item.name: item.protected_kind for item in snapshot.descriptors}
+            assert "Account username" in kinds, (snapshot.content, snapshot.descriptors)
             assert kinds["Account username"] == "username"
             assert kinds["Account password"] == "password"
             assert kinds["One-time code"] == "one_time_code"
@@ -1306,6 +1318,58 @@ async def test_real_chrome_classifies_and_fills_protected_field_without_commit(
 
             after_fill = await service.snapshot(session.session_id, page_id=None)
             assert sentinel not in after_fill.model_dump_json()
+            ordinary_values = (
+                ("Portal account", "account", "username", "fixture-user-8471"),
+                ("Funding digits", "digits", "card_number", "4242424242424242"),
+                ("Entry editor", "editor", "generic_secret", "fixture-editor-8471"),
+            )
+            for label, name, category, value in ordinary_values:
+                target = _target(after_fill, label)
+                context = await service.protected_action_context(target)
+                assert not context.descriptor.protected
+                assert context.descriptor.protected_kind is None
+                ordinary_field = ProtectedFieldDescriptor.model_validate(
+                    {
+                        "name": name,
+                        "label": label,
+                        "mode": "stored",
+                        "compatible_controls": (category,),
+                    }
+                )
+                material = replace(
+                    material,
+                    field=ordinary_field,
+                    value=SecretStr(value),
+                    descriptor=material.descriptor.model_copy(update={"fields": (ordinary_field,)}),
+                    use=material.use.model_copy(
+                        update={
+                            "request": use_request.model_copy(
+                                update={
+                                    "field": name,
+                                    "control_kind": None,
+                                    "occurrence": service.protected_occurrence(target),
+                                }
+                            )
+                        }
+                    ),
+                )
+                filled = await service.protected_fill(target, material, cast(Any, ReviewedBroker()))
+                assert filled.disposition == "performed"
+                assert value not in filled.model_dump_json()
+                after_fill = await service.snapshot(session.session_id, page_id=None)
+                assert value not in after_fill.model_dump_json()
+                assert requests["/submitted"] == 0
+
+            visual = await service.visual_snapshot(
+                session.session_id, page_id=None, provider="openrouter"
+            )
+            candidates = {item.descriptor.name: item for item in visual.candidates}
+            with Image.open(BytesIO(visual.png)) as screenshot:
+                for label, _, _, value in ordinary_values:
+                    assert value not in str(visual.candidates)
+                    x, y = _visual_candidate_point(visual, candidates[label])
+                    assert screenshot.convert("RGB").getpixel((x, y)) == (75, 0, 130)
+            after_fill = await service.snapshot(session.session_id, page_id=None)
             committed = await _semantic_transaction(
                 service,
                 _target(after_fill, "Submit protected fixture"),
@@ -1314,6 +1378,8 @@ async def test_real_chrome_classifies_and_fills_protected_field_without_commit(
             assert committed.disposition == "performed"
             assert requests["/submitted"] == 1
             assert requests[f"submission:password={sentinel}"] == 1
+            for _, name, _, value in ordinary_values:
+                assert requests[f"submission:{name}={value}"] == 1
         finally:
             await service.aclose()
 

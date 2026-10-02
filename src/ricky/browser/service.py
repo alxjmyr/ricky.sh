@@ -1915,7 +1915,11 @@ class BrowserService:
             origin: str | None = None
             with suppress(ValueError):
                 origin = canonical_origin(state_before.url)
-            if origin != request.top_level_origin or cached.frame_origin != request.frame_origin:
+            if (
+                origin != request.top_level_origin
+                or cached.frame_origin != request.frame_origin
+                or cached.protected_kind != request.control_kind
+            ):
                 return await self._protected_rejection(
                     entry,
                     page,
@@ -4110,7 +4114,13 @@ class BrowserService:
         raw = sanitize_aria_snapshot(
             backend_snapshot.content,
             protected_refs=(
-                target.ref for target in backend_snapshot.targets if target.protected or target.file
+                target.ref
+                for target in backend_snapshot.targets
+                # Playwright also reports a label as editable through its associated
+                # input. Keep that wrapper so its actionable child is not removed.
+                if (target.editable and target.control_kind != "other")
+                or target.protected
+                or target.file
             ),
         )
         state_after = await page.handle.state()
@@ -4526,8 +4536,9 @@ class BrowserService:
                 return BrowserFailure(
                     code="protected_field",
                     message=(
-                        "recognized credential or payment fields require local user handoff "
-                        "until protected values are supported"
+                        "use protected_values_catalog and browser_fill_protected for "
+                        "credential or payment fields; hand off only when no suitable "
+                        "value is available"
                     ),
                 )
             if not target.editable or target.control_kind not in {
@@ -4586,7 +4597,10 @@ class BrowserService:
         elif request.kind == "press_key" and target.protected:
             return BrowserFailure(
                 code="protected_field",
-                message="recognized protected fields require local user handoff",
+                message=(
+                    "recognized protected fields reject ordinary key entry; "
+                    "use browser_fill_protected for vault values"
+                ),
             )
         return None
 
@@ -4594,16 +4608,10 @@ class BrowserService:
     def _validate_protected_target(
         target: BackendTargetDescriptor,
     ) -> BrowserFailure | None:
-        if (
-            not target.protected
-            or target.protected_kind is None
-            or not target.editable
-            or target.file
-            or target.disabled
-        ):
+        if not target.supports_protected_fill:
             return BrowserFailure(
                 code="incompatible_target",
-                message="browser target is not a supported editable protected control",
+                message="browser target is not a supported editable text control",
             )
         return None
 

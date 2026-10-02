@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
@@ -834,10 +835,26 @@ async def test_workflow_job_settles_checkpoint_when_event_sink_fails(tmp_path: P
     assert provider.cancelled
 
 
-async def test_wall_clock_timeout_interrupts_owned_workflow(tmp_path: Path) -> None:
+async def test_wall_clock_timeout_interrupts_owned_workflow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _slow_model_project(tmp_path, wall=0.05)
     settings = _settings(tmp_path)
     provider = SlowProvider()
+
+    async def wait_for_active_workflow(
+        tasks: set[asyncio.Task[None]], *, timeout: float
+    ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+        # This case owns cancellation of an active provider, not setup speed.
+        # Keep the real timer, but arm it only once the workflow reaches that state.
+        assert timeout == 0.05
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+        return await asyncio.wait(tasks, timeout=timeout)
+
+    # Replace only the runner's binding; other owners keep the real asyncio module.
+    runner_asyncio = SimpleNamespace(**vars(asyncio))
+    runner_asyncio.wait = wait_for_active_workflow
+    monkeypatch.setattr("ricky.jobs.runner.asyncio", runner_asyncio)
 
     run = await JobRunner(settings, project_root=tmp_path).run(
         "slow-workflow",

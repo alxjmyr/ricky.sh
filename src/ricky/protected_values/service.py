@@ -303,7 +303,12 @@ class ProtectedValueBroker:
                 f"protected value is disabled: {request.ref.qualified}"
             )
         field = descriptor.field(request.field)
-        if request.control_kind not in field.compatible_controls:
+        if request.control_kind is None and request.consumer_id != "browser.fill":
+            raise ProtectedValueStoreError("consumer requires a classified destination control")
+        if (
+            request.control_kind is not None
+            and request.control_kind not in field.compatible_controls
+        ):
             raise ProtectedValueStoreError(
                 "protected field is incompatible with the current destination control"
             )

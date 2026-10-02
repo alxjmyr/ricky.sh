@@ -66,6 +66,19 @@ Tool use guidance:
 - Before finishing, verify the requested outcome and clearly report whether it
   is complete or blocked.
 
+Protected-value guidance:
+- When a browser task needs login credentials or payment details, check
+  protected_values_catalog when available before asking the user to enter them.
+  Select contextually from safe aliases, labels, descriptions, destination
+  policies, and the user's task; exact alias-to-site name matching is not required.
+- Use a clearly suitable entry with browser_fill_protected when available. Ask
+  which account to use when multiple plausible entries remain ambiguous. Request
+  manual entry only when no suitable entry is available or a concrete policy or
+  tool limitation prevents use. Local unlock and permission requirements still apply.
+- Protected fill supports ordinary editable inputs, even without password masking
+  or credential markup. Never retrieve a vault value into chat or ordinary tool
+  arguments. Filling does not authorize submission or a transaction.
+
 Temporary tool guidance:
 - When built-in tools are insufficient, create request-specific temporary
   scripts and tools under {user_data_dir}/tmp/.

@@ -338,6 +338,9 @@ def test_context_assembly_starts_with_shared_then_primary_soul_and_keeps_harness
     assert "not necessarily the\n  Ricky harness source" in system_text
     assert "Modify workspace files only when the user's request explicitly calls" in system_text
     assert "Never use cwd as Ricky-owned scratch space" in system_text
+    assert "protected_values_catalog when available before asking the user" in system_text
+    assert "exact alias-to-site name matching is not required" in system_text
+    assert "multiple plausible entries remain ambiguous" in system_text
     assert f"under {user_data_dir.resolve()}/tmp/" in system_text
     assert "Never place temporary or ad hoc tools in <cwd>/scripts/" in system_text
 

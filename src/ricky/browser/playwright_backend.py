@@ -1213,7 +1213,7 @@ class _PlaywrightPage:
         self,
         target: BackendTargetDescriptor,
     ) -> BackendTargetDescriptor:
-        """Revalidate one recognized protected editable control without material."""
+        """Revalidate one supported editable control without material."""
         _locator, live = await self._resolve_protected_target(target)
         return live
 
@@ -2104,15 +2104,7 @@ class _PlaywrightPage:
             visible = await locator.is_visible()
         except PlaywrightError as exc:
             raise _backend_error("protected browser target could not be inspected", exc) from exc
-        if (
-            not _same_target(target, live)
-            or not visible
-            or live.disabled
-            or not live.editable
-            or not live.protected
-            or live.protected_kind is None
-            or live.file
-        ):
+        if not _same_target(target, live) or not visible or not live.supports_protected_fill:
             raise BrowserError(
                 BrowserFailure(
                     code="stale_target",
@@ -3198,7 +3190,9 @@ def _validate_action_compatibility(
         raise BrowserError(
             BrowserFailure(
                 code="protected_field",
-                message="protected fields require user handoff",
+                message=(
+                    "use protected_values_catalog and browser_fill_protected for protected fields"
+                ),
             )
         )
     if kind == "click" and target.consequential:

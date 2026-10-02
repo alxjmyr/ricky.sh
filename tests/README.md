@@ -29,6 +29,13 @@ loss, persistent profiles, and CDP ownership coverage.
 The navigation/snapshot journey also checks `navigator.webdriver` in real Chrome
 to guard the owned-launch automation-indicator default without another browser fixture.
 
+`test_real_chrome_classifies_and_fills_protected_field_without_commit` also covers
+vault-backed entry into unclassified username, card-number, and rich-text controls,
+semantic redaction, screenshot masking, and separate submission. Broker and service
+tests own unclassified-field destination checks, policy revocation, target changes,
+and cancellation without replay. Agent context tests cover contextual catalog-first
+guidance; they do not claim deterministic model selection.
+
 `test_real_chrome_visual_scan_skips_offscreen_controls` owns the large offscreen
 visual-candidate fixture. It checks bounded per-element geometry calls, retained
 visible and partially clipped controls, and candidate-limit reporting. Existing
@@ -96,6 +103,11 @@ The gateway conversation concurrency case starts its second conversation while
 the first provider is confirmed live and blocked, preserving the overlap check
 without racing two cold runtime constructions. It cancels and joins owned tasks
 if either bounded startup wait fails.
+
+The workflow job timeout case waits for the provider's start event before arming
+the runner's real 50 ms timer. It retains budget-expiry, persisted interruption,
+and provider-cancellation assertions without requiring workflow checkpoint setup
+to finish within that timer. Only the runner's test-local asyncio binding changes.
 
 Conversation, checkout, and challenge builders live in their `*_support.py`
 modules. New tests should not import helpers from test modules. Keep assertions
