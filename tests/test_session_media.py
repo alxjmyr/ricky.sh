@@ -116,7 +116,8 @@ async def test_synthetic_non_browser_image_projects_and_encodes_through_shared_c
 
     assert assembly.report.projected_image_count == 1
     assert assembly.report.projected_image_bytes == len(content)
-    image_payload = payload["messages"][-1]["content"][0]
+    assert "Current datetime:" in payload["messages"][-1]["content"]
+    image_payload = payload["messages"][-2]["content"][0]
     assert image_payload["type"] == "image_url"
     assert image_payload["image_url"]["url"].startswith("data:image/png;base64,")
     assert str(store.root) not in str(payload)

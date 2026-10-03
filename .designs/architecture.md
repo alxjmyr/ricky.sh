@@ -216,8 +216,24 @@ protected-value and commit lifecycle.
 
 Ordinary context sources—persona, accessible profile and resource catalogs,
 memory indexes, active skill instructions, tool definitions, history, and the
-pending input—enter agent requests through `agent.context`. Lossless tool-result
-offloading uses session-owned artifact references. Semantic compaction replaces
+pending input—enter agent requests through `agent.context`. System instructions and
+current memory/skill instructions precede projected history;
+unchanged instructions and history retain their order as the conversation grows.
+The canonical request carries fresh runtime data (clock and gateway identity/activity)
+separately from messages. Adapters render it after conversation content, never hoist
+it into the system prefix, and do not treat it as a new user task. System instructions
+retain authority; quoted runtime activity grants none. Context inspection and limits
+account for this data. Each assembly refreshes the clock and current context sources;
+cache reuse never freezes memory, skills, policy, or time. Runtime data is not added
+to canonical session history or Claude Code's conversation replay digest.
+
+Provider session affinity uses the existing canonical session identity when supported:
+OpenRouter transmits it as `session_id`; Claude Code retains its existing native
+session mapping. Rebuilding a gateway runtime preserves the identity; a new session
+gets a new identity. Affinity does not pin a provider endpoint, disable failover, or
+alter model selection. Provider-specific cache controls remain adapter-owned.
+
+Lossless tool-result offloading uses session-owned artifact references. Semantic compaction replaces
 only the active projection of a complete historical prefix; canonical history
 and prior checkpoints remain evidence. Context projection independently bounds
 image count, bytes, pixels, and estimated image tokens. Explicit user uploads remain

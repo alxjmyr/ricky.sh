@@ -94,6 +94,7 @@ def test_context_assembly_is_deterministic() -> None:
         turn_id="turn_1",
         iteration=1,
         user_input="read README.md",
+        now=datetime(2026, 8, 13, 20, 42, 17, tzinfo=UTC),
     )
     second = assemble_context(
         session,
@@ -101,6 +102,7 @@ def test_context_assembly_is_deterministic() -> None:
         turn_id="turn_1",
         iteration=1,
         user_input="read README.md",
+        now=datetime(2026, 8, 13, 20, 42, 17, tzinfo=UTC),
     )
 
     assert first.request == second.request
@@ -110,6 +112,7 @@ def test_context_assembly_is_deterministic() -> None:
     assert [section.name for section in first.event.sections] == [
         "system",
         "history",
+        "current_datetime",
         "user_input",
     ]
 
@@ -246,7 +249,7 @@ def test_context_includes_current_utc_and_session_local_datetime() -> None:
         now=now,
     )
 
-    clock_part = assembly.request.messages[0].content[1]
+    clock_part = assembly.request.runtime_context[0]
     assert isinstance(clock_part, TextPart)
     assert "UTC: 2026-08-13T20:42:17Z" in clock_part.text
     assert "Session local: 2026-08-13T15:42:17-05:00" in clock_part.text

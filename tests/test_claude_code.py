@@ -1105,6 +1105,9 @@ async def test_agent_loop_dispatches_claude_code_tools_inside_ricky(
     assert "stub:alpha" in follow_up
     assert "Updated 1 task(s)" in follow_up
     assert "Do not stop at a promise, progress update" in follow_up
-    assert follow_up.endswith(
+    assert (
         "Finish only when the requested outcome is verified complete or you are concretely blocked."
+        in follow_up
     )
+    assert follow_up.index("Updated 1 task(s)") < follow_up.index("Current datetime:")
+    assert "Current datetime:" not in first_argv[first_argv.index("--system-prompt") + 1]

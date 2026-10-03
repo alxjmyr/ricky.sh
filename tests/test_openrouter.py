@@ -85,8 +85,13 @@ async def test_openrouter_image_translation_resolves_bytes_at_wire_boundary_in_o
         ],
     )
 
+    request.runtime_context = [TextPart(text="Current runtime data: image turn")]
+    request.session_id = "session_image"
     payload = await to_openrouter_request_with_media(request, Resolver())
 
+    assert "Current runtime data: image turn" in str(payload["messages"][-1])
+    assert payload["messages"][-1]["role"] == "user"
+    assert payload["session_id"] == "session_image"
     assert seen == [_image_ref()]
     assert payload["messages"][0]["content"] == [
         {"type": "text", "text": "before"},
@@ -105,7 +110,7 @@ async def test_openrouter_image_translation_resolves_bytes_at_wire_boundary_in_o
 def test_to_openrouter_request_translates_messages_and_tools() -> None:
     request = CompletionRequest(
         model="provider/model",
-        session_id="session_internal_only",
+        session_id="session_affinity",
         messages=[
             Message.text("system", "be terse"),
             Message.text("user", "read the file"),
@@ -140,7 +145,7 @@ def test_to_openrouter_request_translates_messages_and_tools() -> None:
     assert payload["temperature"] == 0.1
     assert payload["max_tokens"] == 50
     assert payload["provider"] == {"order": ["anthropic"]}
-    assert "session_id" not in payload
+    assert payload["session_id"] == "session_affinity"
     assert (
         payload["messages"][2]["tool_calls"][0]["function"]["arguments"] == '{"path":"README.md"}'
     )

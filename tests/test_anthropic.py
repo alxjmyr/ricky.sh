@@ -114,8 +114,11 @@ async def test_anthropic_image_translation_resolves_bytes_at_wire_boundary_in_or
         ],
     )
 
+    request.runtime_context = [TextPart(text="Current runtime data: image turn")]
     payload = await to_anthropic_request_with_media(request, Resolver())
 
+    assert "Current runtime data: image turn" in str(payload["messages"][-1])
+    assert payload["messages"][-1]["role"] == "user"
     assert payload["messages"][0]["content"] == [
         {"type": "text", "text": "before"},
         {

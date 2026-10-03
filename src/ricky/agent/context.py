@@ -78,6 +78,7 @@ class _CollectedContext:
     tools: list[ToolSpec]
     contributions: list[tuple[str, int, int]]
     pending_user_input_included: bool
+    runtime_context: list[TextPart]
 
 
 def assemble_context(
@@ -92,6 +93,7 @@ def assemble_context(
     memory: MemoryStore | None = None,
     workflow_registry: WorkflowRegistry | None = None,
     extra_system_sections: Mapping[str, str] | None = None,
+    extra_context_sections: Mapping[str, str] | None = None,
     max_completion_tokens: int | None = None,
     now: datetime | None = None,
 ) -> ContextAssembly:
@@ -105,6 +107,7 @@ def assemble_context(
         memory=memory,
         workflow_registry=workflow_registry,
         extra_system_sections=extra_system_sections,
+        extra_context_sections=extra_context_sections,
         max_completion_tokens=max_completion_tokens,
         now=now,
     )
@@ -126,6 +129,7 @@ def inspect_context(
     memory: MemoryStore | None = None,
     workflow_registry: WorkflowRegistry | None = None,
     extra_system_sections: Mapping[str, str] | None = None,
+    extra_context_sections: Mapping[str, str] | None = None,
     enforce_char_limit: bool = True,
     now: datetime | None = None,
 ) -> ContextReport:
@@ -139,6 +143,7 @@ def inspect_context(
         memory=memory,
         workflow_registry=workflow_registry,
         extra_system_sections=extra_system_sections,
+        extra_context_sections=extra_context_sections,
         max_completion_tokens=None,
         enforce_char_limit=enforce_char_limit,
         now=now,
@@ -234,6 +239,7 @@ def _build_context(
     memory: MemoryStore | None,
     workflow_registry: WorkflowRegistry | None,
     extra_system_sections: Mapping[str, str] | None,
+    extra_context_sections: Mapping[str, str] | None,
     max_completion_tokens: int | None,
     now: datetime | None,
     enforce_char_limit: bool = True,
@@ -247,6 +253,7 @@ def _build_context(
         memory=memory,
         workflow_registry=workflow_registry,
         extra_system_sections=extra_system_sections,
+        extra_context_sections=extra_context_sections,
         now=now,
     )
     projected = _identity_projection(collected)
@@ -254,6 +261,7 @@ def _build_context(
         model=session.model,
         messages=projected.messages,
         session_id=session.id,
+        runtime_context=projected.runtime_context,
         tools=projected.tools,
         max_tokens=max_completion_tokens,
     )
@@ -280,6 +288,7 @@ def _collect_context(
     memory: MemoryStore | None,
     workflow_registry: WorkflowRegistry | None,
     extra_system_sections: Mapping[str, str] | None,
+    extra_context_sections: Mapping[str, str] | None,
     now: datetime | None,
 ) -> _CollectedContext:
     resolved_cwd = (cwd or Path.cwd()).resolve()
@@ -337,12 +346,9 @@ def _collect_context(
         image_pixel_budget=(media_settings.request_image_pixel_limit - pending_image_pixels),
     )
     system_message = Message.text("system", system_text)
-    system_message.content.append(TextPart(text=_current_datetime_text(session, now)))
-    messages = [system_message, *projected_history]
+    messages = [system_message]
     contributions = [
         ("base_system_prompt", _part_chars(messages[0].content[0]), 1),
-        ("base_system_prompt", _part_chars(messages[0].content[1]), 1),
-        *history_contributions,
     ]
 
     if memory is not None:
@@ -362,6 +368,16 @@ def _collect_context(
         message = Message.text("system", text)
         messages.append(message)
         contributions.append((name, _part_chars(message.content[0]), 1))
+
+    messages.extend(projected_history)
+    contributions.extend(history_contributions)
+
+    runtime_context = [TextPart(text=_current_datetime_text(session, now))]
+    contributions.append(("current_datetime", _part_chars(runtime_context[0]), 1))
+    for name, text in (extra_context_sections or {}).items():
+        part = TextPart(text=text)
+        runtime_context.append(part)
+        contributions.append((name, _part_chars(part), 1))
 
     if canonical_user_input is not None:
         message = Message(role="user", content=list(canonical_user_input.parts))
@@ -388,6 +404,7 @@ def _collect_context(
         tools=tools,
         contributions=contributions,
         pending_user_input_included=canonical_user_input is not None,
+        runtime_context=runtime_context,
     )
 
 
@@ -404,8 +421,6 @@ def _current_datetime_text(session: AgentSession, now: datetime | None) -> str:
         f"- UTC: {utc_text}\n"
         f"- Session local: {local.isoformat(timespec='seconds')}\n"
         f"- Session timezone: {session.timezone}\n"
-        "Interpret relative dates and times in the session timezone unless the user "
-        "specifies another timezone."
     )
 
 

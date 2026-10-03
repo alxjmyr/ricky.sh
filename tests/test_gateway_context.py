@@ -14,12 +14,14 @@ from ricky.gateway.context import (
     GatewayContextError,
     GatewayContextLoader,
     gateway_instructions,
+    gateway_runtime_context,
     render_gateway_activity,
 )
 from ricky.gateway.store import GatewayStore
 from ricky.gateway.types import (
     Conversation,
     ConversationKey,
+    GatewayActivity,
     GatewayCapabilityCatalog,
     GatewayCapabilityItem,
 )
@@ -91,13 +93,19 @@ def test_gateway_instructions_expose_exact_guardrail_intake_before_delegation() 
         ]
     )
 
+    runtime_data = gateway_runtime_context(
+        conversation, inbound, GatewayActivity(profile_label=SCOPE.label()), char_limit=4_000
+    )
+    assert conversation.id in runtime_data["gateway_identity"]
+    assert inbound.id in runtime_data["gateway_identity"]
+
     instructions = gateway_instructions(
-        conversation,
-        inbound,
         catalog=catalog,
         capabilities=["builtin.sandbox.reservation"],
     )
 
+    assert inbound.id not in instructions
+    assert conversation.id not in instructions
     assert '"window_start"' in instructions
     assert '"format": "HH:MM"' in instructions
     assert "action=supply_guardrails" in instructions
@@ -165,9 +173,13 @@ def test_gateway_instructions_require_complete_background_capability_set(
         ]
     )
 
+    runtime_data = gateway_runtime_context(
+        conversation, inbound, GatewayActivity(profile_label=SCOPE.label()), char_limit=4_000
+    )
+    assert conversation.id in runtime_data["gateway_identity"]
+    assert inbound.id in runtime_data["gateway_identity"]
+
     instructions = gateway_instructions(
-        conversation,
-        inbound,
         catalog=catalog,
         capabilities=["builtin.automation.mutate"],
     )

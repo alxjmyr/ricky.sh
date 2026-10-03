@@ -246,11 +246,19 @@ async def to_openrouter_request_with_media(
 
 
 def _request_payload(request: CompletionRequest, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    if request.runtime_context:
+        messages = [
+            *messages,
+            _message_to_wire(Message(role="user", content=list(request.runtime_context))),
+        ]
+
     payload: dict[str, Any] = {
         "model": request.model,
         "messages": messages,
         "stream": True,
     }
+    if request.session_id is not None:
+        payload["session_id"] = request.session_id
     if request.tools:
         payload["tools"] = [
             {

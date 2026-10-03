@@ -212,6 +212,12 @@ Use `/context` when you need to understand what Ricky will send to the model. Th
 the context sections, estimated token use, capacity source, configured reserve, and retained versus
 projected image counts, bytes, pixels, and token estimates.
 
+Ricky keeps unchanged instructions and conversation history ahead of current runtime data to
+support provider prompt caching. Time, memory, and active skills remain current on each request.
+OpenRouter requests use the conversation's session ID for routing affinity, including across
+gateway turns. Cache reuse depends on the model, provider, and time between requests; it does
+not reduce the model's context usage or change permissions.
+
 Use `/debug` when diagnosing a specific turn. Debug mode displays context assembly, request
 metadata, token usage, normalized tool arguments, and tool results. Debug output can contain
 non-secret user data returned by tools; handle terminal logs accordingly.

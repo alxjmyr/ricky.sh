@@ -314,6 +314,12 @@ def _anthropic_request_payload(
         if message.role == "system":
             system_parts.extend(part.text for part in message.content if isinstance(part, TextPart))
 
+    if request.runtime_context:
+        messages = [
+            *messages,
+            _message_to_wire(Message(role="user", content=list(request.runtime_context))),
+        ]
+
     payload: dict[str, Any] = {
         "model": request.model,
         "messages": messages,

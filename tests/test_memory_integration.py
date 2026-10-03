@@ -109,6 +109,7 @@ def test_assembler_injects_memory_index_only_when_nonempty(tmp_path: Path) -> No
         "system",
         "history",
         "memory",
+        "current_datetime",
     ]
     request_text = with_notes.request.model_dump_json()
     assert "shared/preferences" in request_text

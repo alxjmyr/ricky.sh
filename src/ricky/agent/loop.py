@@ -132,6 +132,7 @@ class AgentLoop:
         session: AgentSession,
         *,
         extra_system_sections: Mapping[str, str] | None = None,
+        extra_context_sections: Mapping[str, str] | None = None,
     ) -> ContextReport:
         """Inspect the prospective stored-session request without side effects."""
         return build_context_report(
@@ -142,6 +143,7 @@ class AgentLoop:
             memory=self._memory,
             workflow_registry=self._workflow_registry,
             extra_system_sections=extra_system_sections,
+            extra_context_sections=extra_context_sections,
         )
 
     async def validate_image_input(
@@ -150,6 +152,7 @@ class AgentLoop:
         user_input: UserContent,
         *,
         extra_system_sections: Mapping[str, str] | None = None,
+        extra_context_sections: Mapping[str, str] | None = None,
         max_completion_tokens: int | None = None,
     ) -> None:
         """Preflight complete image context before an interface commits its draft."""
@@ -174,6 +177,7 @@ class AgentLoop:
             memory=self._memory,
             workflow_registry=self._workflow_registry,
             extra_system_sections=extra_system_sections,
+            extra_context_sections=extra_context_sections,
             max_completion_tokens=max_completion_tokens,
         )
         hard_input = assembly.report.budget.hard_input_tokens
@@ -199,6 +203,7 @@ class AgentLoop:
         max_iterations: int | None = None,
         max_completion_tokens_per_request: int | None = None,
         extra_system_sections: Mapping[str, str] | None = None,
+        extra_context_sections: Mapping[str, str] | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one user turn and yield every observable event."""
         canonical_input = (
@@ -237,6 +242,7 @@ class AgentLoop:
                     max_iterations=max_iterations,
                     max_completion_tokens_per_request=max_completion_tokens_per_request,
                     extra_system_sections=extra_system_sections,
+                    extra_context_sections=extra_context_sections,
                 )
             ) as events:
                 async for event in events:
@@ -290,6 +296,7 @@ class AgentLoop:
         max_iterations: int | None = None,
         max_completion_tokens_per_request: int | None = None,
         extra_system_sections: Mapping[str, str] | None = None,
+        extra_context_sections: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[AgentEvent]:
         """Run a turn after the public operation gate has been acquired."""
         turn_id = f"turn_{uuid4().hex}"
@@ -312,6 +319,7 @@ class AgentLoop:
                 session,
                 user_input,
                 extra_system_sections=extra_system_sections,
+                extra_context_sections=extra_context_sections,
                 max_completion_tokens=max_completion_tokens_per_request,
             )
             while iterations < iteration_bound:
@@ -334,6 +342,7 @@ class AgentLoop:
                     memory=self._memory,
                     workflow_registry=self._workflow_registry,
                     extra_system_sections=iteration_system_sections,
+                    extra_context_sections=extra_context_sections,
                     max_completion_tokens=max_completion_tokens_per_request,
                 )
                 yield assembly.event

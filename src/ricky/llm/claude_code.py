@@ -135,6 +135,19 @@ def render_tool_call(call: ToolCallPart) -> str:
 
 
 def to_claude_prompt(request: CompletionRequest) -> tuple[str, str]:
+    """Render a full request with fresh runtime data after conversation content."""
+    system, prompt = _to_claude_prompt(request)
+    return system, _append_runtime_context(prompt, request)
+
+
+def _append_runtime_context(prompt: str, request: CompletionRequest) -> str:
+    if not request.runtime_context:
+        return prompt
+    context = "\n\n".join(part.text for part in request.runtime_context)
+    return f"{prompt}\n\n{context}".lstrip("\n")
+
+
+def _to_claude_prompt(request: CompletionRequest) -> tuple[str, str]:
     """Render a canonical request as Claude Code system text and stdin prompt."""
     system_parts: list[str] = []
     conversation: list[Message] = []
@@ -166,8 +179,18 @@ def to_claude_delta_prompt(
     *,
     repeated_conversation: bool = False,
 ) -> tuple[str, str]:
+    """Render the resumed delta and fresh data without replaying history."""
+    system, prompt = _to_claude_delta_prompt(request, repeated_conversation=repeated_conversation)
+    return system, _append_runtime_context(prompt, request)
+
+
+def _to_claude_delta_prompt(
+    request: CompletionRequest,
+    *,
+    repeated_conversation: bool = False,
+) -> tuple[str, str]:
     """Render only content Claude Code has not retained in its resumed session."""
-    system_prompt, _ = to_claude_prompt(request)
+    system_prompt, _ = _to_claude_prompt(request)
     conversation = [message for message in request.messages if message.role != "system"]
     if not conversation:
         return system_prompt, ""

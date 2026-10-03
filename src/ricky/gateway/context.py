@@ -270,9 +270,23 @@ def render_gateway_activity(activity: GatewayActivity, *, char_limit: int) -> st
     )
 
 
-def gateway_instructions(
+def gateway_runtime_context(
     conversation: Conversation,
     inbound: InboundMessage,
+    activity: GatewayActivity,
+    *,
+    char_limit: int,
+) -> dict[str, str]:
+    """Project fresh identity and correlated activity without changing instructions."""
+    return {
+        "gateway_identity": (
+            f"Current gateway identity: conversation {conversation.id}; inbound {inbound.id}."
+        ),
+        "gateway_activity": render_gateway_activity(activity, char_limit=char_limit),
+    }
+
+
+def gateway_instructions(
     *,
     catalog: GatewayCapabilityCatalog,
     capabilities: list[str],
@@ -414,7 +428,6 @@ def gateway_instructions(
         "as the current response needs. "
         f"{MOBILE_MARKDOWN_GUIDANCE} "
         f"{delegation}"
-        f"Conversation id: {conversation.id}. Inbound id: {inbound.id}. "
         f"Configured capabilities: {allowed}. "
         f"Valid named jobs: {jobs}. Valid ad hoc capabilities: {ad_hoc_capabilities}. "
         f"Exact guarded capability intake specifications: {guardrail_intakes}."

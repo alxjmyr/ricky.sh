@@ -152,3 +152,10 @@ a window after enumeration to verify the native close helper tolerates `BadWindo
 without allowing Xlib to terminate pytest. It also injects `BadAtom` to prove that
 unexpected protocol errors still fail. The setup journeys retain normal Chrome
 exit, flushed login state, and browser-resource lease assertions.
+
+`test_prompt_cache_context.py` checks provider-wire prefix stability as time, activity,
+and history change, plus live memory/skill/persona/approval updates and Claude Code
+resume deltas. Adapter image tests cover the runtime suffix with materialized media.
+Gateway conversation tests verify stable instructions and session affinity across
+runtime reconstruction while the inbound identity remains fresh. These are payload
+checks; they do not measure provider cache hits or model quality.

@@ -56,7 +56,7 @@ from ricky.gateway.capability_use import (
 from ricky.gateway.context import (
     GatewayContextLoader,
     gateway_instructions,
-    render_gateway_activity,
+    gateway_runtime_context,
 )
 from ricky.gateway.handoffs import enqueue_foreground_response, reconcile_handoffs
 from ricky.gateway.store import GatewayStore
@@ -921,16 +921,16 @@ class ConversationCoordinator:
                 **({"images": inbound.images} if inbound.images else {}),
                 extra_system_sections={
                     "gateway": gateway_instructions(
-                        conversation,
-                        inbound,
                         catalog=catalog,
                         capabilities=[item.name for item in catalog.ad_hoc_capabilities],
                     ),
-                    "gateway_activity": render_gateway_activity(
-                        activity,
-                        char_limit=self.settings.gateway.activity_char_limit,
-                    ),
                 },
+                extra_context_sections=gateway_runtime_context(
+                    conversation,
+                    inbound,
+                    activity,
+                    char_limit=self.settings.gateway.activity_char_limit,
+                ),
                 event_sink=self._forward_event,
             )
         response = _final_message(stored.session)
@@ -1042,16 +1042,16 @@ class ConversationCoordinator:
                 session,
                 extra_system_sections={
                     "gateway": gateway_instructions(
-                        conversation,
-                        inbound,
                         catalog=catalog,
                         capabilities=[item.name for item in catalog.ad_hoc_capabilities],
                     ),
-                    "gateway_activity": render_gateway_activity(
-                        activity,
-                        char_limit=self.settings.gateway.activity_char_limit,
-                    ),
                 },
+                extra_context_sections=gateway_runtime_context(
+                    conversation,
+                    inbound,
+                    activity,
+                    char_limit=self.settings.gateway.activity_char_limit,
+                ),
             )
         return _render_context_report(session, stored.revision, report), stored.revision
 

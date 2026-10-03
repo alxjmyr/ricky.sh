@@ -83,6 +83,15 @@ async def test_conversation_resumes_same_session_after_process_restart(
 
     assert one.conversation_id == two.conversation_id
     assert one.session_id == two.session_id
+    first_request = first_provider.requests[0]
+    second_request = second_provider.requests[0]
+    assert first_request.session_id == second_request.session_id == one.session_id
+    first_system = [message for message in first_request.messages if message.role == "system"]
+    second_system = [message for message in second_request.messages if message.role == "system"]
+    assert first_system == second_system
+    assert any(first_message.id in part.text for part in first_request.runtime_context)
+    assert any(second_message.id in part.text for part in second_request.runtime_context)
+    assert all(first_message.id not in part.text for part in second_request.runtime_context)
     stored = await SessionStore(settings).get(one.session_id, scope=_SCOPE)
     assert [
         part.text

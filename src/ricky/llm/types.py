@@ -142,6 +142,8 @@ class CompletionRequest(BaseModel):
     model: str
     messages: list[Message]
     session_id: str | None = None
+    runtime_context: list[TextPart] = Field(default_factory=list)
+    """Fresh harness data rendered after messages, never instructions or persisted history."""
     tools: list[ToolSpec] = Field(default_factory=list)
     temperature: float | None = None
     max_tokens: int | None = None

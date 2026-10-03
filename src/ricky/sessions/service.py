@@ -82,6 +82,7 @@ class PersistentTurnService:
         inbound_ref: str | None = None,
         event_sink: EventSink | None = None,
         extra_system_sections: Mapping[str, str] | None = None,
+        extra_context_sections: Mapping[str, str] | None = None,
     ) -> StoredSession:
         """Run exactly one turn and return its committed session snapshot."""
 
@@ -181,13 +182,14 @@ class PersistentTurnService:
                                     profile_scope=session.profile_scope,
                                 )
                             )
-                        if extra_system_sections is None:
+                        if extra_system_sections is None and extra_context_sections is None:
                             events = runtime.agent_loop.run_turn(session, turn_input)
                         else:
                             events = runtime.agent_loop.run_turn(
                                 session,
                                 turn_input,
                                 extra_system_sections=extra_system_sections,
+                                extra_context_sections=extra_context_sections,
                             )
                         async for event in events:
                             if isinstance(event, BackgroundHandoffEvent):
