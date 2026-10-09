@@ -129,8 +129,9 @@ Workflow design visualization uses `test_workflow_visualization.py` for prompt a
 binding fidelity, fresh-source reads, profile/export isolation, tool contracts, and
 CLI compatibility. `workflow_visualization_support.py` provides one small shared
 design fixture. `test_workflow_visualization_browser.py` owns the real Chrome boundary
-for offline document loading, text safety, theme persistence, loop expansion, search,
-edge inspection, zoom, and mobile layout. Extra parsing and policy cases belong in
+for offline document loading, text safety, theme persistence, loop expansion from
+cards and the inspector, keyboard controls, prompt filtering with search, edge
+inspection, zoom, and mobile layout. Extra parsing and policy cases belong in
 the focused inspector tests rather than additional Chrome journeys.
 
 `test_shell_lifecycle.py` owns real subprocess checks for desktop visualization

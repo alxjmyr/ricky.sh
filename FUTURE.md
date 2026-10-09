@@ -1,5 +1,6 @@
 # TODO's and FEATURES:
 [] - CLI: COnfiguration Manager (maybe first TUI usecase): ensure API is extensible for web
+[] - TOOLS: Image Gen (create_image and edit_image tools)
 [] - TOOLS: Create a disable tools list (by profile) to improve context management and other issues 
 [] - GATEWAY: Separate Background Model Config?
 [] - PERMISSIONS | AUTH : properly fix internal task tracker permissions. update to better delineate between risk, effect class, authorization (i.e. read_only, none, ambient vs mutating, ricky_state, explicit.)

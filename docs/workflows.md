@@ -226,7 +226,11 @@ zoom and pan, expandable loop bodies, and a step inspector. Select a connection
 to see the exact field mapping. Dependency lines show ordering; data lines show
 bindings; dotted condition lines show conditional reads. Selecting a step highlights
 its data sources and consumers. Full instructions, skill guidance, input expressions,
-and schemas remain available in the inspector.
+and schemas remain available in the inspector. Enable **Prompts / instructions**
+to dim steps without model instructions or approval prompts and list matching steps.
+Matching steps inside loops are revealed automatically; search narrows the list.
+Click a loop card's **expand item graph** or **body expanded** control to expand or
+collapse it directly. These controls also support Enter and Space.
 
 Visualization reads current sources and compiles the design without running any
 steps, shell checks, models, or workflow tools. Invalid definitions report compile

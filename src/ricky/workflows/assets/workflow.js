@@ -8,6 +8,7 @@ const graph = $('graph'),
 let selected = null,
   selectedEdge = null,
   query = '',
+  promptsOnly = false,
   camera = [0, 0, 1000, 600],
   bounds = [1000, 600];
 const enabled = {
@@ -79,12 +80,7 @@ function showStep(id) {
   if (!step) return;
   panel.replaceChildren(element('span', step.kind, 'badge'), element('h2', step.id));
   panel.append(element('p', `Needs: ${step.needs.join(', ')||'(root)'}${step.parent?' · foreach '+step.parent:''}`));
-  if (step.kind === 'foreach') panel.append(button(expanded.has(id) ? 'Collapse body' : 'Expand body', () => {
-    expanded.has(id) ? expanded.delete(id) : expanded.add(id);
-    draw();
-    fit();
-    showStep(id);
-  }));
+  if (step.kind === 'foreach') panel.append(button(expanded.has(id) ? 'Collapse body' : 'Expand body', () => toggleBody(id)));
   if (step.instruction !== null) {
     panel.append(element('h3', 'Instructions'), element('div', step.instruction_source, 'source'), element('pre', step.instruction));
     panel.append(button('Copy instructions', async () => {
@@ -115,6 +111,18 @@ function showStep(id) {
   const policy = Object.fromEntries(Object.entries(step.declaration).filter(([k]) => !['instruction', 'instruction_file', 'inputs', 'args'].includes(k)));
   disclosure('Step declaration & policy', policy);
   if (step.instruction !== null) panel.append(element('p', view.context_note));
+}
+
+function toggleBody(id, focusControl = false) {
+  expanded.has(id) ? expanded.delete(id) : expanded.add(id);
+  select(id);
+  fit();
+  if (focusControl) [...graph.querySelectorAll('[data-expand]')].find(e => e.dataset.expand === id)?.focus();
+}
+
+function matchesFilters(step) {
+  return (!promptsOnly || step.instruction !== null || step.declaration.prompt !== undefined) &&
+    (!query || JSON.stringify(step).toLowerCase().includes(query));
 }
 
 function select(id) {
@@ -293,7 +301,7 @@ function draw() {
   }
   for (const [id, p] of positions) {
     const s = view.steps.find(s => s.id === id),
-      matches = !query || (s && JSON.stringify(s).toLowerCase().includes(query));
+      matches = s ? matchesFilters(s) : !query && !promptsOnly;
     const dim = (active && !active.has(visibleId(id))) || !matches;
     const g = svg('g', {
       class: `node${selected===id?' selected':''}${dim?' dim':''}`,
@@ -322,7 +330,7 @@ function draw() {
     label.append(svg('title', {}, id));
     g.append(label);
     const note = s ? (s.kind === 'foreach' ? (expanded.has(id) ? '− body expanded' : '+ expand item graph') : s.instruction !== null ? 'instructions + typed inputs' : s.declaration.when ? 'conditional step' : s.effect && s.effect !== 'none' ? s.effect + ' effect' : 'inspect declaration') : Object.keys(view.args).length + ' declared arguments';
-    g.append(svg('text', {
+    if (!s || s.kind !== 'foreach') g.append(svg('text', {
       x: p.x + 14,
       y: p.y + 65,
       class: 'note'
@@ -336,6 +344,26 @@ function draw() {
       }
     });
     graph.append(g);
+    if (s && s.kind === 'foreach') {
+      const control = svg('g', {
+        class: 'expand-control',
+        tabindex: 0,
+        role: 'button',
+        'data-expand': id,
+        'aria-label': `${expanded.has(id) ? 'Collapse' : 'Expand'} ${id} body`,
+        'aria-expanded': expanded.has(id)
+      });
+      control.append(svg('rect', {x: p.x + 6, y: p.y + 49, width: p.w - 12, height: 28, rx: 2}));
+      control.append(svg('text', {x: p.x + 14, y: p.y + 67}, note));
+      control.addEventListener('click', () => toggleBody(id, true));
+      control.addEventListener('keydown', ev => {
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          toggleBody(id, true);
+        }
+      });
+      graph.append(control);
+    }
   }
   applyCamera();
 }
@@ -392,24 +420,26 @@ $('clear').onclick = () => {
   selectedEdge = null;
   query = '';
   $('search').value = '';
-  draw();
-  welcome();
+  filterSteps();
 };
 for (const kind of Object.keys(enabled)) $(kind).onchange = () => {
   enabled[kind] = $(kind).checked;
   draw();
 };
-$('search').addEventListener('input', () => {
-  query = $('search').value.toLowerCase().trim();
+function filterSteps() {
   selected = null;
   selectedEdge = null;
+  const matches = view.steps.filter(matchesFilters);
+  if (promptsOnly) {
+    for (const s of matches) if (s.parent) expanded.add(s.parent);
+  }
   draw();
-  if (!query) {
+  if (promptsOnly) fit();
+  if (!query && !promptsOnly) {
     welcome();
     return;
   }
-  const matches = view.steps.filter(s => JSON.stringify(s).toLowerCase().includes(query));
-  panel.replaceChildren(element('div', 'SEARCH', 'eyebrow'), element('h2', `${matches.length} matching steps`));
+  panel.replaceChildren(element('div', promptsOnly ? 'PROMPTS / INSTRUCTIONS' : 'SEARCH', 'eyebrow'), element('h2', `${matches.length} matching steps`));
   for (const s of matches) panel.append(button(`${s.id} · ${s.kind}`, () => {
     if (s.parent) {
       expanded.add(s.parent);
@@ -418,7 +448,15 @@ $('search').addEventListener('input', () => {
     }
     select(s.id);
   }, 'step-link'));
+}
+$('search').addEventListener('input', () => {
+  query = $('search').value.toLowerCase().trim();
+  filterSteps();
 });
+$('prompts-only').onchange = () => {
+  promptsOnly = $('prompts-only').checked;
+  filterSteps();
+};
 let theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 try {
   theme = localStorage.getItem('ricky-workflow-theme') || theme;

@@ -506,3 +506,22 @@ aside {
 #canvas {
   min-height: 0;
 }
+
+svg .expand-control {
+  cursor: pointer;
+}
+
+svg .expand-control rect {
+  fill: var(--panel);
+  stroke: var(--line);
+}
+
+svg .expand-control:hover rect {
+  stroke: var(--accent);
+}
+
+svg .expand-control text {
+  fill: var(--accent);
+  font-size: 10px;
+  pointer-events: none;
+}
