@@ -1061,6 +1061,20 @@ class ExecutionDispatcher:
                 "Tool results and actions in this session remain part of the current attempt."
             ),
             "linked_durable_task": (
+                "You own the linked task's closure assessment before your final report. "
+                "Check its closure criteria against observed results, not just successful "
+                "tool calls. When satisfied, use complete_durable_task with an evidence-based "
+                "completion summary and confirm the tool succeeded before reporting completion. "
+                "For research, the final report can deliver the requested findings; do not "
+                "leave the task open merely for the user to read them. If user input is "
+                "needed, use wait_durable_task with waiting_on=user and the exact question "
+                "as next_action. Use block_durable_task for an unresolved blocker. Continue "
+                "authorized work when feasible; otherwise preserve progress and a specific "
+                "next action. Read and claim the task using its current revision before "
+                "mutating it. If task tools are unavailable or a mutation fails, explicitly "
+                "report that task closure was not recorded; never replay successful external "
+                "effects just to repair bookkeeping. report_task_outcome is a run assessment, "
+                "not a substitute for updating the durable task; call it after task updates.\n"
                 "Task snapshot at dispatch (historical, not live state):\n"
                 "Task mutations advance its revision. Later task read and mutation results "
                 "supersede this snapshot. The execution's pinned task revision identifies "
@@ -1113,6 +1127,11 @@ class ExecutionDispatcher:
         store = await ScopedDurableTaskStore.create(self.settings, scope=request.profile_scope)
         current = await store.get_task(request.task_id)
         if current.status in {"completed", "cancelled"} or current.execution_mode == "user":
+            return request
+        # Preserve an explicit handoff recorded since dispatch, including a
+        # worker reporting a blocked run. Execution failures are still recorded
+        # and reported independently; they must not erase the task's next action.
+        if current.revision > original.revision and current.status in {"waiting", "blocked"}:
             return request
         summary = await self._result_summary(run)
         holder = f"execution:{request.id}"

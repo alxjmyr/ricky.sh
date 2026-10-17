@@ -54,7 +54,7 @@ from ricky.jobs.runner import (
     JobRunner,
     _resolve_execution_browser_attachments,
 )
-from ricky.llm import CompletionRequest, Message, MessageDone, StreamEvent
+from ricky.llm import CompletionRequest, Message, MessageDone, StreamEvent, ToolCallPart
 from ricky.messaging.store import MessagingStore
 from ricky.messaging.types import InboundMessage, ReceiveBatch, ReceivedUpdate, TransportCursor
 from ricky.notifications.routes import RoutePolicy
@@ -374,6 +374,72 @@ class _ContractProvider:
 
     async def aclose(self) -> None:
         return None
+
+
+async def test_compiled_task_capabilities_allow_worker_closure_without_effect_budget(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    task = await _task(settings)
+    conversation_id = f"conversation_{uuid4().hex}"
+    runtime, compiler = await _compiler(settings, tmp_path, conversation_id=conversation_id)
+
+    class ClosingProvider(_ContractProvider):
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            names = {tool.name for tool in request.tools}
+            assert {"read_durable_task", "claim_durable_task", "complete_durable_task"} <= names
+            index = len(self.requests)
+            self.requests.append(request)
+            if index < 2:
+                name, args = (
+                    ("claim_durable_task", {"task_id": task.id, "expected_revision": task.revision})
+                    if index == 0
+                    else (
+                        "complete_durable_task",
+                        {"task_id": task.id, "completion_summary": "Verified research findings"},
+                    )
+                )
+                message = Message(
+                    role="assistant",
+                    content=[ToolCallPart(id=f"close_{index}", name=name, args=args)],
+                )
+            else:
+                message = Message.text("assistant", "Research findings verified and task closed.")
+            yield MessageDone(message=message)
+
+    try:
+        draft = await compiler.review(
+            AdHocExecutionProposal(
+                task_id=task.id,
+                expected_task_revision=task.revision,
+                goal="Research and close the linked task.",
+                requested_capabilities=(
+                    "builtin.project.read",
+                    "builtin.task.read",
+                    "builtin.task.mutate",
+                ),
+            ),
+            source=_source("Research and close the task.", conversation_id=conversation_id),
+        )
+        contract = await compiler.compile(draft)
+        assert contract.budget.effect_calls == 0
+        run = await JobRunner(settings, project_root=tmp_path).run_spec(
+            contract.job_spec(),
+            contract.goal,
+            source_digest=contract.digest,
+            profile_scope=contract.profile_scope,
+            provider=ClosingProvider(),
+            pinned_runtime=load_pinned_runtime(settings, contract),
+        )
+        assert run.outcome == "succeeded"
+        tasks = await DurableTaskStore.create(settings, profile="personal")
+        completed = await tasks.get_task(task.id)
+        assert completed.status == "completed"
+        assert completed.completion_summary == "Verified research findings"
+        assert completed.lease is None
+        assert run.effect_calls == 0
+    finally:
+        await runtime.__aexit__(None, None, None)
 
 
 @pytest.mark.asyncio

@@ -429,6 +429,76 @@ async def test_receipt_read_failure_does_not_claim_task(tmp_path: Path) -> None:
     assert await tasks.get_task(task.id) == task
 
 
+@pytest.mark.parametrize("state", ["waiting", "blocked", "completed"])
+@pytest.mark.parametrize("succeeded", [True, False])
+async def test_execution_settlement_preserves_worker_task_disposition(
+    tmp_path: Path, state: str, succeeded: bool
+) -> None:
+    settings = _settings(tmp_path)
+    original = await _task(settings)
+    tasks = await ScopedDurableTaskStore.create(settings, scope=SCOPE)
+    claimed = await tasks.claim(
+        original.id,
+        holder_session_id="worker",
+        expected_revision=original.revision,
+        authority="agent_autonomy",
+        executor_id="worker",
+    )
+    assert claimed.lease is not None
+    common = dict(
+        lease=claimed.lease,
+        expected_revision=claimed.revision,
+        authority="agent_autonomy",
+        executor_id="worker",
+    )
+    if state == "completed":
+        await tasks.complete(original.id, completion_summary="Verified the answer", **common)
+    elif state == "waiting":
+        await tasks.wait(
+            original.id,
+            waiting_on="user",
+            current_summary="Two options verified",
+            next_action="Which option should I use?",
+            **common,
+        )
+    else:
+        await tasks.block(
+            original.id,
+            current_summary="Source is unavailable",
+            next_action="Restore source access",
+            **common,
+        )
+    await tasks.release_session_leases("worker")
+    before = await tasks.get_task(original.id)
+    run = JobRun(
+        id="jobrun_worker_disposition",
+        provider="openrouter",
+        model="test",
+        profile_scope=SCOPE,
+        session_id="worker",
+        started_at=datetime.now(UTC),
+        outcome="succeeded" if succeeded else "failed",
+        error=None if succeeded else "Worker requires input",
+        final_message="Worker report",
+    )
+    request = ExecutionRequest(
+        id="execution_" + "e" * 32,
+        kind="named_job",
+        status="succeeded" if succeeded else "failed",
+        named_job="personal/brief",
+        job_digest="a" * 64,
+        profile_scope=SCOPE,
+        notification_route="owner",
+        request_key="worker-disposition",
+        created_at=datetime.now(UTC),
+        task_id=original.id,
+        task_revision=original.revision,
+    )
+    dispatcher = ExecutionDispatcher(settings, project_root=tmp_path)
+    assert await dispatcher._update_task(request, original, run) == request
+    assert await tasks.get_task(original.id) == before
+
+
 async def test_gateway_named_handoff_waits_for_delivery_and_projects_one_result(
     tmp_path: Path,
 ) -> None:

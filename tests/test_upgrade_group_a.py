@@ -7,6 +7,7 @@ import sqlite3
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,24 @@ def test_current_inspection_is_structural_integrity_checked_and_read_only(
     assert inspection.state == "current"
     assert inspection.integrity_valid is True
     assert _snapshot(path.parent) == before
+
+
+def test_execution_inspection_preserves_idle_wal_files_and_reads_live_wal(tmp_path: Path) -> None:
+    path = tmp_path / "executions.sqlite3"
+    create_current_executions_database(path)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+    before = _snapshot(tmp_path)
+    assert not Path(f"{path}-wal").exists()
+    assert inspect_executions_database(path).state == "current"
+    assert _snapshot(tmp_path) == before
+
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("PRAGMA user_version=999")
+        writer.commit()
+        assert Path(f"{path}-wal").stat().st_size > 0
+        assert inspect_executions_database(path).found_schema_version == 999
 
 
 @pytest.mark.parametrize(

@@ -187,6 +187,9 @@ def test_gateway_instructions_require_complete_background_capability_set(
     assert "complete the task end-to-end from persisted task context" in instructions
     assert "Include prerequisite read or discovery capabilities" in instructions
     assert "never assume mutation implies read access" in instructions
+    assert "Include builtin.task.read and builtin.task.mutate" in instructions
+    assert "verify closure criteria and complete the linked task" in instructions
+    assert "worker cannot close the task automatically" in instructions
     assert "when the user asks to remember, save, or commit facts" in instructions
     assert "use the background delegation path in this turn" in instructions
     assert "Do not ask them to repeat the request" in instructions

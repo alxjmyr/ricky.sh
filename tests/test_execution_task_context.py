@@ -110,6 +110,11 @@ async def test_dispatch_snapshot_allows_completion_or_bounds_stale_claims(
     assert "supersede this snapshot" in snapshot
     assert '"lease"' not in snapshot
     assert '"revision": 1' in snapshot
+    assert "You own the linked task's closure assessment" in snapshot
+    assert "use complete_durable_task" in snapshot
+    assert "confirm the tool succeeded before reporting completion" in snapshot
+    assert "wait_durable_task with waiting_on=user" in snapshot
+    assert "not a substitute for updating the durable task" in snapshot
 
     session = AgentSession.create(settings, profile_scope=scope, model="test-model")
     guard = DurableTaskStateGuard(tasks)

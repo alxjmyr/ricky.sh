@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import time
 from collections.abc import Sequence
+from contextlib import closing
 from pathlib import Path
 
 from ricky.executions.store import (
@@ -184,7 +185,7 @@ def inspect_executions_database(path: Path) -> AdapterInspection:
     if path.is_symlink() or not path.is_file():
         return _inspection(target, "corrupt", None, False, "execution database is not a file")
     try:
-        with _read_only_connection(path) as connection:
+        with closing(_read_only_connection(path)) as connection:
             version = _user_version(connection)
             if not _quick_check(connection):
                 return _inspection(
@@ -476,7 +477,12 @@ def _inspection(
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, isolation_level=None)
+    # Match session inspection: idle WAL databases need no sidecars, but an
+    # existing WAL must remain visible so committed frames are not ignored.
+    immutable = "&immutable=1" if not Path(f"{path}-wal").exists() else ""
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?mode=ro{immutable}", uri=True, isolation_level=None
+    )
     connection.execute("PRAGMA query_only = ON")
     return connection
 

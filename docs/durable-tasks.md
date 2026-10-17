@@ -19,6 +19,15 @@ session to advance it, select it through a job's task source, or delegate an exe
 through the gateway. See [Jobs and schedules](jobs-and-schedules.md) and
 [Messaging and the gateway](messaging-and-gateway.md).
 
+For gateway-delegated work, Ricky requests task read and mutation capabilities
+alongside the capabilities needed for the work. The background agent checks the
+closure criteria and records completion before its final report. If it needs
+your input, it records a waiting state and a specific question; other unresolved
+obstacles should be recorded as blockers. These instructions guide the agent;
+execution success alone does not automatically close a durable task. If task
+tools are unavailable or an update fails, the report should say closure was not
+recorded.
+
 ## Create a task
 
 ```bash

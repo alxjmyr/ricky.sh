@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tomllib
 import zipfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -289,7 +290,7 @@ asyncio.run(check())
 
 
 def _assert_legacy_records(root: Path, records: dict[str, str], *, migrated: bool) -> None:
-    with sqlite3.connect(root / "sessions/sessions.sqlite3") as db:
+    with closing(sqlite3.connect(root / "sessions/sessions.sqlite3")) as db:
         assert (
             db.execute("SELECT session_json FROM sessions").fetchone()[0] == records["session_json"]
         )
@@ -303,7 +304,7 @@ def _assert_legacy_records(root: Path, records: dict[str, str], *, migrated: boo
             assert db.execute(
                 "SELECT background_handoffs, handoff_acknowledgement FROM turns"
             ).fetchone() == ("[]", None)
-    with sqlite3.connect(root / "executions/executions.sqlite3") as db:
+    with closing(sqlite3.connect(root / "executions/executions.sqlite3")) as db:
         assert db.execute("PRAGMA user_version").fetchone()[0] == (9 if migrated else 8)
         assert db.execute("SELECT id, named_job FROM execution_requests").fetchall() == [
             ("execution_" + "a" * 32, "shared/legacy")
