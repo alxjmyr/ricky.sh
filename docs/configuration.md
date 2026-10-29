@@ -146,7 +146,7 @@ the entries you need into the owning profile, and enter credentials locally. Com
 
 | Section | Controls |
 |---|---|
-| `[context]` | Context estimation, output reserve, large tool results, and manual compaction |
+| `[context]` | Context estimation, output reserve, large tool results, and automatic/manual compaction |
 | `[memory]` | Profile memory enablement and note limits |
 | `[durable_tasks]` | Task storage, leases, and artifact limits |
 | `[workflow]` | Workflow enablement, parallelism, retries, and data limits |

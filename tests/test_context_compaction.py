@@ -862,7 +862,7 @@ def test_debug_render_includes_checkpoint_provenance_and_usage() -> None:
     assert "after_sections" in rendered
 
 
-async def test_normal_turn_never_compacts_automatically(tmp_path: Path) -> None:
+async def test_normal_turn_below_threshold_does_not_compact(tmp_path: Path) -> None:
     settings = _settings()
     session = _long_history(settings)
     provider = ScriptedProvider([_summary_done("normal response")])

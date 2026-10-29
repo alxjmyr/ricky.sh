@@ -91,10 +91,15 @@ artifact_max_chars = 2000000
 session_artifact_max_chars = 20000000
 read_chunk_chars = 12000
 
-# User-triggered semantic compaction. Bounded tool-free requests summarize older
+# Shared semantic compaction. Bounded tool-free requests summarize older
 # context while the originating user request and recent settled work remain verbatim.
 [context.compaction]
 enabled = true
+# Check the complete request before each model call, including after tool batches.
+# Disable only automatic triggering with auto_enabled = false; /compact still works.
+auto_enabled = true
+auto_trigger_ratio = 0.9
+auto_target_ratio = 0.65
 # Preferred recent tail; compaction can retain less to meet context limits.
 keep_recent_tokens = 16000
 max_summary_tokens = 4096

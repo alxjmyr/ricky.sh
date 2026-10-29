@@ -765,6 +765,9 @@ class CliRenderer:
         )
         compaction = settings.context.compaction
         table.add_row("context.compaction.enabled", str(compaction.enabled))
+        table.add_row("context.compaction.auto_enabled", str(compaction.auto_enabled))
+        table.add_row("context.compaction.auto_trigger_ratio", str(compaction.auto_trigger_ratio))
+        table.add_row("context.compaction.auto_target_ratio", str(compaction.auto_target_ratio))
         table.add_row(
             "context.compaction.keep_recent_tokens",
             str(compaction.keep_recent_tokens),

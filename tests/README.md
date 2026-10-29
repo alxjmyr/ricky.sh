@@ -121,6 +121,14 @@ tool transcripts check projection and absence of tool replay without launching
 Chrome. Provider and session-service tests retain native-session rotation and
 durable fenced commit coverage; these are not replaced by projection tests.
 
+`test_auto_compaction.py` owns pre-request trigger thresholds, full-request budget
+accounting, continuation after settled tool batches, failure suppression,
+cancellation, and summary usage. These use the real loop and shared compactor
+with scripted providers; browser execution and persistent-store guarantees remain
+in their existing boundary suites. The browser login fixture handles isolated
+summary requests separately from scripted login steps, preserving credential,
+verification, and final account-observation assertions under automatic compaction.
+
 The workflow job timeout case waits for the provider's start event before arming
 the runner's real 50 ms timer. It retains budget-expiry, persisted interruption,
 and provider-cancellation assertions without requiring workflow checkpoint setup

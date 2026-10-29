@@ -96,6 +96,7 @@ def assemble_context(
     extra_context_sections: Mapping[str, str] | None = None,
     max_completion_tokens: int | None = None,
     now: datetime | None = None,
+    enforce_char_limit: bool = True,
 ) -> ContextAssembly:
     """Build and account for the exact canonical request sent by the loop."""
     request, report = _build_context(
@@ -110,6 +111,7 @@ def assemble_context(
         extra_context_sections=extra_context_sections,
         max_completion_tokens=max_completion_tokens,
         now=now,
+        enforce_char_limit=enforce_char_limit,
     )
     event = ContextAssembledEvent(
         turn_id=turn_id,
@@ -149,6 +151,40 @@ def inspect_context(
         now=now,
     )
     return report
+
+
+def validate_context_limits(session: AgentSession, report: ContextReport) -> None:
+    """Validate an inspected request immediately before provider dispatch."""
+    char_limit = int(
+        session.settings_snapshot.get("context_char_limit", DEFAULT_CONTEXT_CHAR_LIMIT)
+    )
+    if report.serialized_chars > char_limit:
+        raise ValueError(
+            f"context character limit exceeded: {report.serialized_chars} > {char_limit}. "
+            "Compact or clear context, or reduce the input."
+        )
+    validate_image_context_limits(session, report)
+    hard_input = report.budget.hard_input_tokens
+    if hard_input is not None and report.estimated_input_tokens > hard_input:
+        raise ValueError(
+            "Context exceeds the model's available input budget. "
+            "Compact or clear context, reduce the input, or choose a larger model."
+        )
+
+
+def validate_image_context_limits(session: AgentSession, report: ContextReport) -> None:
+    """Keep attachment admission independent of recoverable text pressure."""
+    settings = ContextSettings.model_validate(session.settings_snapshot.get("context", {}))
+    for value, limit, label in (
+        (report.projected_image_count, settings.media.request_image_limit, "count"),
+        (report.projected_image_bytes, settings.media.request_image_byte_limit, "byte"),
+        (report.projected_image_pixels, settings.media.request_image_pixel_limit, "pixel"),
+    ):
+        if value > limit:
+            raise ValueError(
+                f"context exceeds the request image {label} limit; "
+                "compact or clear context (/new in Telegram)"
+            )
 
 
 def validate_user_images(session: AgentSession, user_input: UserContent) -> None:

@@ -10,6 +10,7 @@ from pydantic import SecretStr, ValidationError
 
 from ricky.config import (
     AuthoritySettings,
+    ContextCompactionSettings,
     GatewayRouteSettings,
     GatewaySettings,
     GmailSettings,
@@ -33,6 +34,32 @@ from ricky.config import (
     write_default_selection,
     write_profile_secret,
 )
+
+
+def test_automatic_compaction_defaults_and_json_round_trip() -> None:
+    policy = ContextCompactionSettings()
+    assert policy.auto_enabled is True
+    assert policy.auto_trigger_ratio == 0.9
+    assert policy.auto_target_ratio == 0.65
+    assert ContextCompactionSettings.model_validate_json(policy.model_dump_json()) == policy
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"auto_trigger_ratio": 0},
+        {"auto_trigger_ratio": 1},
+        {"auto_target_ratio": 0},
+        {"auto_target_ratio": 1},
+        {"auto_trigger_ratio": 0.65, "auto_target_ratio": 0.65},
+        {"auto_trigger_ratio": 0.6, "auto_target_ratio": 0.7},
+        {"auto_trigger_ratio": float("nan")},
+    ],
+)
+def test_automatic_compaction_requires_threshold_headroom(overrides: dict[str, float]) -> None:
+    with pytest.raises(ValidationError):
+        ContextCompactionSettings.model_validate(overrides)
+
 
 ENV_VARS = (
     "OPENROUTER_API_KEY",

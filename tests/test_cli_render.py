@@ -15,6 +15,8 @@ from catalog_listing_support import write_catalogs
 from ricky.agent.events import (
     AgentErrorEvent,
     ContextAssembledEvent,
+    ContextCompactionFinishedEvent,
+    ContextCompactionStartedEvent,
     ContextSection,
     LlmRequestStartedEvent,
     LlmResponseFinishedEvent,
@@ -175,6 +177,66 @@ def test_config_renders_resolved_user_data_path(tmp_path: Path) -> None:
     text = output.getvalue()
     assert "user_data_path" in text
     assert str((tmp_path / "custom-user-data").resolve()) in text
+    assert "context.compaction.auto_enabled" in text
+    assert "context.compaction.auto_trigger_ratio" in text
+    assert "context.compaction.auto_target_ratio" in text
+
+
+def test_compaction_progress_between_tool_batch_and_next_request() -> None:
+    renderer, output = _renderer()
+    renderer.render_event(
+        ToolCallStartedEvent(turn_id="turn", call_id="read", tool_name="read_file")
+    )
+    renderer.render_event(
+        ToolCallFinishedEvent(
+            turn_id="turn",
+            call_id="read",
+            tool_name="read_file",
+            is_error=False,
+            content_chars=4,
+            content="done",
+        )
+    )
+    renderer.render_event(
+        ContextCompactionStartedEvent(
+            operation_id="compact",
+            source_digest="a" * 64,
+            covered_message_count=4,
+            newly_covered_message_count=4,
+            retained_message_count=3,
+            estimated_tokens_before=10000,
+        )
+    )
+    renderer.render_event(
+        ContextCompactionFinishedEvent(
+            operation_id="compact",
+            checkpoint_id="checkpoint",
+            source_digest="a" * 64,
+            covered_message_count=4,
+            newly_covered_message_count=4,
+            retained_message_count=3,
+            summary_chars=100,
+            estimated_tokens_before=10000,
+            estimated_tokens_after=5000,
+        )
+    )
+    assert renderer._activity_message is None
+    assert renderer._active_tools == {}
+    rendered = output.getvalue()
+    assert "Compacting 4 historical messages" in rendered
+    assert "Compacted 4 messages" in rendered
+    assert rendered.index("read_file") < rendered.index("Compacting")
+    renderer.render_event(
+        LlmRequestStartedEvent(
+            turn_id="turn",
+            iteration=2,
+            model="model",
+            message_count=5,
+            tool_count=1,
+        )
+    )
+    assert renderer._activity_message == "Thinking…"
+    renderer.finish_stream()
 
 
 def test_completed_response_renders_markdown_before_tool_line() -> None:

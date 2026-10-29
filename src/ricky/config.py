@@ -303,10 +303,19 @@ class ContextCompactionSettings(BaseModel):
     """Policy for bounded, tool-free semantic context compaction."""
 
     enabled: bool = True
+    auto_enabled: bool = True
+    auto_trigger_ratio: float = Field(default=0.9, gt=0, lt=1)
+    auto_target_ratio: float = Field(default=0.65, gt=0, lt=1)
     keep_recent_tokens: int = Field(default=16_000, ge=1)
     max_summary_tokens: int = Field(default=4_096, ge=1)
     max_focus_chars: int = Field(default=2_000, ge=1)
     max_summary_chars: int = Field(default=24_000, ge=1)
+
+    @model_validator(mode="after")
+    def _automatic_compaction_headroom(self) -> ContextCompactionSettings:
+        if self.auto_target_ratio >= self.auto_trigger_ratio:
+            raise ValueError("auto_target_ratio must be less than auto_trigger_ratio")
+        return self
 
 
 class ContextSettings(BaseModel):

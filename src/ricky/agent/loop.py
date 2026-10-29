@@ -8,12 +8,21 @@ import json
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from ricky.agent.compaction import ContextCompactor
-from ricky.agent.context import assemble_context, validate_user_images
+from ricky.agent.context import (
+    DEFAULT_CONTEXT_CHAR_LIMIT,
+    assemble_context,
+    source_history_digest,
+    validate_context_limits,
+    validate_image_context_limits,
+    validate_user_images,
+)
 from ricky.agent.context import inspect_context as build_context_report
 from ricky.agent.context_types import ContextReport
 from ricky.agent.events import (
@@ -21,6 +30,7 @@ from ricky.agent.events import (
     AgentEvent,
     BackgroundHandoffEvent,
     ContextCompactionFailedEvent,
+    ContextCompactionFinishedEvent,
     LlmRequestStartedEvent,
     LlmResponseFinishedEvent,
     SessionStartedEvent,
@@ -44,7 +54,7 @@ from ricky.agent.tool_dispatch import (
     decide_tool_permission,
     deny_permission,
 )
-from ricky.config import RickySettings
+from ricky.config import ContextSettings, RickySettings
 from ricky.llm import (
     ImagePart,
     Message,
@@ -164,6 +174,10 @@ class AgentLoop:
         )
         if not has_images:
             return
+        compaction = ContextSettings.model_validate(
+            session.settings_snapshot.get("context", {})
+        ).compaction
+        defer_capacity = compaction.enabled and compaction.auto_enabled
         assembly = assemble_context(
             session,
             self._registry_for(session),
@@ -177,9 +191,37 @@ class AgentLoop:
             extra_system_sections=extra_system_sections,
             extra_context_sections=extra_context_sections,
             max_completion_tokens=max_completion_tokens,
+            enforce_char_limit=not defer_capacity,
         )
+        validate_image_context_limits(session, assembly.report)
         hard_input = assembly.report.budget.hard_input_tokens
-        if hard_input is not None and assembly.report.estimated_input_tokens > hard_input:
+        if defer_capacity:
+            # Reject an irreducible draft before the interface clears it. Only
+            # pressure attributable to existing history may wait for compaction.
+            minimum_session = session.model_copy(
+                update={"history": [], "checkpoints": [], "active_checkpoint_id": None}
+            )
+            minimum = assemble_context(
+                minimum_session,
+                self._registry_for(session),
+                turn_id="image_preflight_minimum",
+                iteration=1,
+                user_input=user_input,
+                cwd=self._cwd,
+                skill_registry=self._skill_registry,
+                memory=self._memory,
+                workflow_registry=self._workflow_registry,
+                extra_system_sections=extra_system_sections,
+                extra_context_sections=extra_context_sections,
+                max_completion_tokens=max_completion_tokens,
+                enforce_char_limit=False,
+            )
+            validate_context_limits(minimum_session, minimum.report)
+        if (
+            not defer_capacity
+            and hard_input is not None
+            and assembly.report.estimated_input_tokens > hard_input
+        ):
             raise ValueError(
                 "Image context exceeds the model's available input budget. "
                 "Remove draft attachments, compact or clear context (/new in Telegram)."
@@ -315,6 +357,10 @@ class AgentLoop:
         rejected_call_counts: dict[str, int] = {}
         runtime_failure_counts: dict[tuple[str, str, str], int] = {}
         runtime_recovery: str | None = None
+        compaction = ContextSettings.model_validate(
+            session.settings_snapshot.get("context", {})
+        ).compaction
+        last_compaction_source: tuple[str, str | None] | None = None
 
         async for event in self._start_events(session, turn_id, user_input):
             yield event
@@ -337,9 +383,9 @@ class AgentLoop:
                     runtime_recovery = None
                 if last_response_was_empty:
                     iteration_system_sections["empty_response_recovery"] = EMPTY_RESPONSE_RECOVERY
-                assembly = assemble_context(
-                    session,
-                    iteration_registry,
+                assemble = partial(
+                    assemble_context,
+                    registry=iteration_registry,
                     turn_id=turn_id,
                     iteration=iterations,
                     user_input=user_message_pending,
@@ -350,7 +396,72 @@ class AgentLoop:
                     extra_system_sections=iteration_system_sections,
                     extra_context_sections=extra_context_sections,
                     max_completion_tokens=max_completion_tokens_per_request,
+                    now=datetime.now(UTC),
+                    enforce_char_limit=False,
                 )
+
+                assembly = assemble(session)
+                char_limit = int(
+                    session.settings_snapshot.get("context_char_limit", DEFAULT_CONTEXT_CHAR_LIMIT)
+                )
+                hard_input = assembly.report.budget.hard_input_tokens
+                near_capacity = (
+                    assembly.report.serialized_chars >= char_limit * compaction.auto_trigger_ratio
+                    or (
+                        hard_input is not None
+                        and assembly.report.estimated_input_tokens
+                        >= hard_input * compaction.auto_trigger_ratio
+                    )
+                )
+                if compaction.enabled and compaction.auto_enabled and near_capacity:
+                    source = (source_history_digest(session.history), session.active_checkpoint_id)
+                    if source != last_compaction_source:
+                        # Empty-response retries and refreshed runtime data do not
+                        # create new history that could make another attempt useful.
+                        last_compaction_source = source
+                        compactor = ContextCompactor(
+                            provider=self._provider,
+                            context_reporter=lambda candidate, assemble=assemble: (
+                                assemble(candidate).report
+                            ),
+                        )
+                        async with aclosing(
+                            compactor.compact(
+                                session,
+                                target_chars=max(1, int(char_limit * compaction.auto_target_ratio)),
+                                target_tokens=(
+                                    max(1, int(hard_input * compaction.auto_target_ratio))
+                                    if hard_input is not None
+                                    else None
+                                ),
+                                max_completion_tokens=max_completion_tokens_per_request,
+                            )
+                        ) as events:
+                            async for event in events:
+                                if isinstance(
+                                    event,
+                                    (ContextCompactionFinishedEvent, ContextCompactionFailedEvent),
+                                ):
+                                    turn_usage = Usage(
+                                        prompt_tokens=turn_usage.prompt_tokens
+                                        + event.usage.prompt_tokens,
+                                        completion_tokens=turn_usage.completion_tokens
+                                        + event.usage.completion_tokens,
+                                    )
+                                yield event
+                                if (
+                                    isinstance(event, ContextCompactionFailedEvent)
+                                    and event.error_type == "CancelledError"
+                                ):
+                                    raise asyncio.CancelledError
+                        last_compaction_source = (
+                            source_history_digest(session.history),
+                            session.active_checkpoint_id,
+                        )
+                        # The model sees current runtime data after a potentially
+                        # slow summary, while candidate checks share one clock.
+                        assembly = assemble(session, now=datetime.now(UTC))
+                validate_context_limits(session, assembly.report)
                 yield assembly.event
                 yield LlmRequestStartedEvent(
                     turn_id=turn_id,

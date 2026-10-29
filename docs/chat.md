@@ -224,7 +224,12 @@ non-secret user data returned by tools; handle terminal logs accordingly.
 
 ## Compact a long chat
 
-Use `/compact` when older conversation history consumes too much context:
+Ricky automatically checks context before each model request, including after tool batches in
+a long task. By default, it compacts at 90% of the configured character limit or the available
+estimated token budget when model capacity is known. It targets 65% to leave room for more work.
+The CLI displays compaction progress, then Ricky continues the same task.
+
+Use `/compact` at an idle prompt to compact manually or provide a focus:
 
 ```text
 /compact Preserve every decision about the release process.
@@ -237,8 +242,14 @@ Large prefixes can require multiple summary requests and incur additional model 
 
 Ricky validates the result before recording a checkpoint. If compaction fails or cannot reduce
 context enough to fit its limits, the previous context remains active. Original history remains
-available as evidence within the session. Compaction is explicit and runs only while the session
-is idle; Ricky does not automatically compact while working.
+available as evidence within the session. After an automatic attempt fails, Ricky continues only
+if the request still fits its hard limits. It does not repeat the attempt against unchanged history
+within that turn. Cancelling compaction stops the turn.
+
+Set `context.compaction.auto_enabled = false` to disable automatic triggering while keeping
+`/compact` available. Configure `auto_trigger_ratio` and `auto_target_ratio` in
+`[context.compaction]`; the target must be lower than the trigger. Setting `enabled = false`
+disables both forms of compaction.
 
 ## Stop work safely
 

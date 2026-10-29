@@ -58,6 +58,17 @@ class LoginWorker:
         pass
 
     async def stream(self, request):
+        if request.session_id is None:
+            # Isolated compaction is a provider operation, not another browser
+            # step. Keep the scripted login sequence and its effect assertions.
+            assert request.tools == []
+            yield _answer(
+                "Continue the user's login task using the retained browser state. "
+                "Do not repeat completed credential submissions. "
+                "An attempted submission is not proof of authenticated access; "
+                "verify the account name from a fresh observation."
+            )
+            return
         self.step += 1
         results = [p for m in request.messages for p in m.content if p.kind == "tool_result"]
         if results:

@@ -159,6 +159,80 @@ async def _setup(tmp_path: Path) -> tuple[RickySettings, SessionStore, AgentSess
     return settings, store, session
 
 
+async def test_automatic_checkpoint_persists_with_successful_turn(tmp_path: Path) -> None:
+    from ricky.agent import AgentLoop
+    from ricky.llm import CompletionRequest, MessageDone, StreamEvent, Usage
+    from ricky.tools import ToolRegistry
+
+    settings = RickySettings(user_data_dir=str(tmp_path / "user"), context_char_limit=30_000)
+    settings.context.compaction.max_summary_tokens = 256
+    session = AgentSession.create(settings, profile_scope=SCOPE)
+    for index in range(4):
+        session.history.extend(
+            [
+                Message.text("user", f"Earlier request {index}"),
+                Message.text("assistant", "x" * 7_000),
+            ]
+        )
+    session.history.extend(
+        [Message.text("user", "Recent request"), Message.text("assistant", "Done")]
+    )
+    original_history = list(session.history)
+    store = SessionStore(settings)
+    await store.initialize()
+    await store.create(session, scope=SCOPE)
+
+    class Provider:
+        name = "test"
+
+        def __init__(self) -> None:
+            self.requests: list[CompletionRequest] = []
+
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            self.requests.append(request)
+            yield MessageDone(
+                message=Message.text(
+                    "assistant",
+                    "Earlier requests completed." if request.session_id is None else "Continuing.",
+                ),
+                usage=Usage(prompt_tokens=3, completion_tokens=2),
+            )
+
+        async def aclose(self) -> None:
+            pass
+
+    provider = Provider()
+
+    @asynccontextmanager
+    async def runtime_builder(_settings: RickySettings, **_kwargs: Any) -> AsyncIterator[Any]:
+        yield SimpleNamespace(
+            provider=provider,
+            durable_tasks=FakeDurableTasks(),
+            agent_loop=AgentLoop(
+                provider=provider, registry=ToolRegistry([]), settings=settings, cwd=tmp_path
+            ),
+        )
+
+    service = PersistentTurnService(
+        settings, store, profile_scope=SCOPE, runtime_builder=runtime_builder
+    )
+    committed = await service.run_turn(session.id, "Continue.", owner="auto-test")
+    reopened = await SessionStore(settings).get(session.id, scope=SCOPE)
+
+    assert committed.revision == reopened.revision == 1
+    assert reopened.session.active_checkpoint_id is not None
+    assert reopened.session.history[:-2] == original_history
+    assert reopened.session.history[-2:] == [
+        Message.text("user", "Continue."),
+        Message.text("assistant", "Continuing."),
+    ]
+    assert any(request.session_id is None for request in provider.requests)
+    assert provider.requests[-1].session_id == session.id
+    assert reopened.session.cumulative_usage == Usage(
+        prompt_tokens=3 * len(provider.requests), completion_tokens=2 * len(provider.requests)
+    )
+
+
 async def test_process_restart_continues_canonical_history_and_sanitizes_authority(
     tmp_path: Path,
 ) -> None:

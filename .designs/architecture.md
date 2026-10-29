@@ -246,8 +246,17 @@ are not committed. Failure or cancellation preserves the previous projection;
 completed summary usage is accumulated in the working session and lifecycle
 events. Compaction cannot grant permissions, mutate
 execution state, or replay effects. The session owner serializes compaction with
-turn work; manual invocation requires an idle session. Automatic triggering is
-not enabled. Context projection independently bounds
+turn work; manual invocation requires an idle session. Automatic compaction checks
+the complete upcoming ordinary agent request before provider dispatch, including
+pending user input, current instructions and tools, and reserved output capacity.
+It runs under the turn owner only at settled boundaries, including after a whole
+tool batch completes. Configurable character and known token thresholds trigger
+the shared engine with lower target budgets. The rebuilt request must fit all
+hard limits before dispatch. A failed attempt does not repeat against the same
+history and checkpoint within a turn; new runtime clock data does not justify a
+retry. Failure may continue only if the request still fits; cancellation ends the
+turn. Summary usage contributes to turn totals, and summary requests honor any
+per-request completion cap. Context projection independently bounds
 image count, bytes, pixels, and estimated image tokens. Explicit user uploads remain
 in the active projection until clearing or compaction. A complete pending attachment
 set and retained active uploads must fit the request; exceeding a ceiling is an

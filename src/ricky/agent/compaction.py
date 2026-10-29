@@ -148,6 +148,7 @@ class ContextCompactor:
         *,
         target_chars: int | None = None,
         target_tokens: int | None = None,
+        max_completion_tokens: int | None = None,
     ) -> AsyncGenerator[AgentEvent, None]:
         """Summarize bounded inputs and atomically publish one useful checkpoint."""
         operation_id = f"compaction_{uuid4().hex}"
@@ -164,6 +165,12 @@ class ContextCompactor:
                     isinstance(value, bool) or not isinstance(value, int) or value < 1
                 ):
                     raise ValueError("Compaction targets must be positive integers.")
+            if max_completion_tokens is not None and (
+                isinstance(max_completion_tokens, bool)
+                or not isinstance(max_completion_tokens, int)
+                or max_completion_tokens < 1
+            ):
+                raise ValueError("Compaction completion limit must be a positive integer.")
             normalized_focus = focus.strip() if focus is not None else None
             normalized_focus = normalized_focus or None
             if normalized_focus is not None and len(normalized_focus) > policy.max_focus_chars:
@@ -209,6 +216,7 @@ class ContextCompactor:
                         summary,
                         normalized_focus,
                         char_limit,
+                        max_completion_tokens,
                     )
                     if not started:
                         yield ContextCompactionStartedEvent(
@@ -494,8 +502,15 @@ def _bounded_summary_request(
     summary: str | None,
     focus: str | None,
     char_limit: int,
+    max_completion_tokens: int | None = None,
 ) -> tuple[CompletionRequest, int]:
     """Fit ordered quoted fragments, including a single oversized message."""
+
+    summary_tokens = ContextSettings.model_validate(
+        session.settings_snapshot.get("context", {})
+    ).compaction.max_summary_tokens
+    if max_completion_tokens is not None:
+        summary_tokens = min(summary_tokens, max_completion_tokens)
 
     def build(length: int) -> CompletionRequest:
         payload = {
@@ -522,9 +537,7 @@ def _bounded_summary_request(
                 Message.text("user", json.dumps(payload, ensure_ascii=False, sort_keys=True)),
             ],
             tools=[],
-            max_tokens=ContextSettings.model_validate(
-                session.settings_snapshot.get("context", {})
-            ).compaction.max_summary_tokens,
+            max_tokens=summary_tokens,
         )
 
     def fits(request: CompletionRequest) -> bool:
