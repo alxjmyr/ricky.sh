@@ -170,9 +170,12 @@ class BrowserChallengeTool:
         "contains no code. Submit it using browser_commit with activation='challenge', "
         "the same target and an accurate envelope covering any payment/authentication effects. "
         "A code reply is not transaction approval. Inspect the resulting browser state."
-        " For supported press-and-hold human verification, use browser_hold_start and observe "
+        " For checkbox or button human verification, use ordinary browser_set_checked or "
+        "browser_click within the task's interaction authority, then inspect the result. "
+        "For press-and-hold human verification, use browser_hold_start and observe "
         "before releasing; attempt this automatically within its runtime budget. "
-        " For device approval, passkey, or unsupported CAPTCHA use kind='manual' "
+        " For device approval, passkey, or a challenge the available interactions cannot "
+        "complete, use kind='manual' "
         "and a current challenge "
         "control; the user performs the action and replies done."
         " Authorized email verification is attempted first; supply the page's recipient when known."
@@ -1027,7 +1030,13 @@ class _ScopedBrowserActionTool(_BrowserActionTool):
 
 class BrowserClickTool(_ScopedBrowserActionTool):
     name = "browser_click"
-    description = "Activate one snapshot-bound non-consequential link or control exactly once."
+    description = (
+        "Activate one snapshot-bound link or control exactly once to advance the authorized task. "
+        "Use for intermediate steps such as opening checkout, selecting verification channels, "
+        "or requesting a code. Submit-type controls and consequential hints do not establish "
+        "the action's business effect. Inspect the page and use browser_commit instead when "
+        "the action creates a payment or other material external commitment."
+    )
     Params = BrowserTargetParams
     action_kind = "click"
 
@@ -1337,10 +1346,12 @@ class BrowserCommitTool(_BrowserActionTool):
     description = (
         "Freshly review a required financial or browser transaction envelope, then activate one "
         "consequential snapshot-bound target exactly once."
-        " Use only for the final action that submits the transaction, never for selecting "
-        "amounts, filling fields, opening a dialog, or clicking labels/headings. Prepare with "
-        "ordinary browser interaction tools first, inspect the final total including fees "
-        "and recurring terms, then commit the actual submit control."
+        " Use for the action that creates a payment or other material external commitment, "
+        "wherever it occurs in the workflow; OTP entry may itself complete a pending payment. "
+        "Use ordinary interactions for intermediate preparation, including checkout transitions "
+        "and verification-channel selection. Inspect the actual effects, total including fees "
+        "and tax, funding source, and recurring terms before proposing the accurate envelope. "
+        "Consequential and financial hints are advisory, not proof of the action's effect."
     )
     Params = BrowserCommitParams
     risk: ClassVar[Literal["destructive"]] = "destructive"
@@ -1728,7 +1739,9 @@ class BrowserCoordinateClickTool(_BrowserEffectActionMixin):
     description = (
         "Click one point on an exact masked visual snapshot only when Ricky's browser "
         "harness proves that no equivalent semantic click can be used. This cannot type, "
-        "drag, scroll, use protected or file controls, or commit a consequential action."
+        "drag, scroll, or use protected or file controls. Use for intermediate interactions; "
+        "use browser_coordinate_commit for an action that creates a payment or other material "
+        "external commitment. Consequential and financial hints are advisory."
     )
     Params = BrowserCoordinateClickParams
     Result = BrowserActionToolResult
@@ -1835,9 +1848,11 @@ class BrowserCoordinateCommitTool(_BrowserEffectActionMixin):
     name = "browser_coordinate_commit"
     description = (
         "Freshly review a required financial or browser transaction envelope, then click one "
-        "point on one exact current masked visual snapshot. Use only for the final consequential "
-        "submission, after preparing the form and inspecting the total, fees, and recurrence. "
-        "Do not use a commit merely to select an amount or open a checkout dialog."
+        "point on one exact current masked visual snapshot. Use for the action that creates "
+        "a payment or other material external commitment, wherever it occurs in the workflow. "
+        "Inspect the actual effects, total including fees and tax, funding source, and recurrence. "
+        "Use ordinary interactions for intermediate preparation. Consequential and financial "
+        "hints are advisory, not proof of the action's effect."
     )
     Params = BrowserCoordinateCommitParams
     Result = BrowserActionToolResult
@@ -2278,15 +2293,6 @@ def _validate_envelope_binding(
     envelope: BrowserCommitEnvelope,
     prepared: BrowserPreparedCommit | BrowserPreparedCoordinateCommit,
 ) -> None:
-    if isinstance(envelope, BrowserTransactionEnvelope) and prepared.financial_signal:
-        raise BrowserError(
-            BrowserFailure(
-                code="transaction_envelope",
-                message=(
-                    "the reviewed target has a financial signal and requires a financial envelope"
-                ),
-            )
-        )
     if (
         isinstance(envelope, BrowserFinancialTransactionEnvelope)
         and envelope.source.kind == "protected_value"
@@ -2383,7 +2389,8 @@ def _semantic_binding_lines(
             f"control={descriptor.control_kind}"
         ),
         *_effective_destination_lines(transaction),
-        f"Local financial signal: {'present' if prepared.financial_signal else 'not detected'}",
+        "Advisory local financial signal: "
+        f"{'present' if prepared.financial_signal else 'not detected'}",
         f"Activation: {activation}",
         f"Dialog handling: {prepared.request.dialog.response}",
         *_dialog_prompt_lines(prepared.request.dialog),
@@ -2434,7 +2441,8 @@ def _coordinate_binding_lines(
             f"control={descriptor.control_kind}"
         ),
         *_effective_destination_lines(transaction),
-        f"Local financial signal: {'present' if prepared.financial_signal else 'not detected'}",
+        "Advisory local financial signal: "
+        f"{'present' if prepared.financial_signal else 'not detected'}",
         f"Dialog handling: {prepared.dialog.response}",
         *_dialog_prompt_lines(prepared.dialog),
     )

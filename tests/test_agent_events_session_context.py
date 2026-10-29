@@ -344,6 +344,10 @@ def test_context_assembly_starts_with_shared_then_primary_soul_and_keeps_harness
     assert "protected_values_catalog when available before asking the user" in system_text
     assert "exact alias-to-site name matching is not required" in system_text
     assert "multiple plausible entries remain ambiguous" in system_text
+    assert "Choose the approval boundary by the action's effect" in system_text
+    assert "ordinary interaction is not a substitute" in system_text
+    assert "including when an OTP auto-submits" in system_text
+    assert "Never blindly repeat a cart addition" in system_text
     assert f"under {user_data_dir.resolve()}/tmp/" in system_text
     assert "Never place temporary or ad hoc tools in <cwd>/scripts/" in system_text
 

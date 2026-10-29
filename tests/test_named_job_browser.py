@@ -97,6 +97,9 @@ def test_named_job_compiles_exact_ephemeral_read_scope(tmp_path: Path) -> None:
     assert "Authorized browser resources: []" in briefing
     assert "Ephemeral browser sessions permitted: True" in briefing
     assert "personal/research" not in briefing
+    assert "When interaction tools are exposed and authorized" in briefing
+    assert "Choose browser_commit by the action's effect" in briefing
+    assert "do not substitute them for reviewed commitment" in briefing
     assert set(scope.allowed_operations) == {
         "controlled_pages",
         "navigations",

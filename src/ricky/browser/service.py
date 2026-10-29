@@ -2186,15 +2186,6 @@ class BrowserService:
                     await self._validate_destination(context.origin)
                 if preflight.target.frame_origin is not None:
                     await self._validate_destination(preflight.target.frame_origin)
-                if preflight.target.consequential or preflight.financial_signal:
-                    raise BrowserError(
-                        BrowserFailure(
-                            code="consequential_target",
-                            message=(
-                                "consequential coordinate targets require a transaction envelope"
-                            ),
-                        )
-                    )
             fallback: CoordinateFallbackEvidence | None = None
             if semantic_required:
                 assert semantic is not None
@@ -4584,11 +4575,6 @@ class BrowserService:
                     message="a radio control cannot be unchecked directly",
                 )
         elif request.kind == "click":
-            if target.consequential:
-                return BrowserFailure(
-                    code="consequential_target",
-                    message="recognized consequential target requires browser_commit",
-                )
             if target.control_kind in {"checkbox", "radio", "select"}:
                 return BrowserFailure(
                     code="incompatible_target",

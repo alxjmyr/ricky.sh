@@ -80,6 +80,28 @@ class _FixtureHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = self.path.partition("?")[0]
         self.server.requests[path] += 1
+        if path == "/checkbox-verification":
+            body = b"""<!doctype html><html><body>
+            <label><input id="captcha-checkbox" type="checkbox"
+                onchange="document.querySelector('#checkbox-status').textContent =
+                this.checked ? 'Checkbox verified' : 'Checkbox not verified'">I am human</label>
+            <p role="status" id="checkbox-status">Checkbox not verified</p>
+            <canvas aria-label="Human verification challenge" width="250" height="80"
+                style="display:block;background:lightblue" onclick="
+                document.querySelector('#visual-status').textContent = 'Visual verified';
+                this.onclick = null"></canvas>
+            <p role="status" id="visual-status">Visual not verified</p>
+            <canvas aria-label="Passkey action" width="250" height="80"
+                style="display:block;background:lightgray"></canvas>
+            <canvas aria-label="Single sign-on action" width="250" height="80"
+                style="display:block;background:lightgray"></canvas>
+            </body></html>"""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/hold-frame":
             body = (
                 b'<html><body style="margin:80px"><iframe width="900" height="500" '
@@ -171,8 +193,21 @@ class _FixtureHandler(BaseHTTPRequestHandler):
 
             # This boundary test starts at the modal. Gateway journeys exercise
             # the opening click and its receipt on the compact checkout fixture.
-            body = checkout_html(background_sections=180) + (
-                b"<script>document.querySelector('dialog').showModal()</script>"
+            body = (
+                checkout_html(background_sections=180).replace(
+                    b'<button type="submit">Purchase credits</button>',
+                    b'<p role="status" id="verification-status">Preparation pending</p>'
+                    b'<button type="submit" onclick="event.preventDefault(); '
+                    b"document.querySelector('#verification-status').textContent="
+                    b"'Checkout ready'\">"
+                    b"Continue to checkout</button>"
+                    b'<button type="submit" onclick="event.preventDefault(); '
+                    b"document.querySelector('#verification-status').textContent="
+                    b"'Email selected'\">"
+                    b"Send code to email instead</button>"
+                    b'<button type="submit">Purchase credits</button>',
+                )
+                + b"<script>document.querySelector('dialog').showModal()</script>"
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -873,6 +908,89 @@ async def test_real_chrome_hold_observes_feedback_releases_and_continues(
             assert "Verification passed" in after.content
             assert "Product search" in after.content
             assert not Path(settings.project_data_dir).exists()
+        finally:
+            await service.aclose()
+
+
+async def test_real_chrome_verifies_checkbox_and_visual_control_with_ordinary_interaction(
+    installed_browser: _InstalledBrowser,
+    tmp_path: Path,
+) -> None:
+    with _fixture_server() as (origin, _requests):
+        settings = RickySettings.model_validate(
+            {
+                "user_data_dir": str(tmp_path / "user"),
+                "project_data_dir": str(tmp_path / "project"),
+                "profile_configs": {
+                    "personal": {"browser": {"screenshot_allowed_providers": ["openrouter"]}}
+                },
+                "browser": {"enabled": True, "allowed_private_origins": [origin]},
+            }
+        )
+        service = BrowserService(
+            settings,
+            scope=settings.resolve_profile_scope(),
+            backend=PlaywrightBrowserBackend(),
+            executable_path=installed_browser.executable,
+        )
+        try:
+            session = await service.open_session(headless=True)
+            await service.navigate(
+                session.session_id, page_id=None, url=f"{origin}/checkbox-verification"
+            )
+            snapshot = await service.snapshot(session.session_id, page_id=None)
+            checked = await service.action(
+                _target(snapshot, "I am human"),
+                BrowserActionRequest(kind="set_checked", checked=True),
+            )
+            assert checked.disposition == "performed", checked
+            assert checked.snapshot is not None
+            assert "Checkbox verified" in checked.snapshot.content
+            assert next(
+                item for item in checked.snapshot.descriptors if item.name == "I am human"
+            ).checked
+
+            visual = await service.visual_snapshot(
+                session.session_id, page_id=None, provider="openrouter"
+            )
+            candidate = next(
+                item
+                for item in visual.candidates
+                if item.descriptor.name == "Human verification challenge"
+            )
+            x, y = _visual_candidate_point(visual, candidate)
+            target = BrowserCoordinateTarget(
+                session_id=session.session_id,
+                page_id=visual.page.page_id,
+                screenshot_id=visual.snapshot_id,
+                x=x,
+                y=y,
+            )
+            prepared = await service.prepare_coordinate_click(target)
+            assert prepared.preflight.target.restricted_interaction == "captcha"
+            result = await service.coordinate_click_prepared(prepared)
+            assert result.disposition == "performed", result
+            after = await service.snapshot(session.session_id, page_id=None)
+            assert "Visual verified" in after.content
+
+            # Verification classification does not open device-authentication paths.
+            for name in ("Passkey action", "Single sign-on action"):
+                visual = await service.visual_snapshot(
+                    session.session_id, page_id=None, provider="openrouter"
+                )
+                candidate = next(item for item in visual.candidates if item.descriptor.name == name)
+                x, y = _visual_candidate_point(visual, candidate)
+                with pytest.raises(BrowserError) as rejected:
+                    await service.prepare_coordinate_click(
+                        BrowserCoordinateTarget(
+                            session_id=session.session_id,
+                            page_id=visual.page.page_id,
+                            screenshot_id=visual.snapshot_id,
+                            x=x,
+                            y=y,
+                        )
+                    )
+                assert rejected.value.failure.code == "handoff_required"
         finally:
             await service.aclose()
 
@@ -1612,7 +1730,7 @@ async def test_real_chrome_prepared_financial_and_generic_transaction_envelopes(
             await service.aclose()
 
 
-async def test_real_chrome_binds_dispatch_destination_and_escalates_financial_signals(
+async def test_real_chrome_binds_dispatch_destination_and_reports_advisory_financial_signals(
     installed_browser: _InstalledBrowser,
     tmp_path: Path,
 ) -> None:
@@ -1713,28 +1831,30 @@ async def test_real_chrome_binds_dispatch_destination_and_escalates_financial_si
                 "target": _target(snapshot, "Place order").model_dump(mode="python"),
                 "envelope": envelope,
             }
-            with pytest.raises(BrowserError, match="requires a financial envelope"):
-                await tool.prepare_effect(order_args, ctx)
+            order_review = await tool.prepare_effect(order_args, ctx)
+            assert order_review.prepared.financial_signal
+            assert "Advisory local financial signal: present" in order_review.permission_summary
 
             visual = await service.visual_snapshot(session.session_id, page_id=None)
             order_candidate = next(
                 item for item in visual.candidates if item.descriptor.name == "Place order"
             )
             x, y = _visual_candidate_point(visual, order_candidate)
-            with pytest.raises(BrowserError, match="requires a financial envelope"):
-                await coordinate_tool.prepare_effect(
-                    {
-                        "target": BrowserCoordinateTarget(
-                            session_id=session.session_id,
-                            page_id=visual.page.page_id,
-                            screenshot_id=visual.snapshot_id,
-                            x=x,
-                            y=y,
-                        ).model_dump(mode="python"),
-                        "envelope": envelope,
-                    },
-                    ctx,
-                )
+            coordinate_review = await coordinate_tool.prepare_effect(
+                {
+                    "target": BrowserCoordinateTarget(
+                        session_id=session.session_id,
+                        page_id=visual.page.page_id,
+                        screenshot_id=visual.snapshot_id,
+                        x=x,
+                        y=y,
+                    ).model_dump(mode="python"),
+                    "envelope": envelope,
+                },
+                ctx,
+            )
+            assert coordinate_review.prepared.financial_signal
+            assert coordinate_review.transaction.envelope_kind == "browser"
 
             await service.navigate(
                 session.session_id,
@@ -1746,8 +1866,9 @@ async def test_real_chrome_binds_dispatch_destination_and_escalates_financial_si
                 "target": _target(snapshot, "Continue large form").model_dump(mode="python"),
                 "envelope": envelope,
             }
-            with pytest.raises(BrowserError, match="requires a financial envelope"):
-                await tool.prepare_effect(overflow_args, ctx)
+            overflow_review = await tool.prepare_effect(overflow_args, ctx)
+            assert overflow_review.prepared.financial_signal
+            assert overflow_review.transaction.envelope_kind == "browser"
         finally:
             await service.aclose()
 
@@ -2052,6 +2173,21 @@ async def test_real_chrome_modal_amount_preparation_and_final_transaction(
             assert len(rendered.content) < settings.context.tool_results.offload_threshold_chars
             assert "Credit amount (USD)" in rendered.content
             snapshot = await service.snapshot(opened.session_id, page_id=None)
+            for label, outcome in (
+                ("Continue to checkout", "Checkout ready"),
+                ("Send code to email instead", "Email selected"),
+            ):
+                descriptor = next(item for item in snapshot.descriptors if item.name == label)
+                assert descriptor.consequential  # HTML submit/name hints remain advisory.
+                intermediate = await service.action(
+                    _target(snapshot, label), BrowserActionRequest(kind="click")
+                )
+                assert intermediate.disposition == "performed", intermediate.failure
+                assert intermediate.transaction is None
+                assert intermediate.snapshot is not None
+                snapshot = intermediate.snapshot
+                assert outcome in snapshot.content
+                assert requests["/checkout-complete"] == 0
             result = await _semantic_transaction(
                 service,
                 _target(snapshot, "Purchase credits"),
@@ -2216,13 +2352,6 @@ async def test_real_chrome_interacts_commits_handles_dialog_and_popup(
                 item for item in snapshot.descriptors if item.name == "Continue"
             )
             assert continue_descriptor.consequential
-            rejected_submit = await service.action(
-                _target(snapshot, "Continue"),
-                BrowserActionRequest(kind="click"),
-            )
-            assert rejected_submit.disposition == "not_performed"
-            assert rejected_submit.failure is not None
-            assert rejected_submit.failure.code == "consequential_target"
             assert requests["/submitted"] == 0
 
             submitted = await _semantic_transaction(

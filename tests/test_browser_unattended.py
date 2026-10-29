@@ -698,13 +698,13 @@ async def test_ordinary_coordinate_click_is_semantic_first_and_nonconsequential(
     await service.aclose()
 
 
-async def test_ordinary_coordinate_click_cannot_bypass_transaction_commit(
+async def test_ordinary_coordinate_preparation_uses_hints_without_reclassifying(
     tmp_path: Path,
 ) -> None:
     consequential = BackendTargetDescriptor(
         ref="d1",
         role="canvas",
-        name="Pay now",
+        name="Send code to email instead",
         frame_origin=_ORIGIN,
         consequential=True,
     )
@@ -727,11 +727,15 @@ async def test_ordinary_coordinate_click_cannot_bypass_transaction_commit(
         y=10,
     )
 
-    with pytest.raises(BrowserError) as rejected:
-        await service.prepare_coordinate_click(target)
-
-    assert rejected.value.failure.code == "consequential_target"
+    page.coordinate_financial_signal = True
+    prepared = await service.prepare_coordinate_click(target)
+    assert prepared.preflight.target.consequential
+    assert prepared.preflight.financial_signal
     assert page.coordinates == []
+    result = await service.coordinate_click_prepared(prepared)
+    assert result.disposition == "performed"
+    assert result.transaction is None
+    assert len(page.coordinates) == 1
     await service.aclose()
 
 

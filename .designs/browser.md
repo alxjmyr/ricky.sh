@@ -243,6 +243,13 @@ references but receives fixed metadata-only omission markers.
 
 ### Automatic verification holds
 
+Human-verification checkboxes and buttons may use ordinary semantic interaction tools within
+existing interaction authority. A recognized CAPTCHA is not itself a prohibition on an ordinary
+click or semantic-first coordinate fallback. The agent observes the result before continuing;
+an interaction receipt is not proof that verification passed. These operations consume ordinary
+interaction budgets and do not extend the verify-only surface available to read-oriented jobs.
+Passkey and SSO coordinate restrictions remain in place.
+
 Foreground chats and background browser workers may automatically attempt a
 locally identified human-verification control within their existing browser
 resource, destination, and screenshot-disclosure scope. This is a narrow
@@ -487,8 +494,13 @@ have hidden JavaScript handlers, and a visually ordinary link can mutate server 
 - interaction versus commit is an authority and review distinction, not proof that an interaction
   has no external effect;
 - ordinary interaction is conservatively an external effect and receives no automatic replay;
-- known submit, purchase, reservation, send, delete, or equivalent targets must use the commit
-  surface, and the interaction surface rejects targets it can identify as consequential; and
+- the agent interprets the goal and current page to distinguish intermediate interactions from
+  actions that create a payment or other material external commitment. Those commitments must
+  use the commit surface, including code entry that completes a payment;
+- submit types, target names, and surrounding financial controls are advisory observations,
+  not proof of business effects. They do not prohibit interaction or force a financial envelope
+  for an unrelated nonfinancial action. The harness cannot prove that the agent selected the
+  correct business boundary on an arbitrary website; and
 - uncertainty after dispatch remains `in_doubt` until deterministic reconciliation or user review.
 
 Effect identity binds the exact browser resource, session occurrence, page, navigation generation,
@@ -596,7 +608,8 @@ semantic target exists the coordinate preparation returns that target and does n
 coordinate fallback is never permitted after semantic dispatch may have become observable and
 requires the existing provider-specific masked-screenshot disclosure policy. A coordinate commit
 adds the exact financial or generic transaction envelope, parked occurrence, and source-bound
-approval; an ordinary coordinate click cannot activate a target classified as consequential.
+approval. The agent selects interaction versus commit by the intended effect, using the same
+business-boundary guidance as semantic actions; heuristic labels do not replace that decision.
 
 Browser tools do not expose cookies, storage, credentials, raw network data, or filesystem paths
 to the model. Protected-value materialization belongs to the separate protected-values subsystem

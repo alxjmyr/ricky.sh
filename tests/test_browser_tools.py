@@ -32,6 +32,7 @@ from ricky.browser.service import (
 )
 from ricky.browser.tools import (
     BrowserClickTool,
+    BrowserCommitParams,
     BrowserCommitTool,
     BrowserCoordinateCommitTool,
     BrowserDownloadTool,
@@ -1035,53 +1036,50 @@ async def test_financial_commit_preparation_renders_complete_proposal_and_live_b
     assert prepared.transaction.envelope_sha256 == prepared.envelope_sha256
 
 
-async def test_generic_envelope_is_rejected_when_live_payment_signal_is_present(
+async def test_generic_review_retains_advisory_payment_signal_without_reclassifying(
     tmp_path: Path,
 ) -> None:
     service = FakeToolService()
     service.financial_signal = True
     tool = BrowserCommitTool(service)  # type: ignore[arg-type]
+    args = {"target": _target_args(), "envelope": _browser_envelope()}
 
-    with pytest.raises(BrowserError, match="requires a financial envelope"):
-        await tool.prepare_effect(
-            {"target": _target_args(), "envelope": _browser_envelope()},
-            _ctx(tmp_path),
-        )
+    prepared = await tool.prepare_effect(args, _ctx(tmp_path))
 
-    result = await ToolRegistry(cast(Any, [tool])).dispatch(
-        tool.name,
-        {"target": _target_args(), "envelope": _browser_envelope()},
-        _ctx(tmp_path),
+    assert "Advisory local financial signal: present" in prepared.permission_summary
+    assert prepared.transaction.envelope_kind == "browser"
+    assert service.calls == []  # Preparation never dispatches the reviewed effect.
+    result = await tool.run_prepared(
+        BrowserCommitParams.model_validate(args), prepared, _ctx(tmp_path)
     )
-    assert result.is_error
+    assert not result.is_error
     assert result.effect_receipt is not None
-    assert result.effect_receipt.disposition == "not_performed"
-    assert cast(dict[str, object], result.data)["code"] == "transaction_envelope"
-    assert service.calls == []
+    assert result.effect_receipt.disposition == "performed"
 
 
-async def test_coordinate_commit_cannot_bypass_financial_envelope_escalation(
+async def test_coordinate_generic_review_retains_advisory_payment_signal(
     tmp_path: Path,
 ) -> None:
     service = FakeToolService()
     service.financial_signal = True
     tool = BrowserCoordinateCommitTool(service)  # type: ignore[arg-type]
 
-    with pytest.raises(BrowserError, match="requires a financial envelope"):
-        await tool.prepare_effect(
-            {
-                "target": {
-                    "session_id": SESSION_ID,
-                    "page_id": PAGE_ID,
-                    "screenshot_id": SNAPSHOT_ID,
-                    "x": 7,
-                    "y": 8,
-                },
-                "envelope": _browser_envelope(),
+    prepared = await tool.prepare_effect(
+        {
+            "target": {
+                "session_id": SESSION_ID,
+                "page_id": PAGE_ID,
+                "screenshot_id": SNAPSHOT_ID,
+                "x": 7,
+                "y": 8,
             },
-            _ctx(tmp_path),
-        )
+            "envelope": _browser_envelope(),
+        },
+        _ctx(tmp_path),
+    )
 
+    assert "Advisory local financial signal: present" in prepared.permission_summary
+    assert prepared.transaction.envelope_kind == "browser"
     assert service.calls == []
 
 

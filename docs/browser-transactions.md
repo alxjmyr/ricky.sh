@@ -5,6 +5,12 @@ control. The review describes both Ricky's proposal and the exact browser occurr
 Approval applies once; it cannot be remembered or reused after the page, target, destination, or
 proposal changes.
 
+Ricky proceeds through intermediate preparation with ordinary interaction tools and chooses the
+commit operation when an action creates a payment or other material external commitment.
+This boundary can occur during verification, before a final button appears. Button labels, HTML
+submit types, and nearby payment fields are hints, not reliable descriptions of business effects.
+The model interprets that effect; the harness enforces exact approval for the proposed commit.
+
 An interactive resident chat uses its local terminal prompt. A gateway-owned ad hoc execution can
 park the same live browser occurrence and request a source-bound Telegram approval. Named and
 scheduled jobs remain read-oriented, and workflows cannot use browser tools.
@@ -172,8 +178,8 @@ terms, publishing content, creating a free reservation, or submitting a non-fina
 does not create a different approval schema for each kind of website.
 
 The panel labels this approval as non-financial. Reject it if the proposed action can move money or
-create a monetary obligation. Ricky also uses local payment signals to require a financial
-envelope when it recognizes them, but arbitrary websites cannot be classified perfectly.
+create a monetary obligation. Local payment signals appear in the review as context. They do not
+force a financial envelope for an authentication-only or other nonfinancial action in the same checkout.
 
 ## Read the trusted review
 

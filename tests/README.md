@@ -24,6 +24,11 @@ requests 180 background sections. That test still checks modal scoping, numeric
 editing, financial preparation, bounded tool output, and exactly one submission.
 It starts with the modal open; the gateway checkout separately checks the opening
 click, amount editing, and commit through three performed effect receipts.
+The modal boundary also exercises intermediate HTML submit controls inside the payment form,
+verifies that they do not submit payment, and retains the final prepared transaction assertion.
+Service and tool tests cover advisory consequence/payment hints without removing protected-field,
+fresh-target, exact commit preparation, or destination checks. Execution-guard tests separately
+prove that ordinary verification and intermediate actions remain unavailable in read-only scope.
 The other real-browser tests retain navigation interception, redaction, process
 loss, persistent profiles, and CDP ownership coverage.
 The navigation/snapshot journey also checks `navigator.webdriver` in real Chrome
@@ -64,6 +69,11 @@ verification verdicts. The real Chrome hold journey owns
 native input, resized visual references, iframe targeting, animated observations while held,
 feedback-driven release, and verified continuation. Agent-loop tests check cleanup before
 turn completion and after interrupted model work.
+
+`test_real_chrome_verifies_checkbox_and_visual_control_with_ordinary_interaction` covers
+checkbox verification and a CAPTCHA canvas through ordinary interaction, with fresh outcome
+observations and retained passkey/SSO coordinate restrictions. These actions use ordinary
+interaction authority; the hold-only exception for read-oriented jobs remains separate.
 
 These focused tests replace repeated full-checkout scenarios:
 

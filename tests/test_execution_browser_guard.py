@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from ricky.browser.runtime_guard import BrowserGuardFacts, BrowserRuntimeEvidence
+from ricky.browser.runtime_guard import BrowserGuardFacts, BrowserRuntimeEvidence, BrowserToolName
 from ricky.config import RickySettings
 from ricky.executions.browser import (
     BrowserAttachmentPin,
@@ -406,3 +406,33 @@ def test_preparation_phase_is_not_a_model_argument_or_noncommit_bypass() -> None
     with pytest.raises(ValidationError, match="preparation guard facts"):
         BrowserGuardFacts(tool_name="browser_click", phase="prepare")
     assert "phase" not in BrowserCommitParams.model_fields
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        "browser_click",
+        "browser_set_checked",
+        "browser_press_key",
+        "browser_coordinate_click",
+    ],
+)
+async def test_intermediate_and_verification_interactions_still_require_mutation_scope(
+    tool: BrowserToolName,
+) -> None:
+    guard = _guard()
+    guard.browser_scope = guard.browser_scope.model_copy(
+        update={"mode": "read_only", "allowed_tools": (tool,)}
+    )
+    facts = BrowserGuardFacts(
+        tool_name=tool,
+        session_mode="owned_ephemeral",
+        top_level_origin="https://example.com",
+        target_frame_origin="https://example.com",
+    )
+
+    with pytest.raises(BrowserExecutionGuardError, match="read-only execution cannot mutate"):
+        await guard.check(facts)
+
+    guard.browser_scope = guard.browser_scope.model_copy(update={"mode": "transaction"})
+    await guard.check(facts)

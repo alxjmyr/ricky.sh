@@ -398,7 +398,7 @@ async def test_action_context_dispatch_consumes_snapshot_and_returns_fresh_state
     await service.aclose()
 
 
-async def test_local_action_classification_rejects_without_dispatch_and_preserves_target(
+async def test_protected_actions_reject_without_dispatch_and_commit_requires_preparation(
     tmp_path: Path,
 ) -> None:
     service, backend = _service(tmp_path)
@@ -434,7 +434,6 @@ async def test_local_action_classification_rejects_without_dispatch_and_preserve
     click_target = _action_target(
         snapshot.snapshot_id, session.session_id, snapshot.page.page_id, "e1"
     )
-    rejected_click = await service.action(click_target, BrowserActionRequest(kind="click"))
     rejected_fill = await service.action(
         _action_target(snapshot.snapshot_id, session.session_id, snapshot.page.page_id, "e2"),
         BrowserActionRequest(kind="fill", value="must-not-dispatch"),
@@ -444,9 +443,6 @@ async def test_local_action_classification_rejects_without_dispatch_and_preserve
         BrowserActionRequest(kind="click"),
     )
 
-    assert rejected_click.disposition == "not_performed"
-    assert rejected_click.failure is not None
-    assert rejected_click.failure.code == "consequential_target"
     assert rejected_fill.failure is not None
     assert rejected_fill.failure.code == "protected_field"
     assert rejected_file.failure is not None
@@ -469,6 +465,31 @@ async def test_local_action_classification_rejects_without_dispatch_and_preserve
     committed = await service.commit_prepared(prepared, transaction)
     assert committed.disposition == "performed"
     assert len(page.actions) == 1
+    await service.aclose()
+
+
+async def test_ordinary_intermediate_click_accepts_advisory_consequence_hint(
+    tmp_path: Path,
+) -> None:
+    service, backend = _service(tmp_path)
+    descriptor = BackendTargetDescriptor(
+        ref="e1",
+        role="button",
+        name="Send code to email instead",
+        control_kind="button",
+        frame_origin=_ORIGIN,
+        consequential=True,
+    )
+    session, page, snapshot = await _snapshot_with_targets(service, backend, (descriptor,))
+    target = _action_target(snapshot.snapshot_id, session.session_id, snapshot.page.page_id, "e1")
+    result = await service.action(target, BrowserActionRequest(kind="click"))
+    assert result.disposition == "performed"
+    assert result.transaction is None
+    assert len(page.preflights) == 1
+    assert len(page.actions) == 1
+    with pytest.raises(BrowserError) as stale:
+        service.action_context(target)
+    assert stale.value.failure.code == "stale_target"
     await service.aclose()
 
 

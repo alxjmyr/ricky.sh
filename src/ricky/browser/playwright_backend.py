@@ -1645,13 +1645,11 @@ class _PlaywrightPage:
                         message=f"verification hold rejected: {restriction}",
                     )
                 )
-        elif target.restricted_interaction is not None:
+        elif target.restricted_interaction in {"passkey", "sso"}:
             raise BrowserError(
                 BrowserFailure(
                     code="handoff_required",
-                    message=(
-                        "recognized CAPTCHA, passkey, or SSO interactions require user handoff"
-                    ),
+                    message=("recognized passkey or SSO interactions require user handoff"),
                 )
             )
         destinations = await self._validate_destination_facts(
@@ -3193,13 +3191,6 @@ def _validate_action_compatibility(
                 message=(
                     "use protected_values_catalog and browser_fill_protected for protected fields"
                 ),
-            )
-        )
-    if kind == "click" and target.consequential:
-        raise BrowserError(
-            BrowserFailure(
-                code="consequential_target",
-                message="consequential controls require browser_commit",
             )
         )
     if kind == "fill" and (

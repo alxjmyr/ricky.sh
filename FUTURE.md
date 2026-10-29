@@ -1,4 +1,5 @@
 # TODO's and FEATURES:
+[] - AGENT: Auto Compaction
 [] - CLI: COnfiguration Manager (maybe first TUI usecase): ensure API is extensible for web
 [] - TOOLS: Image Gen (create_image and edit_image tools)
 [] - TOOLS: Create a disable tools list (by profile) to improve context management and other issues 

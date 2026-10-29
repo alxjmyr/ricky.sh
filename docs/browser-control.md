@@ -283,14 +283,21 @@ only to that session, page, navigation, and snapshot. Every dispatched action co
 snapshot and normally returns a fresh one for the next action. Ricky rejects invented, ambiguous,
 changed, or reused references before dispatch when it can determine that safely.
 
-Ordinary interactions include clicking a non-consequential control, replacing text, selecting one
+Ordinary interactions include clicking an intermediate control, replacing text, selecting one
 visible option, setting a checkbox or radio, and sending a bounded navigation or editing key. They
 are treated as external effects because Web applications can autosave or attach hidden handlers.
 The CLI asks before dispatch by default and may offer an optional grant limited to that action kind,
 the exact live browser session, and the top-level and target-frame origins.
 
-Known submit, purchase, reservation, send, save, delete, and similar controls use the separate
-commit operation. Every semantic or coordinate commit requires either a financial or generic
+Ricky uses ordinary interactions to prepare the task, including opening checkout, choosing a
+verification channel, and requesting a code. A submit-type button, a word such as "send", or
+surrounding payment controls does not by itself identify a financial transaction. Ricky reasons
+about the current page and intended effect rather than following a fixed website workflow.
+
+Actions that create a payment or other material external commitment use the separate
+commit operation, even when they occur before the last visible step. Code entry can complete a
+pending payment; accepting a free trial can create a future charge. Every semantic or coordinate
+commit requires either a financial or generic
 browser transaction envelope and, by default, a fresh action-specific approval. The commit cannot
 use a remembered session grant or an allow rule to skip review; an ordered deny remains authoritative.
 Interactive chat [send-it mode](chat.md#skip-approval-prompts-for-this-chat) automatically
@@ -298,6 +305,8 @@ authorizes approval requests, including resource opens, uploads, downloads, prot
 coordinate clicks, and consequential commits. Purchases and submissions can proceed without
 per-action review. Deny policies, destination and disclosure rules, and exact prepared-transaction
 checks still apply. Background approvals are unchanged.
+The harness binds review to the exact proposed operation; it cannot independently prove the
+business effect of arbitrary website controls or guarantee that the model selected the right boundary.
 Denial and deterministic preflight rejection result in no browser dispatch. See
 [Browser transaction approvals](browser-transactions.md).
 
@@ -329,6 +338,12 @@ the page. Supported press-and-hold human-verification challenges use automatic b
 Passkey, SSO, and unsupported protected controls still require local handoff.
 
 ## Automatic verification holds
+
+For a checkbox or button challenge, Ricky can use ordinary checkbox or click tools and inspect
+the result. If semantic references cannot represent the control, the existing masked visual
+fallback may be used under the same interaction authority. A CAPTCHA label alone does not require
+handoff. These interactions require ordinary interaction permissions; they do not expand the
+verification-only tools available to read-oriented named jobs.
 
 Ricky can attempt a supported press-and-hold challenge in foreground chat or a background
 browser worker. It selects the exact visual candidate reference, holds the control, observes feedback while
@@ -440,8 +455,9 @@ digest, bounds, nested hit-tested control, and any statically visible destinatio
 recognized protected controls are rejected. Any change to the recaptured masked viewport pixels
 makes the target stale, so dynamic pages may require another visual snapshot. The coordinate commit
 receives its own fresh approval unless chat send-it is enabled; an ordinary coordinate click
-remains inside its exact interaction authority and cannot activate a target classified as
-consequential. The screenshot provider allowlist does not approve browser effects.
+remains inside its exact interaction authority. Ricky chooses the commit path for material
+commitments by their intended effect, rather than a heuristic target classification.
+The screenshot provider allowlist does not approve browser effects.
 
 Masked screenshots remain in private session storage until the resident runtime closes or `/clear`
 starts a fresh session. At most the latest two retained browser images are projected into one model
@@ -452,7 +468,9 @@ request, subject to byte, pixel, token, and session-storage ceilings.
 For an unsupported CAPTCHA, passkey, SSO flow, protected field, or ambiguous interface, Ricky can
 foreground a headed browser and end its turn with a fixed local instruction. Complete the step in
 the browser, reply to Ricky, and have it take a new snapshot before continuing. Handoff is not
-available in a headless session.
+available in a headless session or an attachment whose visibility is unknown. For interactive
+tasks likely to need local assistance, ask for a visible browser at the start. Reopening a saved
+profile does not guarantee restoration of the same live checkout or verification challenge.
 
 ## Control destinations
 
