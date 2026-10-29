@@ -191,7 +191,7 @@ Enter these commands at the `ricky>` prompt:
 | `/debug` | Toggle detailed event rendering. You can also use `/debug on` or `/debug off`. |
 | `/tasks` | Show the current chat's temporary task list. |
 | `/context` | Inspect the assembled context without calling the model. |
-| `/compact [focus]` | Summarize older context while keeping a recent verbatim tail. |
+| `/compact [focus]` | Summarize older context while keeping the current request and a recent verbatim tail. |
 | `/model` | Show the provider and model pinned to this chat. |
 | `/img [paths...]` | Select images for the next message. |
 | `/clear` | Discard the current chat state and start a fresh session with the same model. |
@@ -230,9 +230,15 @@ Use `/compact` when older conversation history consumes too much context:
 /compact Preserve every decision about the release process.
 ```
 
-Compaction asks the current model to summarize an old prefix of the chat. Ricky keeps a recent
-complete-turn tail verbatim and records a checkpoint. Compaction is explicit; Ricky does not
-silently replace history while you chat.
+Compaction asks the current model to summarize older chat context. Ricky keeps a recent tail
+verbatim, including the user request that started the retained work. Long turns can be compacted
+between completed tool batches; tool calls, their results, and attached observations stay together.
+Large prefixes can require multiple summary requests and incur additional model usage.
+
+Ricky validates the result before recording a checkpoint. If compaction fails or cannot reduce
+context enough to fit its limits, the previous context remains active. Original history remains
+available as evidence within the session. Compaction is explicit and runs only while the session
+is idle; Ricky does not automatically compact while working.
 
 ## Stop work safely
 

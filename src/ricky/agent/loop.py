@@ -157,11 +157,9 @@ class AgentLoop:
     ) -> None:
         """Preflight complete image context before an interface commits its draft."""
         validate_user_images(session, user_input)
-        checkpoint = session.active_checkpoint()
-        boundary = checkpoint.retained_from_message if checkpoint is not None else 0
         has_images = any(isinstance(part, ImagePart) for part in user_input.parts) or any(
             isinstance(part, ImagePart)
-            for message in session.history[boundary:]
+            for message in session.retained_history()
             for part in message.content
         )
         if not has_images:
@@ -259,6 +257,9 @@ class AgentLoop:
         self,
         session: AgentSession,
         focus: str | None = None,
+        *,
+        target_chars: int | None = None,
+        target_tokens: int | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one manual compaction only at an idle session boundary."""
         if session.id in self._active_session_ids:
@@ -283,8 +284,13 @@ class AgentLoop:
                     enforce_char_limit=False,
                 ),
             )
-            async for event in compactor.compact(session, focus):
-                yield event
+            async with aclosing(
+                compactor.compact(
+                    session, focus, target_chars=target_chars, target_tokens=target_tokens
+                )
+            ) as events:
+                async for event in events:
+                    yield event
         finally:
             self._active_session_ids.discard(session.id)
 

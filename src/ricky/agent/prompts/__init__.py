@@ -1,7 +1,8 @@
 """Versioned agent prompt templates."""
 
-from ricky.agent.prompts.compaction_v1 import (
-    COMPACTION_PROMPT_V1,
+from ricky.agent.prompts.compaction_v1 import COMPACTION_PROMPT_V1
+from ricky.agent.prompts.compaction_v2 import (
+    COMPACTION_PROMPT_V2,
     COMPACTION_PROMPT_VERSION,
 )
 from ricky.agent.prompts.presentation import MOBILE_MARKDOWN_GUIDANCE
@@ -158,6 +159,7 @@ Web research guidance:
 
 __all__ = [
     "COMPACTION_PROMPT_V1",
+    "COMPACTION_PROMPT_V2",
     "COMPACTION_PROMPT_VERSION",
     "MOBILE_MARKDOWN_GUIDANCE",
     "SYSTEM_PROMPT_V1",

@@ -300,7 +300,7 @@ class ToolResultContextSettings(BaseModel):
 
 
 class ContextCompactionSettings(BaseModel):
-    """Policy for explicit, tool-free semantic context compaction."""
+    """Policy for bounded, tool-free semantic context compaction."""
 
     enabled: bool = True
     keep_recent_tokens: int = Field(default=16_000, ge=1)

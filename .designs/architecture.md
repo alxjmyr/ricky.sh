@@ -234,8 +234,20 @@ gets a new identity. Affinity does not pin a provider endpoint, disable failover
 alter model selection. Provider-specific cache controls remain adapter-owned.
 
 Lossless tool-result offloading uses session-owned artifact references. Semantic compaction replaces
-only the active projection of a complete historical prefix; canonical history
-and prior checkpoints remain evidence. Context projection independently bounds
+only the active projection of a settled historical prefix; canonical history
+and prior checkpoints remain evidence. A prefix may end within a user turn, but
+never splits an assistant tool batch from its results and attached observations.
+The retained suffix keeps its originating user request verbatim, including user
+attachments; tool-produced image input is not a new user request. The newest
+settled unit remains verbatim. The shared engine accepts optional context targets,
+uses bounded, isolated, tool-free summary requests, and validates the complete
+candidate projection before committing one checkpoint. Intermediate summaries
+are not committed. Failure or cancellation preserves the previous projection;
+completed summary usage is accumulated in the working session and lifecycle
+events. Compaction cannot grant permissions, mutate
+execution state, or replay effects. The session owner serializes compaction with
+turn work; manual invocation requires an idle session. Automatic triggering is
+not enabled. Context projection independently bounds
 image count, bytes, pixels, and estimated image tokens. Explicit user uploads remain
 in the active projection until clearing or compaction. A complete pending attachment
 set and retained active uploads must fit the request; exceeding a ceiling is an

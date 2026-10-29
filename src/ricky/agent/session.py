@@ -17,7 +17,7 @@ from ricky.config import (
     validate_timezone_name,
 )
 from ricky.durable_tasks.types import TaskLease
-from ricky.llm import MediaArtifactRef, Message, ModelInfo, ToolArtifactRef, Usage
+from ricky.llm import ImagePart, MediaArtifactRef, Message, ModelInfo, ToolArtifactRef, Usage
 from ricky.profiles import ProfileName, ProfileScope
 from ricky.skills.spec import ActiveSkill
 from ricky.workflows.run import WorkflowInvocation
@@ -169,7 +169,9 @@ class ContextCheckpoint(BaseModel):
     usage: Usage = Field(default_factory=Usage)
     observed: CheckpointObservedState = Field(default_factory=CheckpointObservedState)
     focus: str | None = Field(default=None, max_length=10_000)
-    prompt_version: Literal["context_compaction_v1"] = "context_compaction_v1"
+    prompt_version: Literal["context_compaction_v1", "context_compaction_v2"] = (
+        "context_compaction_v1"
+    )
 
     @model_validator(mode="after")
     def _matching_boundaries(self) -> ContextCheckpoint:
@@ -322,3 +324,34 @@ class AgentSession(BaseModel):
             if checkpoint.id == self.active_checkpoint_id:
                 return checkpoint
         raise ValueError("active_checkpoint_id does not identify a serialized checkpoint")
+
+    def retained_history(self) -> list[Message]:
+        """Return the verbatim tail, including its user request for an intra-turn cut.
+
+        The request is derived from canonical history rather than duplicated in
+        a checkpoint. Its attachments remain subject to ordinary media limits.
+        """
+        checkpoint = self.active_checkpoint()
+        if checkpoint is None:
+            return list(self.history)
+        boundary = checkpoint.retained_from_message
+        tail = self.history[boundary:]
+        if tail and not self.is_user_request(tail[0]):
+            for message in reversed(self.history[:boundary]):
+                if self.is_user_request(message):
+                    return [message, *tail]
+        return tail
+
+    def is_user_request(self, message: Message) -> bool:
+        """Distinguish user requests from tool-produced image follow-up input.
+
+        Unknown image provenance is conservatively treated as user input; text
+        alone never establishes that a message was produced by a tool.
+        """
+        if message.role != "user":
+            return False
+        images = [part for part in message.content if isinstance(part, ImagePart)]
+        provenance = {record.id: record.provenance for record in self.media}
+        return not images or any(
+            provenance.get(part.artifact.id, "user_upload") == "user_upload" for part in images
+        )

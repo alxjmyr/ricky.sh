@@ -157,12 +157,10 @@ def validate_user_images(session: AgentSession, user_input: UserContent) -> None
     pending = [part for part in user_input.parts if isinstance(part, ImagePart)]
     if len(pending) > settings.upload_image_limit:
         raise ValueError(f"Attach at most {settings.upload_image_limit} images per message.")
-    checkpoint = session.active_checkpoint()
-    boundary = checkpoint.retained_from_message if checkpoint is not None else 0
     upload_ids = {record.id for record in session.media if record.provenance == "user_upload"}
     images = [
         part
-        for message in session.history[boundary:]
+        for message in session.retained_history()
         for part in message.content
         if isinstance(part, ImagePart) and part.artifact.id in upload_ids
     ] + pending
@@ -564,7 +562,7 @@ def _project_history(
         for part in message.content
     ]
     tail = _project_image_parts(
-        session.history[boundary:],
+        session.retained_history(),
         required_image_ids=required_image_ids,
         browser_image_limit=browser_image_limit,
         image_slots=image_slots,

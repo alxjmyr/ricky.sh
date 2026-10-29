@@ -221,7 +221,7 @@ def _request_text(request: CompletionRequest) -> str:
     )
 
 
-def test_boundary_keeps_oversized_tool_turn_and_parallel_results_together() -> None:
+def test_boundary_compacts_oversized_tool_batch_with_parallel_results_together() -> None:
     settings = _settings()
     session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
     session.history = [
@@ -247,13 +247,16 @@ def test_boundary_keeps_oversized_tool_turn_and_parallel_results_together() -> N
 
     selected = select_compaction_boundary(session, keep_recent_tokens=1)
 
-    assert selected.boundary == 2
-    assert session.history[selected.boundary].role == "user"
-    assert {part.id for part in session.history[3].content} == {"c1", "c2"}  # type: ignore[attr-defined]
-    assert selected.retained_messages == 5
+    # Settled work within the latest user turn is now eligible; the complete
+    # parallel call/result batch moves into the prefix together.
+    assert selected.boundary == 6
+    assert session.history[selected.boundary].role == "assistant"
+    _assert_tool_protocol(session.history[: selected.boundary])
+    _assert_tool_protocol(session.history[selected.boundary :])
+    assert selected.retained_messages == 1
 
 
-def test_boundary_keeps_an_interrupted_tool_turn_out_of_the_prefix() -> None:
+def test_boundary_refuses_session_with_interrupted_tool_batch() -> None:
     settings = _settings()
     session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
     session.history = [
@@ -266,10 +269,8 @@ def test_boundary_keeps_an_interrupted_tool_turn_out_of_the_prefix() -> None:
         *_turn("later", "done later"),
     ]
 
-    selected = select_compaction_boundary(session, keep_recent_tokens=1)
-
-    assert selected.boundary == 2
-    assert session.history[selected.boundary] == Message.text("user", "interrupted")
+    with pytest.raises(CompactionRefusedError):
+        select_compaction_boundary(session, keep_recent_tokens=1)
 
 
 async def test_no_useful_prefix_refuses_without_calling_provider(tmp_path: Path) -> None:
@@ -326,6 +327,7 @@ async def test_success_is_one_tool_free_request_and_atomic_checkpoint(
     checkpoint = session.active_checkpoint()
     assert checkpoint is not None
     assert checkpoint.focus == "Focus on API decisions"
+    assert checkpoint.prompt_version == "context_compaction_v2"
     assert checkpoint.usage == Usage(prompt_tokens=31, completion_tokens=17)
     assert checkpoint.source_digest
     assert checkpoint.estimated_tokens_before > checkpoint.estimated_tokens_after
@@ -456,7 +458,7 @@ async def test_artifact_reference_is_included_without_loading_body(
                 )
             ],
         ),
-        Message.text("assistant", "done"),
+        Message.text("assistant", "Observed artifact details. " * 100),
         *_turn("recent", "tail"),
     ]
     provider = ScriptedProvider([_summary_done()])
@@ -787,7 +789,10 @@ def test_checkpoint_and_lifecycle_events_round_trip_json() -> None:
     ]
     adapter = TypeAdapter(AgentEvent)
 
-    assert AgentSession.model_validate_json(session.model_dump_json()) == session
+    restored = AgentSession.model_validate_json(session.model_dump_json())
+    assert restored == session
+    assert restored.active_checkpoint() is not None
+    assert restored.active_checkpoint().prompt_version == "context_compaction_v1"  # type: ignore[union-attr]
     for event in events:
         assert adapter.validate_json(adapter.dump_json(event)) == event
 
@@ -905,7 +910,7 @@ def test_boundary_refuses_when_first_uncompacted_turn_is_incomplete() -> None:
         *_turn("later", "answer"),
     ]
 
-    with pytest.raises(CompactionRefusedError, match="No useful old prefix"):
+    with pytest.raises(CompactionRefusedError):
         select_compaction_boundary(session, keep_recent_tokens=1)
 
 
@@ -947,3 +952,427 @@ async def test_compaction_recovers_over_limit_upload_context_without_losing_evid
         for message in provider.requests[0].messages
         for part in message.content
     )
+
+
+def _browser_batch(index: int, *, chars: int = 3_000) -> list[Message]:
+    return [
+        Message(
+            role="assistant",
+            content=[ToolCallPart(id=f"observe_{index}", name="browser_snapshot", args={})],
+        ),
+        Message(
+            role="tool",
+            content=[
+                ToolResultPart(call_id=f"observe_{index}", content=f"PAGE-{index}:" + "x" * chars)
+            ],
+        ),
+    ]
+
+
+def _browser_history(settings: RickySettings, *, batches: int = 12) -> AgentSession:
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    session.history = [Message.text("user", "Find the receipt; do not submit another order.")]
+    for index in range(batches):
+        session.history.extend(_browser_batch(index))
+    session.history.append(Message.text("assistant", "The receipt is still pending."))
+    return session
+
+
+def _assert_tool_protocol(messages: list[Message]) -> None:
+    pending: set[str] = set()
+    for message in messages:
+        for part in message.content:
+            if isinstance(part, ToolCallPart):
+                assert part.id not in pending
+                pending.add(part.id)
+            elif isinstance(part, ToolResultPart):
+                assert part.call_id in pending, "projection contains an orphan tool result"
+                pending.remove(part.call_id)
+    assert not pending, "projection contains an incomplete tool batch"
+
+
+async def test_single_browser_task_compacts_repeatedly_and_preserves_request(
+    tmp_path: Path,
+) -> None:
+    settings = _settings()
+    session = _browser_history(settings, batches=4)
+    original_request = session.history[0].model_copy(deep=True)
+    provider = ScriptedProvider(
+        [_summary_done(), _summary_done(), _summary_done("Continue checking.")]
+    )
+    loop = _loop(provider, settings, tmp_path)
+
+    first_events = await _compact(loop, session)
+    assert isinstance(first_events[-1], ContextCompactionFinishedEvent)
+    first = session.active_checkpoint()
+    assert first is not None
+    assert first.retained_from_message > 1
+    session.history.extend(_browser_batch(4))
+    session.history.extend(_browser_batch(5))
+    history_before = session.model_dump_json(include={"history"})
+    second_events = await _compact(loop, session)
+    assert isinstance(second_events[-1], ContextCompactionFinishedEvent)
+    second = session.active_checkpoint()
+    assert second is not None and second.previous_checkpoint_id == first.id
+    assert second.retained_from_message > first.retained_from_message
+    assert session.model_dump_json(include={"history"}) == history_before
+
+    restored = AgentSession.model_validate_json(session.model_dump_json())
+    assembly = assemble_context(
+        restored, ToolRegistry([]), turn_id="resume", iteration=1, cwd=tmp_path
+    )
+    assert assembly.request.messages.count(original_request) == 1
+    assert "PAGE-0:" not in _request_text(assembly.request)
+    _assert_tool_protocol(assembly.request.messages)
+    events = [event async for event in loop.run_turn(restored, "Continue from that receipt state.")]
+    assert not any(event.kind == "tool_call_started" for event in events)
+    assert len(provider.requests) == 3
+    assert original_request in provider.requests[-1].messages
+    _assert_tool_protocol(provider.requests[-1].messages)
+
+
+async def test_oversized_source_uses_bounded_chunks_and_commits_once(tmp_path: Path) -> None:
+    from ricky.agent.context import account_completion_request
+
+    settings = _settings(context_char_limit=30_000)
+    session = _browser_history(settings)
+    history_before = session.model_dump_json(include={"history"})
+    provider = RotatingProvider([_summary_done() for _ in range(30)])
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    assert len(provider.requests) > 1
+    for request in provider.requests:
+        assert request.tools == []
+        report = account_completion_request(session, request, [])
+        assert report.serialized_chars <= settings.context_char_limit
+        if report.budget.hard_input_tokens is not None:
+            assert report.estimated_input_tokens <= report.budget.hard_input_tokens
+    assert len(session.checkpoints) == 1
+    assert provider.rotations == [session.id]
+    assert session.model_dump_json(include={"history"}) == history_before
+    assert events[-1].usage == Usage(
+        prompt_tokens=31 * len(provider.requests), completion_tokens=17 * len(provider.requests)
+    )
+    assert session.active_checkpoint() is not None
+    assert session.active_checkpoint().usage == events[-1].usage  # type: ignore[union-attr]
+    assert [event.kind for event in events].count("context_compaction_started") == 1
+    assert [event.kind for event in events].count("context_compaction_finished") == 1
+
+
+async def test_later_chunk_failure_preserves_projection_and_accounts_used_tokens(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(context_char_limit=30_000)
+    session = _browser_history(settings)
+    history_before = session.model_dump_json(include={"history"})
+    provider = RotatingProvider([_summary_done(), RuntimeError("second chunk unavailable")])
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert len(provider.requests) == 2
+    assert isinstance(events[-1], ContextCompactionFailedEvent)
+    assert "second chunk unavailable" in events[-1].message
+    assert events[-1].usage == Usage(prompt_tokens=31, completion_tokens=17)
+    assert session.checkpoints == []
+    assert session.active_checkpoint_id is None
+    assert provider.rotations == []
+    assert session.model_dump_json(include={"history"}) == history_before
+
+
+async def test_later_chunk_cancellation_preserves_projection(tmp_path: Path) -> None:
+    settings = _settings(context_char_limit=30_000)
+    session = _browser_history(settings)
+    history_before = session.model_dump_json(include={"history"})
+
+    class BlockingSecondChunk(BlockingProvider):
+        async def stream(self, request: CompletionRequest) -> AsyncIterator[StreamEvent]:
+            if not self.requests:
+                self.requests.append(request)
+                yield _summary_done()
+                return
+            async for event in super().stream(request):
+                yield event
+
+    provider = BlockingSecondChunk()
+    task = asyncio.create_task(_compact(_loop(provider, settings, tmp_path), session))
+    try:
+        await asyncio.wait_for(provider.started.wait(), timeout=2)
+        task.cancel()
+        events = await asyncio.wait_for(task, timeout=2)
+        assert isinstance(events[-1], ContextCompactionFailedEvent)
+        assert events[-1].error_type == "CancelledError"
+        assert events[-1].usage == Usage(prompt_tokens=31, completion_tokens=17)
+        assert len(provider.requests) == 2
+        assert session.checkpoints == []
+        assert session.active_checkpoint_id is None
+        assert session.model_dump_json(include={"history"}) == history_before
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_summary_that_increases_context_is_not_committed(tmp_path: Path) -> None:
+    settings = _settings()
+    session = _long_history(settings)
+    provider = RotatingProvider([_summary_done("inflated " * 1_000)])
+    history_before = session.model_dump_json(include={"history"})
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert isinstance(events[-1], ContextCompactionFailedEvent)
+    assert session.checkpoints == []
+    assert session.active_checkpoint_id is None
+    assert provider.rotations == []
+    assert session.model_dump_json(include={"history"}) == history_before
+
+
+@pytest.mark.parametrize("budget_kind", ["chars", "tokens"])
+async def test_explicit_target_reclaims_budget_even_with_large_recent_preference(
+    tmp_path: Path,
+    budget_kind: str,
+) -> None:
+    settings = _settings(keep_recent_tokens=100_000)
+    session = _browser_history(settings, batches=6)
+    provider = ScriptedProvider([_summary_done() for _ in range(20)])
+    loop = _loop(provider, settings, tmp_path)
+    before = loop.inspect_context(session)
+    target = (
+        before.serialized_chars - 10_000
+        if budget_kind == "chars"
+        else before.estimated_input_tokens - 2_500
+    )
+    events = [
+        event
+        async for event in loop.compact_context(
+            session,
+            target_chars=target if budget_kind == "chars" else None,
+            target_tokens=target if budget_kind == "tokens" else None,
+        )
+    ]
+
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    after = loop.inspect_context(session)
+    assert (
+        after.serialized_chars if budget_kind == "chars" else after.estimated_input_tokens
+    ) <= target
+    assert (
+        session.history[0]
+        in assemble_context(
+            session, ToolRegistry([]), turn_id="target", iteration=1, cwd=tmp_path
+        ).request.messages
+    )
+
+
+async def test_unreachable_target_leaves_previous_projection_unchanged(tmp_path: Path) -> None:
+    settings = _settings()
+    session = _browser_history(settings, batches=4)
+    provider = RotatingProvider([_summary_done() for _ in range(20)])
+    loop = _loop(provider, settings, tmp_path)
+    history_before = session.model_dump_json(include={"history"})
+
+    events = [event async for event in loop.compact_context(session, target_chars=1)]
+
+    assert isinstance(events[-1], ContextCompactionFailedEvent)
+    assert session.active_checkpoint_id is None
+    assert session.checkpoints == []
+    assert provider.rotations == []
+    assert session.model_dump_json(include={"history"}) == history_before
+
+
+async def test_intra_turn_projection_pins_upload_and_not_browser_image_message(
+    tmp_path: Path,
+) -> None:
+    from ricky.agent.session import MediaAdmissionEvidence, SessionMediaRecord
+    from ricky.llm import UserContent
+
+    settings = _settings()
+    settings.context.media.request_image_limit = 2
+    session = _browser_history(settings, batches=4)
+    upload = _image()
+    browser_image = ImagePart(
+        artifact=upload.artifact.model_copy(update={"id": "media_" + "3" * 32})
+    )
+    for part, provenance in ((upload, "user_upload"), (browser_image, "browser_screenshot")):
+        session.media.append(
+            SessionMediaRecord(
+                **part.artifact.model_dump(),
+                relative_path=f"{part.artifact.id}.png",
+                provenance=provenance,
+                retention="conversation",
+                admission=MediaAdmissionEvidence(
+                    disclosure_class="explicit_provider",
+                    admitted_provider=session.provider,
+                    source_owner="personal",
+                ),
+            )
+        )
+    session.history[0].content.append(upload)
+    original_request = session.history[0].model_copy(deep=True)
+    session.history.insert(
+        3,
+        Message(
+            role="user",
+            content=[
+                TextPart(text="Ricky attached the following tool-produced image input."),
+                browser_image,
+            ],
+        ),
+    )
+    provider = ScriptedProvider([_summary_done()])
+    loop = _loop(provider, settings, tmp_path)
+
+    events = await _compact(loop, session)
+
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    request = assemble_context(
+        session, ToolRegistry([]), turn_id="image_tail", iteration=1, cwd=tmp_path
+    ).request
+    assert request.messages.count(original_request) == 1
+    images = [
+        part
+        for message in request.messages
+        for part in message.content
+        if isinstance(part, ImagePart)
+    ]
+    assert images == [upload]
+    report = loop.inspect_context(session)
+    assert report.retained_image_count == 2  # Both originals remain evidence.
+    assert report.projected_image_count == 1
+    # The pinned upload still consumes capacity when a new input is admitted.
+    with pytest.raises(ValueError, match="request image count limit"):
+        await loop.validate_image_input(session, UserContent(parts=[upload, browser_image]))
+
+
+@pytest.mark.parametrize(
+    "defect", ["pending", "duplicate_result", "orphan_result", "duplicate_call", "bare_tool"]
+)
+async def test_unsettled_or_malformed_tool_history_refuses_before_dispatch(
+    tmp_path: Path,
+    defect: str,
+) -> None:
+    settings = _settings()
+    session = _long_history(settings)
+    batch = _browser_batch(0)
+    if defect == "pending":
+        session.history.append(batch[0])
+    elif defect == "duplicate_result":
+        session.history.extend([*batch, batch[1].model_copy(deep=True)])
+    elif defect == "orphan_result":
+        session.history.append(batch[1])
+    elif defect == "bare_tool":
+        session.history.append(Message.text("tool", "unattributed result"))
+    else:
+        session.history.extend([batch[0], batch[0].model_copy(deep=True), batch[1]])
+    before = session.model_dump_json()
+    provider = ScriptedProvider([_summary_done()])
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert isinstance(events[-1], ContextCompactionFailedEvent)
+    assert provider.requests == []
+    assert session.model_dump_json() == before
+
+
+@pytest.mark.parametrize("capacity", ["chars", "tokens"])
+async def test_single_oversized_message_chunks_cover_every_source_character(
+    tmp_path: Path,
+    capacity: str,
+) -> None:
+    import json
+
+    from ricky.agent.context import account_completion_request
+
+    settings = _settings(context_char_limit=30_000 if capacity == "chars" else 1_000_000)
+    if capacity == "tokens":
+        payload = settings.model_dump(mode="python")
+        payload["context"]["models"] = [
+            {
+                "provider": "openrouter",
+                "model": payload["providers"]["openrouter"]["default_model"],
+                "context_window_tokens": 8_000,
+                "max_output_tokens": 256,
+            }
+        ]
+        settings = RickySettings.model_validate(payload)
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    session.history = [
+        Message.text("user", "Analyze this historical page."),
+        Message(
+            role="assistant", content=[ToolCallPart(id="giant", name="browser_snapshot", args={})]
+        ),
+        Message(
+            role="tool",
+            content=[
+                ToolResultPart(
+                    call_id="giant",
+                    content='START ["quoted"] \\ Unicode: 雪 ' + "text " * 14_000 + " END",
+                )
+            ],
+        ),
+        Message.text("assistant", "Historical page inspected."),
+        *_turn("Retain this request.", "recent answer"),
+    ]
+    provider = ScriptedProvider([_summary_done() for _ in range(30)])
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    assert len(provider.requests) > 1
+    fragments: list[str] = []
+    for index, request in enumerate(provider.requests):
+        payload = json.loads(request.messages[1].content[0].text)  # type: ignore[union-attr]
+        assert payload["fragment_offset"] == sum(map(len, fragments))
+        fragments.append(payload["newly_covered_history_fragment"])
+        assert payload["fragment_continues"] == (index < len(provider.requests) - 1)
+        # Every middle fragment keeps attribution even when the raw fragment no
+        # longer contains its opening role, call id, or outcome fields.
+        result_metadata = [
+            item for item in payload["message_fragments"] if item["message_index"] == 2
+        ]
+        assert len(result_metadata) == 1
+        assert result_metadata[0]["role"] == "tool"
+        assert result_metadata[0]["tool_results"] == [{"call_id": "giant", "is_error": False}]
+        assert result_metadata[0]["included_start"] < result_metadata[0]["included_end"]
+        report = account_completion_request(session, request, [])
+        assert report.serialized_chars <= settings.context_char_limit
+        if capacity == "tokens":
+            assert report.budget.hard_input_tokens is not None
+            assert report.estimated_input_tokens <= report.budget.hard_input_tokens
+    assert json.loads("".join(fragments)) == [
+        message.model_dump(mode="json") for message in session.history[:4]
+    ]
+    assert session.active_checkpoint() is not None
+
+
+async def test_reused_call_ids_keep_outcomes_bound_to_their_occurrence(tmp_path: Path) -> None:
+    settings = _settings()
+    session = AgentSession.create(settings, profile_scope=settings.resolve_profile_scope())
+    session.history = [Message.text("user", "Edit both files.")]
+    for path, failed in (("success.txt", False), ("failed.txt", True)):
+        session.history.extend(
+            [
+                Message(
+                    role="assistant",
+                    content=[ToolCallPart(id="reused", name="write_file", args={"path": path})],
+                ),
+                Message(
+                    role="tool",
+                    content=[
+                        ToolResultPart(call_id="reused", content="evidence " * 500, is_error=failed)
+                    ],
+                ),
+            ]
+        )
+    session.history.extend(_turn("latest", "tail"))
+    provider = ScriptedProvider([_summary_done()])
+
+    events = await _compact(_loop(provider, settings, tmp_path), session)
+
+    assert isinstance(events[-1], ContextCompactionFinishedEvent)
+    checkpoint = session.active_checkpoint()
+    assert checkpoint is not None
+    assert checkpoint.observed.files_modified == ["success.txt"]
+    assert checkpoint.observed.tool_errors == ["write_file:reused"]
+    assert checkpoint.observed.tool_names == ["write_file"]

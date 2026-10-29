@@ -91,10 +91,11 @@ artifact_max_chars = 2000000
 session_artifact_max_chars = 20000000
 read_chunk_chars = 12000
 
-# User-triggered semantic compaction. The selected old prefix is summarized by
-# one tool-free request while a recent complete-turn tail remains verbatim.
+# User-triggered semantic compaction. Bounded tool-free requests summarize older
+# context while the originating user request and recent settled work remain verbatim.
 [context.compaction]
 enabled = true
+# Preferred recent tail; compaction can retain less to meet context limits.
 keep_recent_tokens = 16000
 max_summary_tokens = 4096
 max_focus_chars = 2000

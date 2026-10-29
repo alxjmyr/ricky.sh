@@ -114,6 +114,13 @@ the first provider is confirmed live and blocked, preserving the overlap check
 without racing two cold runtime constructions. It cancels and joins owned tasks
 if either bounded startup wait fails.
 
+`test_context_compaction.py` owns settled intra-turn boundaries, preserved user
+requests and attachments, bounded summary inputs, budget targets, repeated
+checkpoint continuation, and atomic failure/cancellation. Its scripted browser
+tool transcripts check projection and absence of tool replay without launching
+Chrome. Provider and session-service tests retain native-session rotation and
+durable fenced commit coverage; these are not replaced by projection tests.
+
 The workflow job timeout case waits for the provider's start event before arming
 the runner's real 50 ms timer. It retains budget-expiry, persisted interruption,
 and provider-cancellation assertions without requiring workflow checkpoint setup
