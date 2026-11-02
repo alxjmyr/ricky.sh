@@ -133,12 +133,13 @@ class GcalUpdateEventParams(_Params):
     account: GoogleAccountId
     event_id: str
     calendar_id: str = "primary"
-    summary: str | None = None
-    start: str | None = None
-    end: str | None = None
-    timezone: str | None = None
-    description: str | None = None
-    location: str | None = None
+    # Omitted updates must stay omitted through registry and permission serialization.
+    summary: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    start: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    end: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    timezone: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    description: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    location: str | None = Field(default=None, exclude_if=lambda value: value is None)
     add_attendees: list[str] = Field(default_factory=list)
     remove_attendees: list[str] = Field(default_factory=list)
 

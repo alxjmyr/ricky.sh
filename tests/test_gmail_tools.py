@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
+import os
+import threading
 from collections.abc import Collection
 from email import policy
 from email.parser import BytesParser
@@ -1095,3 +1098,200 @@ async def test_triage_message_effects_survive_new_mail_and_legacy_thread_receipt
         assert fake.count("POST", f"threads/t1/{operation}") == 1
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "message_id",
+    [
+        "../messages/m1",
+        "../../../../outside",
+        "/absolute",
+        r"..\outside",
+        "",
+        ".",
+        "..",
+        "%2e%2e%2fmessages%2fm1",
+        "m1?alt=media",
+        "m1#fragment",
+        "m1\n",
+    ],
+)
+async def test_download_rejects_unsafe_message_ids_before_dispatch(
+    tmp_path: Path,
+    message_id: str,
+) -> None:
+    fake = FakeGmail()
+    registry = ToolRegistry([GmailDownloadAttachmentTool(fake.client())])
+    result = await registry.dispatch(
+        "gmail_download_attachment",
+        {"account": "personal/personal", "message_id": message_id, "attachment_id": "att-1"},
+        _ctx(tmp_path),
+    )
+    assert result.is_error
+    assert fake.calls == []
+    assert not list(tmp_path.rglob("*.pdf"))
+
+
+async def test_download_rejects_destination_symlink_escape(tmp_path: Path) -> None:
+    fake = FakeGmail({("GET", "messages/m1"): httpx.Response(200, json=_message())})
+    root = tmp_path / "user-data" / "profiles" / "personal" / "downloads" / "gmail"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"untouched")
+    (root / "m1-report.pdf").symlink_to(outside)
+    tool = GmailDownloadAttachmentTool(fake.client())
+    with pytest.raises(GmailError, match="escapes"):
+        await tool.run(
+            GmailDownloadAttachmentParams(
+                account="personal/personal", message_id="m1", attachment_id="att-1"
+            ),
+            _ctx(tmp_path),
+        )
+    assert outside.read_bytes() == b"untouched"
+    assert fake.count("GET", "messages/m1/attachments/att-1") == 0
+    assert list(root.iterdir()) == [root / "m1-report.pdf"]
+
+
+async def test_concurrent_downloads_preserve_both_attachments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message = _message()
+    message["payload"]["parts"].append(
+        {
+            "mimeType": "application/pdf",
+            "filename": "report.pdf",
+            "body": {"attachmentId": "att-2", "size": 3},
+        }
+    )
+    fake = FakeGmail(
+        {
+            ("GET", "messages/m1"): httpx.Response(200, json=message),
+            ("GET", "messages/m1/attachments/att-1"): httpx.Response(
+                200, json={"data": _encoded(b"one")}
+            ),
+            ("GET", "messages/m1/attachments/att-2"): httpx.Response(
+                200, json={"data": _encoded(b"two")}
+            ),
+        }
+    )
+    barrier = threading.Barrier(2, timeout=5)
+    real_link = os.link
+
+    def simultaneous_link(src: Path, dst: Path) -> None:
+        if dst.name == "m1-report.pdf":
+            barrier.wait()
+        real_link(src, dst)
+
+    monkeypatch.setattr("ricky.tools.integrations.gmail.tools.os.link", simultaneous_link)
+    tool = GmailDownloadAttachmentTool(fake.client())
+    ctx = _ctx(tmp_path)
+    ctx.settings.project_data_dir = str(tmp_path / "project-data")
+    results = await asyncio.gather(
+        *(
+            tool.run(
+                GmailDownloadAttachmentParams(
+                    account="personal/personal",
+                    message_id="m1",
+                    attachment_id=attachment_id,
+                ),
+                ctx,
+            )
+            for attachment_id in ("att-1", "att-2")
+        )
+    )
+    paths = []
+    for result in results:
+        assert result.effect_receipt is not None
+        assert result.effect_receipt.provider_reference is not None
+        paths.append(Path(result.effect_receipt.provider_reference))
+    assert paths[0] != paths[1]
+    assert [path.read_bytes() for path in paths] == [b"one", b"two"]
+    root = tmp_path / "user-data" / "profiles" / "personal" / "downloads" / "gmail"
+    assert set(root.iterdir()) == set(paths)
+    assert all(path.parent == root for path in paths)
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in paths)
+    assert not Path(ctx.settings.project_data_dir).exists()
+
+
+async def test_download_cancellation_waits_for_publication_and_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeGmail(
+        {
+            ("GET", "messages/m1"): httpx.Response(200, json=_message()),
+            ("GET", "messages/m1/attachments/att-1"): httpx.Response(
+                200, json={"data": _encoded(b"complete")}
+            ),
+        }
+    )
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    real_link = os.link
+
+    def blocked_link(src: Path, dst: Path) -> None:
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=5)
+        real_link(src, dst)
+
+    monkeypatch.setattr("ricky.tools.integrations.gmail.tools.os.link", blocked_link)
+    tool = GmailDownloadAttachmentTool(fake.client())
+    task = asyncio.create_task(
+        tool.run(
+            GmailDownloadAttachmentParams(
+                account="personal/personal",
+                message_id="m1",
+                attachment_id="att-1",
+            ),
+            _ctx(tmp_path),
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        # Queue a callback after cancellation handling to observe the task's settled state.
+        handled = loop.create_future()
+        loop.call_soon(handled.set_result, None)
+        await handled
+        assert not task.done()
+        task.cancel()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    root = tmp_path / "user-data" / "profiles" / "personal" / "downloads" / "gmail"
+    assert list(root.iterdir()) == [root / "m1-report.pdf"]
+    assert (root / "m1-report.pdf").read_bytes() == b"complete"
+
+
+async def test_download_publication_failure_cleans_temporary_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakeGmail(
+        {
+            ("GET", "messages/m1"): httpx.Response(200, json=_message()),
+            ("GET", "messages/m1/attachments/att-1"): httpx.Response(
+                200, json={"data": _encoded(b"complete")}
+            ),
+        }
+    )
+
+    def failed_link(src: Path, dst: Path) -> None:
+        raise OSError("publication failed")
+
+    monkeypatch.setattr("ricky.tools.integrations.gmail.tools.os.link", failed_link)
+    tool = GmailDownloadAttachmentTool(fake.client())
+    with pytest.raises(OSError, match="publication failed"):
+        await tool.run(
+            GmailDownloadAttachmentParams(
+                account="personal/personal",
+                message_id="m1",
+                attachment_id="att-1",
+            ),
+            _ctx(tmp_path),
+        )
+    root = tmp_path / "user-data" / "profiles" / "personal" / "downloads" / "gmail"
+    assert list(root.iterdir()) == []

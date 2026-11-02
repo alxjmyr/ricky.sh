@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs
@@ -17,7 +18,7 @@ from pydantic import SecretStr
 
 from ricky.agent import AgentLoop, AgentSession
 from ricky.agent.events import PermissionRequestedEvent, ToolCallFinishedEvent
-from ricky.attachments import AttachmentInput, PreparedAttachmentEffect
+from ricky.attachments import AttachmentInput, LoadedAttachment, PreparedAttachmentEffect
 from ricky.config import RickySettings, SlackSettings
 from ricky.llm import Message, MessageDone, TextPart, ToolCallPart, Usage
 from ricky.permissions import PermissionResponse
@@ -1463,5 +1464,58 @@ async def test_channel_directory_failure_joins_other_inflight_requests() -> None
             await asyncio.wait_for(client.channels(["public", "private"]), timeout=2)
         assert calls == 2
         assert cleaned.is_set()
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize("operation", ["registry", "download", "upload", "send"])
+async def test_transport_diagnostics_do_not_expose_credentials(
+    operation: str, tmp_path: Path
+) -> None:
+    secret = "synthetic-slack-credential"
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        # Upload URLs can themselves contain private tokens.
+        detail = request.headers.get("authorization", str(request.url))
+        raise httpx.LocalProtocolError(f"Illegal header value {detail!r}")
+
+    client = SlackClient(
+        token=SecretStr(secret + "\n"),
+        base_url=BASE,
+        timeout_seconds=1,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        if operation == "registry":
+            result = await ToolRegistry([SlackSearchTool(client)]).dispatch(
+                "slack_search", {"query": "probe"}, _ctx(tmp_path)
+            )
+            assert result.is_error
+            assert "HTTP transport error" in result.content
+            assert secret not in result.model_dump_json()
+        else:
+            expected = SlackSendUnknownError if operation == "send" else SlackTransportError
+            with pytest.raises(expected) as caught:
+                if operation == "download":
+                    await client.download("https://files.slack.com/file")
+                elif operation == "upload":
+                    await client.upload_external(
+                        f"https://files.slack.com/upload?token={secret}",
+                        LoadedAttachment(
+                            filename="file.txt",
+                            media_type="text/plain",
+                            content=b"data",
+                            sha256="unused",
+                            source_path=tmp_path / "file.txt",
+                        ),
+                    )
+                else:
+                    await client.call("chat.postMessage", retryable=False)
+            assert secret not in str(caught.value)
+            assert secret not in "".join(traceback.format_exception(caught.value))
+        assert attempts == 1
     finally:
         await client.aclose()

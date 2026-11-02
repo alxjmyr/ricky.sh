@@ -86,8 +86,8 @@ class OpenRouterProvider:
                 timeout=self._timeout,
             )
             await _raise_for_status(response)
-        except httpx.HTTPError as exc:
-            raise TransportError(str(exc)) from exc
+        except httpx.HTTPError:
+            raise TransportError("OpenRouter HTTP transport error") from None
 
         try:
             payload = response.json()
@@ -206,8 +206,8 @@ class OpenRouterProvider:
                                 state.name = event.name
                             state.args_json += event.args_delta
                             yield event
-        except httpx.HTTPError as exc:
-            raise TransportError(str(exc)) from exc
+        except httpx.HTTPError:
+            raise TransportError("OpenRouter HTTP transport error") from None
 
         if not finished:
             raise TransportError("OpenRouter stream ended before completion")

@@ -12,6 +12,8 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from ricky.agent import AgentSession
+from ricky.agent.events import PermissionRequestedEvent
+from ricky.agent.tool_dispatch import decide_tool_permission
 from ricky.config import (
     GcalSettings,
     GoogleAccountSettings,
@@ -19,6 +21,9 @@ from ricky.config import (
     GoogleSettings,
     RickySettings,
 )
+from ricky.llm import ToolCallPart
+from ricky.permissions import PermissionEngine, PermissionResponse, Policy
+from ricky.tools import ToolRegistry
 from ricky.tools.base import ToolContext
 from ricky.tools.integrations.gcal import GcalToolset
 from ricky.tools.integrations.gcal.client import GcalClient, GcalError
@@ -407,6 +412,74 @@ async def test_update_patches_only_provided_fields(tmp_path: Path) -> None:
         "location": "",
     }
     await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"summary": "Updated title"},
+        {"location": ""},
+        {"add_attendees": ["new@example.com"]},
+    ],
+)
+async def test_partial_update_through_registry_and_permission_dispatch(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    requests: list[httpx.Request] = []
+    reviews: list[PermissionRequestedEvent] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_event_payload())
+
+    async def responder(event: PermissionRequestedEvent) -> PermissionResponse:
+        reviews.append(event)
+        return PermissionResponse(decision="allow")
+
+    client = _client(handler)
+    try:
+        tool = GcalUpdateEventTool(client)
+        registry = ToolRegistry([tool])
+        ctx = _context(tmp_path)
+        args = {"account": "work", "event_id": "event-1", **changes}
+        prepared = registry.prepare_args(tool.name, args)
+        assert prepared.error is None
+        serialized = GcalUpdateEventParams.model_validate(args).model_dump_json()
+        restored = GcalUpdateEventParams.model_validate_json(serialized)
+        assert restored.model_dump_json() == serialized
+        assert restored.model_fields_set.intersection(
+            {"summary", "start", "end", "timezone", "description", "location"}
+        ) == changes.keys() - {"add_attendees"}
+        outcome = await decide_tool_permission(
+            session=ctx.session,
+            registry=registry,
+            engine=PermissionEngine(Policy()),
+            responder=responder,
+            turn_id="calendar-update",
+            call=ToolCallPart(id="update", name=tool.name, args=args),
+            ctx=ctx,
+        )
+        assert outcome.decision == "allow"
+        assert len(reviews) == 1
+        assert outcome.normalized_args is not None
+        result = await registry.dispatch(tool.name, outcome.normalized_args, ctx)
+        assert not result.is_error
+        assert result.effect_receipt is not None
+        assert result.effect_receipt.disposition == "performed"
+        if "add_attendees" in changes:
+            assert [request.method for request in requests] == ["GET", "PATCH"]
+            expected_patch = {
+                "attendees": [
+                    *cast(list[dict[str, object]], _event_payload()["attendees"]),
+                    {"email": "new@example.com"},
+                ]
+            }
+        else:
+            assert [request.method for request in requests] == ["PATCH"]
+            expected_patch = changes
+        assert json.loads(requests[-1].content) == expected_patch
+    finally:
+        await client.aclose()
 
 
 def test_update_rejects_explicit_null_fields() -> None:

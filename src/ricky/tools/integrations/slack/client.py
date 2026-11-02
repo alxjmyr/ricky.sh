@@ -172,10 +172,11 @@ class SlackClient:
                     response = await self._http().post(f"/{method}", json=json_body)
                 else:
                     response = await self._http().post(f"/{method}", data=params or {})
-            except httpx.HTTPError as exc:
+            except httpx.HTTPError:
+                # HTTPX diagnostics may include the complete Authorization header.
                 if not retryable:
-                    raise SlackSendUnknownError() from exc
-                raise SlackTransportError(f"Slack {method} failed: {exc}") from exc
+                    raise SlackSendUnknownError() from None
+                raise SlackTransportError(f"Slack {method} failed: HTTP transport error") from None
 
             if response.status_code == 429 and retryable and attempts < READ_RETRY_LIMIT:
                 attempts += 1
@@ -234,8 +235,8 @@ class SlackClient:
         try:
             response = await self._http().get(url_private)
             response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise SlackTransportError(f"Slack file download failed: {exc}") from exc
+        except httpx.HTTPError:
+            raise SlackTransportError("Slack file download failed: HTTP transport error") from None
         return response.content
 
     async def upload_external(self, url: str, attachment: LoadedAttachment) -> None:
@@ -261,8 +262,8 @@ class SlackClient:
                     },
                 )
                 response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise SlackTransportError(f"Slack file upload failed: {exc}") from exc
+        except httpx.HTTPError:
+            raise SlackTransportError("Slack file upload failed: HTTP transport error") from None
 
     # --- Directory caches (toolset lifetime) ------------------------------
 

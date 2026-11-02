@@ -90,8 +90,8 @@ class AnthropicProvider:
                     timeout=self._timeout,
                 )
                 await _raise_for_status(response)
-            except httpx.HTTPError as exc:
-                raise TransportError(str(exc)) from exc
+            except httpx.HTTPError:
+                raise TransportError("Anthropic HTTP transport error") from None
 
             try:
                 payload = response.json()
@@ -246,8 +246,8 @@ class AnthropicProvider:
                             stop_reason=_map_stop_reason(stop_reason),
                         )
                         return
-        except httpx.HTTPError as exc:
-            raise TransportError(str(exc)) from exc
+        except httpx.HTTPError:
+            raise TransportError("Anthropic HTTP transport error") from None
 
         raise TransportError("Anthropic stream ended before message_stop")
 

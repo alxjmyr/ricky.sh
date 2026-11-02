@@ -183,6 +183,9 @@ Ricky can read:
 Ricky can create and update events, respond to invitations, and delete events. Every change
 requires permission and can notify attendees or the organizer.
 
+For event updates, omit fields to leave them unchanged. Use an empty string to clear a
+description or location; explicit null values are rejected.
+
 Use calendar and event IDs returned by an earlier read. Event listing defaults to the next seven
 days. Availability reports busy blocks; free time is the remainder of the interval you requested.
 
@@ -228,3 +231,5 @@ installation root. Gmail downloads use the profile that owns the selected Google
 `<user_data_dir>/profiles/<name>/downloads/gmail`. Downloads remain attachable only while their
 owning profile is in the active scope. Browser downloads from Ricky-owned sessions use
 `<user_data_dir>/profiles/<name>/downloads/browser` and follow the same logical-reference rule.
+Gmail downloads with the same filename receive distinct names, including when downloaded
+concurrently; existing attachments are preserved.

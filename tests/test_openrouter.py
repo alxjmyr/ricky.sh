@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from typing import Any
 
 import httpx
@@ -567,3 +568,30 @@ async def test_stream_reported_failure_after_output_never_replays_or_completes(
                 events.append(event)
     assert events == [TextDelta(delta="partial")]
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["catalog", "stream"])
+async def test_transport_diagnostics_do_not_expose_credentials(operation: str) -> None:
+    secret = "synthetic-openrouter-credential"
+    settings = _settings()
+    settings.openrouter_api_key = SecretStr(secret + "\n")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        # Match HTTPX's invalid-header failure, including its sensitive detail.
+        raise httpx.LocalProtocolError(f"Illegal header value {request.headers['authorization']!r}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = OpenRouterProvider(settings, client=client, max_retries=2, retry_base_seconds=0)
+        with pytest.raises(TransportError) as caught:
+            if operation == "catalog":
+                await provider.list_models()
+            else:
+                await collect(provider.stream(CompletionRequest(model="m", messages=[])))
+
+    assert str(caught.value) == "OpenRouter HTTP transport error"
+    assert secret not in "".join(traceback.format_exception(caught.value))
+    assert attempts == (1 if operation == "catalog" else 2)

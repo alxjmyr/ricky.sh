@@ -207,7 +207,11 @@ class GmailDownloadAttachmentParams(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     account: GoogleAccountId
-    message_id: str = Field(description="Message id from the attachment metadata line.")
+    message_id: str = Field(
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="Message id from the attachment metadata line (one URL-safe component).",
+    )
     attachment_id: str = Field(description="Attachment id from the attachment metadata line.")
     filename: str | None = Field(
         default=None,
@@ -908,10 +912,10 @@ class GmailDownloadAttachmentTool(_GmailMutationTool):
 
         filename = f"{args.message_id}-{_safe_name(attachment.filename)}"
         try:
-            destination = _download_root(ctx, args.account) / filename
+            download_root = _download_root(ctx, args.account)
         except ValueError as exc:
             raise GmailError(f"gmail.download_dir escapes profile data directory: {exc}") from exc
-        destination = await asyncio.to_thread(_collision_safe, destination)
+        destination = _confined_destination(download_root, filename)
 
         attachment_payload = await self._client.call(
             args.account,
@@ -927,7 +931,19 @@ class GmailDownloadAttachmentTool(_GmailMutationTool):
             raise GmailError(
                 f"Gmail attachment {attachment.attachment_id!r} returned invalid base64 data"
             ) from exc
-        await asyncio.to_thread(_atomic_write, destination, content)
+        publication = asyncio.create_task(
+            asyncio.to_thread(_atomic_write, download_root, destination, content)
+        )
+        try:
+            destination = await asyncio.shield(publication)
+        except asyncio.CancelledError:
+            # A worker cannot be cancelled: settle publication and cleanup before returning.
+            while not publication.done():
+                with suppress(Exception, asyncio.CancelledError):
+                    await asyncio.shield(publication)
+            with suppress(Exception):
+                publication.result()
+            raise
         return ToolResult(
             content=(
                 f"[{args.account}] Downloaded attachment to {destination} ({len(content)} bytes)."
@@ -1184,17 +1200,16 @@ def _download_root(ctx: ToolContext, account: str) -> Path:
     )
 
 
-def _collision_safe(path: Path) -> Path:
-    if not path.exists():
-        return path
-    for index in range(2, 10_000):
-        candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
-        if not candidate.exists():
-            return candidate
-    raise GmailError(f"could not choose a collision-safe name under {path.parent}")
+def _confined_destination(root: Path, filename: str) -> Path:
+    candidate = root / filename
+    if not candidate.resolve().is_relative_to(root.resolve()):
+        raise GmailError("attachment destination escapes Gmail download directory")
+    return candidate
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
+def _atomic_write(root: Path, path: Path, content: bytes) -> Path:
+    # Validate independently of the argument schema, including existing symlinks.
+    _confined_destination(root, path.name)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.parent.chmod(0o700)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -1215,9 +1230,15 @@ def _atomic_write(path: Path, content: bytes) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
-    except BaseException:
-        with suppress(OSError):
-            temporary.unlink()
-        raise
+        for index in range(1, 10_000):
+            name = path.name if index == 1 else f"{path.stem}-{index}{path.suffix}"
+            candidate = _confined_destination(root, name)
+            try:
+                # The complete private file becomes visible atomically, without replacement.
+                os.link(temporary, candidate)
+            except FileExistsError:
+                continue
+            return candidate
+        raise GmailError(f"could not choose a collision-safe name under {root}")
+    finally:
+        temporary.unlink(missing_ok=True)
