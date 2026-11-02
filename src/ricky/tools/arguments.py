@@ -6,7 +6,7 @@ import json
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
@@ -157,7 +157,8 @@ def _resolve_union_candidate(
     for candidate in candidates:
         normalized, changed = _normalize_for_annotation(value, candidate, path)
         try:
-            TypeAdapter(candidate).validate_python(normalized)
+            # Candidates are runtime annotations extracted from Pydantic model fields.
+            TypeAdapter(cast(Any, candidate)).validate_python(normalized)
         except ValidationError:
             continue
         valid.append((normalized, changed))

@@ -195,14 +195,14 @@ def register_gateway_commands(gateway_app: typer.Typer) -> None:
         _run_gateway_command(_process_once)
 
     @doctor_app.command("telegram")
-    def doctor_telegram(account: str = typer.Argument(...)) -> None:
+    def doctor_telegram(account: str = typer.Argument(..., metavar="ACCOUNT")) -> None:
         """Explicitly call Telegram getMe for one configured account."""
 
         _run_gateway_command(lambda renderer: _doctor_telegram(account, renderer))
 
     @poll_app.command("telegram")
     def poll_telegram(
-        account: str = typer.Argument(...),
+        account: str = typer.Argument(..., metavar="ACCOUNT"),
         once: bool = typer.Option(False, "--once"),
     ) -> None:
         """Long-poll Telegram once and atomically persist the resulting batch."""
