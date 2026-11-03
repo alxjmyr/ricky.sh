@@ -54,7 +54,12 @@ from ricky.agent.tool_dispatch import (
     decide_tool_permission,
     deny_permission,
 )
-from ricky.agent.tool_loading import ToolLoadingProfile, ToolLoadingState
+from ricky.agent.tool_loading import (
+    MAX_NO_PROGRESS_LOADING_ROUNDS,
+    TOOL_LOADING_RECOVERY,
+    ToolLoadingProfile,
+    ToolLoadingState,
+)
 from ricky.config import ContextSettings, RickySettings
 from ricky.llm import (
     ImagePart,
@@ -370,6 +375,7 @@ class AgentLoop:
         rejected_call_counts: dict[str, int] = {}
         runtime_failure_counts: dict[tuple[str, str, str], int] = {}
         runtime_recovery: str | None = None
+        no_progress_loading_rounds = 0
         compaction = ContextSettings.model_validate(
             session.settings_snapshot.get("context", {})
         ).compaction
@@ -391,6 +397,8 @@ class AgentLoop:
                 iterations += 1
                 iteration_registry = self._registry_for(session)
                 iteration_system_sections = self._system_sections(session, extra_system_sections)
+                if no_progress_loading_rounds == MAX_NO_PROGRESS_LOADING_ROUNDS - 1:
+                    iteration_system_sections["tool_loading_recovery"] = TOOL_LOADING_RECOVERY
                 if runtime_recovery is not None:
                     iteration_system_sections["tool_runtime_recovery"] = runtime_recovery
                     runtime_recovery = None
@@ -630,6 +638,35 @@ class AgentLoop:
                         usage=turn_usage,
                     )
                     return
+                # Compare callable surfaces, not requested names or success text.
+                # Baseline reloads, reordered names, and duplicate calls in one
+                # response cannot manufacture discovery progress.
+                if self._tool_loading is not None:
+                    loading_only = all(call.name == "load_tools" for call in tool_calls)
+                    prior_names = {tool.name for tool in iteration_registry.tools()}
+                    current_names = {tool.name for tool in self._registry_for(session).tools()}
+                    if loading_only and not current_names - prior_names:
+                        no_progress_loading_rounds += 1
+                    else:
+                        no_progress_loading_rounds = 0
+                    if no_progress_loading_rounds >= MAX_NO_PROGRESS_LOADING_ROUNDS:
+                        message = (
+                            "Stopped repeated tool loading because no new callable tools "
+                            "became available. Use the available definitions or identify "
+                            "the missing capability; reloading cannot change tool schemas."
+                        )
+                        yield AgentErrorEvent(
+                            turn_id=turn_id,
+                            message=message,
+                            error_type="ToolLoadingProgressLimit",
+                        )
+                        yield TurnFinishedEvent(
+                            turn_id=turn_id,
+                            iterations=iterations,
+                            error=message,
+                            usage=turn_usage,
+                        )
+                        return
                 if repair_limit_error is not None or runtime_limit_error is not None:
                     limit_error = repair_limit_error or runtime_limit_error
                     yield AgentErrorEvent(

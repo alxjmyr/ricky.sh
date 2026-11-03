@@ -244,6 +244,13 @@ not in a duplicated tool-result payload. A model response may invoke only
 tools advertised in the request that produced it, including when that response
 also requests loading.
 
+Loading feedback distinguishes newly loaded schemas from tools already
+available. Repeated loading cannot repair invalid arguments or change the
+definition. The shared loop gives corrective guidance and bounds consecutive
+loading-only rounds that expose no new callable tools, while preserving
+incremental loading and ordinary tool execution. This recovery state is
+turn-local, like the loaded selection.
+
 Loaded schemas remain available for the complete user turn and are discarded
 at its end, including failure or cancellation. Inspection at an idle prompt
 reports the next turn's baseline and catalog. Loaded state is ephemeral and

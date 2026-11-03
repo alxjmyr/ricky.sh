@@ -11,6 +11,15 @@ from ricky.tools.registry import ToolRegistry
 
 ToolLoadingProfile = Literal["chat", "gateway"]
 
+TOOL_LOADING_RECOVERY = (
+    "Repeated tool-loading requests added no callable tools. Use an already available "
+    "native tool definition, select a genuinely missing tool from the catalog, or explain "
+    "the concrete blocker. Reloading does not change schemas or fix invalid arguments; "
+    "correct arguments using the existing definition and reported error. Another "
+    "loading-only response that adds no tools will stop this turn."
+)
+MAX_NO_PROGRESS_LOADING_ROUNDS = 3
+
 CHAT_BASELINE = frozenset(
     {
         "run_shell",
@@ -81,7 +90,10 @@ class ToolLoadingState:
             "load_tools with their exact names, then wait for the next response before "
             "calling them. Load related tools together. Loading grants no permission. "
             "Loaded definitions remain available for this user turn only; reload as "
-            "needed on later turns. Skills may suggest tools but do not load them.",
+            "needed on later turns. Do not reload tools already available in this turn. "
+            "Reloading does not change schemas or fix invalid arguments; correct arguments "
+            "using the existing definition and reported error. "
+            "Skills may suggest tools but do not load them.",
         ]
         for tool in eligible.tools():
             if tool.name in self.baseline or getattr(tool, "deferred_until_artifact", False):
@@ -122,10 +134,26 @@ class LoadToolsTool:
                 + ". Choose exact names from the current tool catalog.",
                 is_error=True,
             )
+        available = {tool.name for tool in self._state.registry(self._eligible).tools()}
+        newly_loaded = [name for name in names if name not in available]
+        already_available = [name for name in names if name in available]
         # No await between validation and mutation: a batch is all-or-nothing.
         self._state.loaded.update(names)
-        return ToolResult(
-            content="Schemas available on the next request: "
-            + ", ".join(names)
-            + ". Use their native tool definitions; existing permissions still apply."
+        feedback: list[str] = []
+        if newly_loaded:
+            feedback.append(
+                "Newly loaded schemas available on the next request: "
+                + ", ".join(newly_loaded)
+                + "."
+            )
+        if already_available:
+            feedback.append(
+                "Already available: "
+                + ", ".join(already_available)
+                + ". Invoke these tools directly using their native definitions."
+            )
+        feedback.append(
+            "Reloading does not change schemas or fix invalid arguments; correct arguments "
+            "using the existing definition and reported error. Existing permissions still apply."
         )
+        return ToolResult(content=" ".join(feedback))

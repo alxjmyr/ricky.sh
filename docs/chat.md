@@ -157,6 +157,12 @@ calls, then reset for your next message. Loading does not run the selected
 tools or grant permission to use them. Your configured integrations and normal
 approval rules still apply.
 
+If Ricky requests definitions that are already available, it receives guidance
+to use those tools directly. Reloading does not change supported arguments or
+fix a failed call. If it repeatedly loads tools without making any new ones
+available, Ricky gives recovery feedback and then stops with an explanation
+instead of continuing the loading loop.
+
 Read-only tools run automatically by default. When Ricky proposes a mutating or destructive tool,
 the prompt shows:
 

@@ -188,7 +188,10 @@ checks; they do not measure provider cache hits or model quality.
 
 `test_tool_loading.py` owns batched schema loading, same-response rejection,
 argument and permission enforcement, cancellation, concurrent session isolation,
-result bounds, and deferred artifact-reader availability. `test_tool_loading_runtime.py`
+result bounds, and deferred artifact-reader availability. It also covers redundant
+loading feedback and bounded loading-only recovery in both loading profiles,
+including name reordering, batched calls, incremental loading, and turn reset.
+`test_tool_loading_runtime.py`
 checks actual chat and reconstructed gateway composition, eligible catalog scope,
 native tool execution, and turn-boundary reset. Provider-wire coverage in
 `test_prompt_cache_context.py` verifies that loaded nested schemas remain intact

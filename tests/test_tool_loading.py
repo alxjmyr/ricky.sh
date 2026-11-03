@@ -10,9 +10,14 @@ import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
 from ricky.agent import AgentLoop, AgentSession
-from ricky.agent.events import ToolCallRejectedEvent, TurnFinishedEvent
+from ricky.agent.events import AgentErrorEvent, ToolCallRejectedEvent, TurnFinishedEvent
 from ricky.agent.session import SessionArtifactRecord
-from ricky.agent.tool_loading import LoadToolsParams, LoadToolsTool, ToolLoadingState
+from ricky.agent.tool_loading import (
+    LoadToolsParams,
+    LoadToolsTool,
+    ToolLoadingProfile,
+    ToolLoadingState,
+)
 from ricky.config import RickySettings
 from ricky.llm import (
     CompletionRequest,
@@ -346,3 +351,239 @@ async def test_concurrent_sessions_have_independent_loaded_schemas() -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
     assert loop.inspect_context(first_session).tool_count == 1
     assert loop.inspect_context(second_session).tool_count == 1
+
+
+@pytest.mark.parametrize("profile", ["chat", "gateway"])
+async def test_redundant_loading_rounds_stop_independent_of_names_and_order(
+    profile: ToolLoadingProfile,
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    first, second = RecordingTool(), RecordingTool("service_other")
+    provider = Provider(
+        calls(("load_tools", {"names": [first.name, second.name]})),
+        calls(("load_tools", {"names": [first.name, second.name]})),
+        calls(("load_tools", {"names": [second.name, first.name]})),
+        calls(("load_tools", {"names": [second.name]})),
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([first, second]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read")]
+    errors = [event for event in events if isinstance(event, AgentErrorEvent)]
+    assert [event.error_type for event in errors] == ["ToolLoadingProgressLimit"]
+    assert len(provider.requests) == 4
+    assert isinstance(events[-1], TurnFinishedEvent) and events[-1].error is not None
+    assert first.calls == second.calls == []
+    assert loop.inspect_context(session).tool_count == 1
+
+    # The failure and its counter belong to this turn, not its retained history.
+    provider.messages.extend(
+        [
+            calls(("load_tools", {"names": [first.name]})),
+            calls(("load_tools", {"names": [first.name]})),
+            calls((first.name, {"value": "recovered"})),
+            Message.text("assistant", "done"),
+        ]
+    )
+    events = [event async for event in loop.run_turn(session, "try again")]
+    assert isinstance(events[-1], TurnFinishedEvent) and events[-1].error is None
+    assert names(provider.requests[4]) == {"load_tools"}
+    assert first.calls == ["recovered"]
+
+
+@pytest.mark.parametrize("profile", ["chat", "gateway"])
+async def test_redundant_loading_warns_and_allows_recovery_after_invalid_arguments(
+    profile: ToolLoadingProfile,
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    tool = RecordingTool()
+    provider = Provider(
+        calls(("load_tools", {"names": [tool.name]})),
+        calls((tool.name, {"value": 123})),
+        calls(("load_tools", {"names": [tool.name]})),
+        calls(("load_tools", {"names": [tool.name]})),
+        calls((tool.name, {"value": "corrected"})),
+        Message.text("assistant", "done"),
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read")]
+    assert isinstance(events[-1], TurnFinishedEvent) and events[-1].error is None
+    assert tool.calls == ["corrected"]
+    assert any(isinstance(event, ToolCallRejectedEvent) for event in events)
+    assert (
+        "Repeated tool-loading requests added no callable tools."
+        in provider.requests[4].model_dump_json()
+    )
+    assert (
+        "Repeated tool-loading requests added no callable tools."
+        not in provider.requests[5].model_dump_json()
+    )
+
+
+@pytest.mark.parametrize("profile", ["chat", "gateway"])
+async def test_loading_progress_and_tool_use_reset_no_progress_rounds(
+    profile: ToolLoadingProfile,
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    first, second = RecordingTool(), RecordingTool("service_other")
+    duplicate = calls(("load_tools", {"names": [first.name]}))
+    provider = Provider(
+        calls(("load_tools", {"names": [first.name]})),
+        duplicate,
+        duplicate,
+        calls(("load_tools", {"names": [first.name, second.name]})),
+        duplicate,
+        duplicate,
+        calls(
+            ("load_tools", {"names": [first.name]}),
+            (second.name, {"value": "mixed round"}),
+        ),
+        duplicate,
+        duplicate,
+        calls((first.name, {"value": "ordinary round"})),
+        duplicate,
+        duplicate,
+        Message.text("assistant", "done"),
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([first, second]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read both")]
+    assert isinstance(events[-1], TurnFinishedEvent) and events[-1].error is None
+    assert len(provider.requests) == 13
+    assert first.calls == ["ordinary round"]
+    assert second.calls == ["mixed round"]
+    assert second.name not in names(provider.requests[3])
+    assert second.name in names(provider.requests[4])
+
+
+@pytest.mark.parametrize("profile", ["chat", "gateway"])
+async def test_duplicate_load_calls_in_one_response_count_as_one_round(
+    profile: ToolLoadingProfile,
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    tool = RecordingTool()
+    duplicate_call: tuple[str, dict[str, object]] = ("load_tools", {"names": [tool.name]})
+    provider = Provider(
+        calls(("load_tools", {"names": [tool.name]})),
+        calls(*[duplicate_call for _ in range(4)]),
+        calls((tool.name, {"value": "read"})),
+        Message.text("assistant", "done"),
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read")]
+    assert isinstance(events[-1], TurnFinishedEvent) and events[-1].error is None
+    assert tool.calls == ["read"]
+    assert (
+        "Repeated tool-loading requests added no callable tools."
+        not in provider.requests[2].model_dump_json()
+    )
+
+
+@pytest.mark.parametrize("profile,baseline", [("chat", "read_file"), ("gateway", "delegate_task")])
+async def test_loading_baseline_only_is_no_progress(
+    profile: ToolLoadingProfile, baseline: str
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    tool = RecordingTool(baseline)
+    provider = Provider(*[calls(("load_tools", {"names": [baseline]})) for _ in range(3)])
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read")]
+    assert len(provider.requests) == 3
+    assert any(
+        isinstance(event, AgentErrorEvent) and event.error_type == "ToolLoadingProgressLimit"
+        for event in events
+    )
+    assert tool.calls == []
+
+
+@pytest.mark.parametrize("profile,baseline", [("chat", "read_file"), ("gateway", "delegate_task")])
+async def test_loading_feedback_distinguishes_new_loaded_baseline_and_artifact_tools(
+    tmp_path, profile: ToolLoadingProfile, baseline: str
+) -> None:
+    class ArtifactReader(RecordingTool):
+        deferred_until_artifact = True
+
+    settings = RickySettings()
+    context = ToolContext(cwd=tmp_path, settings=settings, session=session_for(settings))
+    first, second = RecordingTool(), RecordingTool("service_other")
+    reader = ArtifactReader("read_tool_artifact")
+    registry = ToolRegistry([first, second, RecordingTool(baseline), reader])
+    state = ToolLoadingState(profile)
+    loader = LoadToolsTool(state, registry)
+    initial = await loader.run(LoadToolsParams(names=[first.name]), context)
+    assert not initial.is_error
+    assert f"Newly loaded schemas available on the next request: {first.name}." in initial.content
+    assert "Already available:" not in initial.content
+
+    mixed = await loader.run(
+        LoadToolsParams(names=[first.name, second.name, baseline, reader.name, first.name]),
+        context,
+    )
+    assert not mixed.is_error
+    assert f"Newly loaded schemas available on the next request: {second.name}." in mixed.content
+    assert f"Already available: {first.name}, {baseline}, {reader.name}." in mixed.content
+    assert "Invoke these tools directly" in mixed.content
+    assert "Reloading does not change schemas or fix invalid arguments" in mixed.content
+    assert "existing definition and reported error" in mixed.content
+    assert "Existing permissions still apply" in mixed.content
+
+    repeated = await loader.run(LoadToolsParams(names=[first.name]), context)
+    assert not repeated.is_error
+    assert "Newly loaded" not in repeated.content
+    assert f"Already available: {first.name}." in repeated.content
+    assert state.registry(registry).get(first.name) is first
+    assert state.registry(registry).get(second.name) is second
+    assert "Reloading does not change schemas or fix invalid arguments" in state.catalog(registry)
+
+
+@pytest.mark.parametrize("profile", ["chat", "gateway"])
+async def test_changing_unavailable_load_selections_cannot_loop(
+    profile: ToolLoadingProfile,
+) -> None:
+    settings = RickySettings()
+    session = session_for(settings)
+    tool = RecordingTool()
+    provider = Provider(
+        *[calls(("load_tools", {"names": [tool.name, f"missing_{index}"]})) for index in range(3)]
+    )
+    loop = AgentLoop(
+        provider=provider,
+        registry=ToolRegistry([tool]),
+        settings=settings,
+        tool_loading=profile,
+    )
+    events = [event async for event in loop.run_turn(session, "read")]
+    assert len(provider.requests) == 3
+    assert all(names(request) == {"load_tools"} for request in provider.requests)
+    assert any(
+        isinstance(event, AgentErrorEvent) and event.error_type == "ToolLoadingProgressLimit"
+        for event in events
+    )
+    assert tool.calls == []

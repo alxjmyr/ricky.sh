@@ -92,6 +92,16 @@ their schemas were advertised in the request that produced the call. Loading
 and calling a newly selected tool in the same response does not satisfy this
 requirement. Invalid selections do not partially load valid names.
 
+Loading feedback distinguishes newly selected schemas from tools already
+available, including baseline tools. Repeated loading is harmless but does not
+change a schema or repair invalid arguments; the model must use the available
+definition and reported error to correct its call. The shared loop bounds
+consecutive response rounds containing only loading calls that add no callable
+schemas: it gives recovery guidance after two rounds and stops after three.
+Multiple loading calls in one response count as one round, regardless of name
+order. Adding a callable schema or attempting a non-loading tool resets this
+counter. The counter belongs to the current turn.
+
 Write descriptions so their opening text identifies the tool's purpose: the
 compact catalog uses a bounded description for discovery. Detailed argument
 guidance belongs in the parameter schema and remains available after loading.
