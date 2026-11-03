@@ -69,6 +69,20 @@ class LoginWorker:
                 "verify the account name from a fresh observation."
             )
             return
+        advertised = {tool.name for tool in request.tools}
+        needed = {
+            "browser_session_open_resource",
+            "browser_navigate",
+            "browser_snapshot",
+            "browser_fill_protected",
+            "browser_commit",
+            "browser_request_challenge",
+        }
+        if "load_tools" in advertised and not needed <= advertised:
+            # Foreground chat discovers the same tools the background contract
+            # provides upfront. Loading is a real model iteration, not a login step.
+            yield _tool("load_login_tools", "load_tools", {"names": sorted(needed)})
+            return
         self.step += 1
         results = [p for m in request.messages for p in m.content if p.kind == "tool_result"]
         if results:

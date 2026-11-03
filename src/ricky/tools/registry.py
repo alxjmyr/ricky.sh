@@ -69,6 +69,10 @@ class ToolRegistry:
         """Return registered tools in deterministic insertion order."""
         return list(self._tools.values())
 
+    def with_tools(self, tools: list[Tool] | tuple[Tool, ...]) -> ToolRegistry:
+        """Derive a tool surface while preserving this registry's dispatch limits."""
+        return ToolRegistry(tools, max_result_chars=self._max_result_chars)
+
     def review_mode(self, name: str) -> ReviewMode:
         """Return one registered tool's validated interactive-review mode."""
 

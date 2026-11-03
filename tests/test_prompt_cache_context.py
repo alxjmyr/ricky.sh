@@ -201,3 +201,58 @@ def test_claude_new_user_delta_and_affinity_survive_clock_changes() -> None:
     assert "provider" not in first  # No endpoint pinning or failover override.
     anonymous = request.model_copy(update={"session_id": None})
     assert "session_id" not in to_openrouter_request(anonymous)
+
+
+async def test_loaded_nested_schema_reaches_each_provider_without_changing_catalog() -> None:
+    from ricky.agent.tool_loading import LoadToolsParams, LoadToolsTool, ToolLoadingState
+    from ricky.browser.tools import browser_tool_descriptors
+    from ricky.tools import ToolContext, builtin_tools
+
+    registry = ToolRegistry([*builtin_tools(), *browser_tool_descriptors()])
+    state = ToolLoadingState("chat")
+    session = _session()
+    settings = RickySettings()
+    context = ToolContext(cwd=Path.cwd(), settings=settings, session=session)
+    catalog = state.catalog(registry)
+    initial = assemble_context(
+        session,
+        state.registry(registry),
+        turn_id="initial",
+        iteration=1,
+        extra_system_sections={"tool_discovery_catalog": catalog},
+        now=FIRST,
+    ).request
+    result = await LoadToolsTool(state, registry).run(
+        LoadToolsParams(names=["browser_commit"]), context
+    )
+    assert not result.is_error
+    loaded = assemble_context(
+        session,
+        state.registry(registry),
+        turn_id="loaded",
+        iteration=2,
+        extra_system_sections={"tool_discovery_catalog": state.catalog(registry)},
+        now=FIRST,
+    ).request
+    assert loaded.messages == initial.messages
+    assert state.catalog(registry) == catalog
+    expected = next(spec for spec in registry.specs() if spec.name == "browser_commit")
+    assert "$defs" in expected.parameters
+    for request, expected_present in ((initial, False), (loaded, True)):
+        openrouter_tools = {
+            entry["function"]["name"]: entry["function"]
+            for entry in to_openrouter_request(request)["tools"]
+        }
+        anthropic_tools = {
+            entry["name"]: entry
+            for entry in to_anthropic_request(request, default_max_tokens=1024)["tools"]
+        }
+        system, _ = to_claude_prompt(request)
+        assert ("browser_commit" in openrouter_tools) is expected_present
+        assert ("browser_commit" in anthropic_tools) is expected_present
+        # The discovery catalog names this tool in both requests; only the loaded
+        # protocol should carry its nested transaction definitions.
+        assert ("BrowserFinancialTransactionEnvelope" in system) is expected_present
+        if expected_present:
+            assert openrouter_tools[expected.name]["parameters"] == expected.parameters
+            assert anthropic_tools[expected.name]["input_schema"] == expected.parameters

@@ -82,6 +82,30 @@ and return a response; they cannot downgrade the declaration or manufacture a
 remembered grant. Do not special-case tool names in runners when this reusable
 contract applies.
 
+## Discovery and schema loading
+
+CLI chat and gateway foreground initially advertise a small baseline and a
+compact catalog of their eligible tools. The model explicitly requests one or
+more exact names with `load_tools`; full native parameter schemas are then
+advertised for the remainder of that turn. Other tools cannot be called until
+their schemas were advertised in the request that produced the call. Loading
+and calling a newly selected tool in the same response does not satisfy this
+requirement. Invalid selections do not partially load valid names.
+
+Write descriptions so their opening text identifies the tool's purpose: the
+compact catalog uses a bounded description for discovery. Detailed argument
+guidance belongs in the parameter schema and remains available after loading.
+Do not weaken `Params` validation to reduce prompt size. Loading preserves the
+eligible registry's original tool instance and all authorization wrappers.
+It does not authorize an effect, enable an unavailable integration, or expose
+tools outside the runtime's policy.
+
+Loading is ordinary agent-loop context management. Workflow agent steps and
+background jobs advertise their explicitly selected tool sets upfront, and
+workflow tool steps continue dispatching through their compiled contracts.
+Skills may recommend a tool selection as prompt instructions; skill activation
+and `allowed-tools` metadata do not load schemas automatically.
+
 ## Ricky-state mutations
 
 Use `effect_kind = "ricky_state"` for mutations inside a Ricky-owned storage

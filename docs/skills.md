@@ -125,6 +125,11 @@ not bypass Ricky's capability registry or permission checks.
 Keep instructions direct and scoped. Tell Ricky what outcome to produce, what evidence to inspect,
 which constraints matter, and when to stop.
 
+A skill can recommend tools to load together, such as `gmail_search` and
+`gmail_read_message` for email triage. Ricky treats that recommendation as
+instructions for the model. Activating a skill does not automatically load
+tool schemas, enable an integration, or grant permission.
+
 ## Add supporting resources
 
 A skill can refer to passive files inside its bundle. Ricky reads them on demand with a

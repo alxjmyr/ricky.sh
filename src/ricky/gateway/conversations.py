@@ -440,6 +440,7 @@ async def build_gateway_runtime(
             loop = AgentLoop(
                 provider=owned_provider,
                 registry=registry,
+                tool_loading="gateway",
                 settings=route_settings,
                 permission_engine=permissions,
                 cwd=project_root,

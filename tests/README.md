@@ -185,3 +185,13 @@ resume deltas. Adapter image tests cover the runtime suffix with materialized me
 Gateway conversation tests verify stable instructions and session affinity across
 runtime reconstruction while the inbound identity remains fresh. These are payload
 checks; they do not measure provider cache hits or model quality.
+
+`test_tool_loading.py` owns batched schema loading, same-response rejection,
+argument and permission enforcement, cancellation, concurrent session isolation,
+result bounds, and deferred artifact-reader availability. `test_tool_loading_runtime.py`
+checks actual chat and reconstructed gateway composition, eligible catalog scope,
+native tool execution, and turn-boundary reset. Provider-wire coverage in
+`test_prompt_cache_context.py` verifies that loaded nested schemas remain intact
+and the discovery catalog stays stable. Background and workflow suites retain
+their existing explicit tool-set and effect-boundary assertions; they do not use
+chat schema loading.

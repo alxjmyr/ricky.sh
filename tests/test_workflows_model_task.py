@@ -231,6 +231,8 @@ async def test_read_only_agent_uses_private_tool_transcript_and_validates_final_
     assert isinstance(result.output, dict)
     assert result.output["nested"] == {"score": 4}
     assert [call.name for call in calls] == ["reader"]
+    assert [spec.name for spec in provider.requests[0].tools] == ["reader"]
+    assert provider.requests[1].tools == provider.requests[0].tools
     assert len(provider.requests[0].messages) == 2
     assert any(message.role == "tool" for message in provider.requests[1].messages)
     assert all(spec.name != "complete_step" for spec in provider.requests[0].tools)

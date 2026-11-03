@@ -654,6 +654,7 @@ async def build_session_runtime(
             loop = AgentLoop(
                 provider=owned_provider,
                 registry=capabilities.chat_registry,
+                tool_loading="chat",
                 settings=runtime_settings,
                 permission_engine=capabilities.permission_engine,
                 permission_responder=permission_responder,

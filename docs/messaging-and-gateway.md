@@ -80,6 +80,16 @@ foreground agent can use `start_named_job` to queue an authored workflow-backed 
 background job resolves omitted arguments and runs the exact workflow under its standing
 permissions, budget, overlap lock, and audit chain.
 
+Foreground conversations load detailed tool definitions on demand from their
+eligible tool catalog. Common coordination tools remain available from the
+start. Loading a tool does not widen the route's policy or make a
+background-only capability directly callable. Definitions reset between user
+messages; the conversation still retains prior calls and results.
+
+Background workers receive their job- or contract-selected tools upfront.
+They do not need an extra schema-loading step, and their permissions, budgets,
+and outcome-reporting controls remain independent of the foreground selection.
+
 ## Validate the setup
 
 Create the owning profile first with `ricky profile add personal` if it does not exist.

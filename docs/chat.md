@@ -147,6 +147,16 @@ steps.
 
 ## Review tool use
 
+Ricky keeps common tools available and loads other tools' detailed argument
+definitions when it needs them. You may see a `load_tools` call before an
+integration or browser action. The model can load several tools together from
+a compact catalog; you do not need to manage the selection yourself.
+
+Loaded definitions remain available through the current response and its tool
+calls, then reset for your next message. Loading does not run the selected
+tools or grant permission to use them. Your configured integrations and normal
+approval rules still apply.
+
 Read-only tools run automatically by default. When Ricky proposes a mutating or destructive tool,
 the prompt shows:
 
@@ -212,11 +222,19 @@ Use `/context` when you need to understand what Ricky will send to the model. Th
 the context sections, estimated token use, capacity source, configured reserve, and retained versus
 projected image counts, bytes, pixels, and token estimates.
 
+At an idle prompt, advertised tool definitions cover the baseline for your
+next message. The discovery catalog is accounted separately. Detailed schemas
+loaded during a turn appear in that turn's context reports; older tool calls
+and results remain conversation history after their schemas are unloaded.
+
 Ricky keeps unchanged instructions and conversation history ahead of current runtime data to
 support provider prompt caching. Time, memory, and active skills remain current on each request.
 OpenRouter requests use the conversation's session ID for routing affinity, including across
 gateway turns. Cache reuse depends on the model, provider, and time between requests; it does
 not reduce the model's context usage or change permissions.
+Loading and unloading tool definitions changes the request and can reduce cache
+reuse. The smaller tool context is not a guarantee of lower cost or latency;
+loading a tool can require an additional model request.
 
 Use `/debug` when diagnosing a specific turn. Debug mode displays context assembly, request
 metadata, token usage, normalized tool arguments, and tool results. Debug output can contain

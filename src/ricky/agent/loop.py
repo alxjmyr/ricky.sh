@@ -54,6 +54,7 @@ from ricky.agent.tool_dispatch import (
     decide_tool_permission,
     deny_permission,
 )
+from ricky.agent.tool_loading import ToolLoadingProfile, ToolLoadingState
 from ricky.config import ContextSettings, RickySettings
 from ricky.llm import (
     ImagePart,
@@ -122,7 +123,15 @@ class AgentLoop:
         artifact_store: ToolArtifactSink | None = None,
         deferred_tools: tuple[Tool, ...] = (),
         turn_cleanup: Callable[[], Awaitable[None]] | None = None,
+        tool_loading: ToolLoadingProfile | None = None,
     ) -> None:
+        if tool_loading is not None and (
+            registry.get("load_tools") is not None
+            or any(tool.name == "load_tools" for tool in deferred_tools)
+        ):
+            raise ValueError("load_tools is reserved for harness tool discovery")
+        self._tool_loading: ToolLoadingProfile | None = tool_loading
+        self._tool_loading_states: dict[str, ToolLoadingState] = {}
         self._provider = provider
         self._registry = registry
         self._settings = settings
@@ -152,7 +161,7 @@ class AgentLoop:
             skill_registry=self._skill_registry,
             memory=self._memory,
             workflow_registry=self._workflow_registry,
-            extra_system_sections=extra_system_sections,
+            extra_system_sections=self._system_sections(session, extra_system_sections),
             extra_context_sections=extra_context_sections,
         )
 
@@ -188,7 +197,7 @@ class AgentLoop:
             skill_registry=self._skill_registry,
             memory=self._memory,
             workflow_registry=self._workflow_registry,
-            extra_system_sections=extra_system_sections,
+            extra_system_sections=self._system_sections(session, extra_system_sections),
             extra_context_sections=extra_context_sections,
             max_completion_tokens=max_completion_tokens,
             enforce_char_limit=not defer_capacity,
@@ -211,7 +220,7 @@ class AgentLoop:
                 skill_registry=self._skill_registry,
                 memory=self._memory,
                 workflow_registry=self._workflow_registry,
-                extra_system_sections=extra_system_sections,
+                extra_system_sections=self._system_sections(session, extra_system_sections),
                 extra_context_sections=extra_context_sections,
                 max_completion_tokens=max_completion_tokens,
                 enforce_char_limit=False,
@@ -260,6 +269,8 @@ class AgentLoop:
             yield TurnFinishedEvent(turn_id=turn_id, iterations=0, error=message)
             return
         self._active_session_ids.add(session.id)
+        if self._tool_loading is not None:
+            self._tool_loading_states[session.id] = ToolLoadingState(self._tool_loading)
         cleaned = False
 
         async def cleanup_once() -> None:
@@ -281,7 +292,7 @@ class AgentLoop:
                     canonical_input,
                     max_iterations=max_iterations,
                     max_completion_tokens_per_request=max_completion_tokens_per_request,
-                    extra_system_sections=extra_system_sections,
+                    extra_system_sections=self._system_sections(session, extra_system_sections),
                     extra_context_sections=extra_context_sections,
                 )
             ) as events:
@@ -293,6 +304,7 @@ class AgentLoop:
             try:
                 await cleanup_once()
             finally:
+                self._tool_loading_states.pop(session.id, None)
                 self._active_session_ids.discard(session.id)
 
     async def compact_context(
@@ -324,6 +336,7 @@ class AgentLoop:
                     memory=self._memory,
                     workflow_registry=self._workflow_registry,
                     enforce_char_limit=False,
+                    extra_system_sections=self._system_sections(candidate, None),
                 ),
             )
             async with aclosing(
@@ -370,14 +383,14 @@ class AgentLoop:
             await self.validate_image_input(
                 session,
                 user_input,
-                extra_system_sections=extra_system_sections,
+                extra_system_sections=self._system_sections(session, extra_system_sections),
                 extra_context_sections=extra_context_sections,
                 max_completion_tokens=max_completion_tokens_per_request,
             )
             while iterations < iteration_bound:
                 iterations += 1
                 iteration_registry = self._registry_for(session)
-                iteration_system_sections = dict(extra_system_sections or {})
+                iteration_system_sections = self._system_sections(session, extra_system_sections)
                 if runtime_recovery is not None:
                     iteration_system_sections["tool_runtime_recovery"] = runtime_recovery
                     runtime_recovery = None
@@ -718,7 +731,18 @@ class AgentLoop:
             if gate.decision == "error" and gate.error_result is not None:
                 resolved[call.id] = _ResolvedCall(
                     call=call,
-                    result=gate.error_result,
+                    result=(
+                        ToolResult(
+                            content=f"Tool {call.name} is not loaded. Call load_tools with "
+                            "its exact name, then call it on the next response.",
+                            is_error=True,
+                        )
+                        if self._tool_loading is not None
+                        and registry.get(call.name) is None
+                        and self._eligible_registry_for(session).get(call.name) is not None
+                        and call.argument_error is None
+                        else gate.error_result
+                    ),
                     tool_name=call.name,
                 )
             elif gate.decision == "deny":
@@ -980,12 +1004,31 @@ class AgentLoop:
             skill_event=skill_event,
         )
 
+    def _loading_state(self, session: AgentSession) -> ToolLoadingState | None:
+        if self._tool_loading is None:
+            return None
+        return self._tool_loading_states.get(session.id) or ToolLoadingState(self._tool_loading)
+
+    def _system_sections(
+        self, session: AgentSession, sections: Mapping[str, str] | None
+    ) -> dict[str, str]:
+        result = dict(sections or {})
+        state = self._loading_state(session)
+        if state is not None:
+            result["tool_discovery_catalog"] = state.catalog(self._eligible_registry_for(session))
+        return result
+
     def _registry_for(self, session: AgentSession) -> ToolRegistry:
+        eligible = self._eligible_registry_for(session)
+        state = self._loading_state(session)
+        return eligible if state is None else state.registry(eligible)
+
+    def _eligible_registry_for(self, session: AgentSession) -> ToolRegistry:
         """Expose deferred internal readers only once the session can use them."""
         if not session.artifacts or not self._deferred_tools:
             return self._registry
         additions = [tool for tool in self._deferred_tools if self._registry.get(tool.name) is None]
-        return ToolRegistry([*self._registry.tools(), *additions])
+        return self._registry.with_tools([*self._registry.tools(), *additions])
 
     @staticmethod
     def _grant_candidates(

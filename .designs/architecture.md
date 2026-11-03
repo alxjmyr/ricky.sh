@@ -37,7 +37,7 @@ cross-component boundary.
 | Area | Responsibility |
 |---|---|
 | `interfaces/` | Typer/Rich CLI entry points and concrete messaging transports; owns wire rendering and sync-to-async entry. |
-| `runtime/` | Builds one owned capability and session runtime so the advertised and callable resource snapshots match. |
+| `runtime/` | Builds one owned capability and session runtime, selects its eligible tool registry, and chooses its schema-loading policy. |
 | `agent/` | Agent turn state machine, ordinary context assembly, serializable session state, compaction, typed events, and workflow execution service. |
 | `llm/` | Canonical LLM types, provider protocol and factory, and the OpenRouter, Anthropic, and Claude Code adapters. |
 | `tools/`, `skills/`, `capabilities/`, `permissions/`, `authority/` | Executable tools, passive prompt resources, installed capability inventory, interactive policy, and specialized delegated constraints. |
@@ -232,6 +232,38 @@ OpenRouter transmits it as `session_id`; Claude Code retains its existing native
 session mapping. Rebuilding a gateway runtime preserves the identity; a new session
 gets a new identity. Affinity does not pin a provider endpoint, disable failover, or
 alter model selection. Provider-specific cache controls remain adapter-owned.
+
+CLI chat and gateway foreground use explicit, model-directed tool loading. A
+compact catalog describes eligible tools without their argument schemas. Each
+request advertises a small runtime-specific baseline, `load_tools`, and the
+tools loaded during the current turn. The internal artifact reader retains its
+existing availability rule once the session has artifacts. The model can request
+several exact tool names together; the harness validates the complete selection before changing
+the advertised set. Full native argument schemas appear on the next request,
+not in a duplicated tool-result payload. A model response may invoke only
+tools advertised in the request that produced it, including when that response
+also requests loading.
+
+Loaded schemas remain available for the complete user turn and are discarded
+at its end, including failure or cancellation. Inspection at an idle prompt
+reports the next turn's baseline and catalog. Loaded state is ephemeral and
+does not enter session persistence; conversation history retains prior calls
+and results independently. Catalog and schema ordering are deterministic.
+Changing the advertised set can reduce provider cache reuse; fewer context
+tokens do not by themselves prove lower cost or latency.
+
+Loading changes advertisement, never authority. The eligible registry retains
+the original tool instances, validation, permission, guardrail, and effect
+wrappers. A gateway foreground catalog contains only directly eligible tools;
+its separate delegation catalog cannot make background-only tools loadable.
+Each runtime's baseline is intersected with its eligible registry. Skills may
+suggest tools to load but do not activate schemas or grant access.
+
+Background job agents retain their complete job- or contract-selected tool
+sets and lifecycle controls from their first request. Workflow agent steps
+retain their compiled read-only tool sets; deterministic workflow tool steps
+do not depend on the ordinary chat's advertised selection. Tool loading is an
+explicit runtime policy, not a global change to execution registries.
 
 Lossless tool-result offloading uses session-owned artifact references. Semantic compaction replaces
 only the active projection of a settled historical prefix; canonical history

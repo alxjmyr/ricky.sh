@@ -98,6 +98,12 @@ return one JSON value matching a Ricky-owned result schema. Private task
 transcripts are not persisted. Validated outputs, bounded errors, and usage are
 checkpointed; context metrics are emitted as typed debug events.
 
+Ordinary chat's on-demand schema loading does not narrow workflow compilation
+or execution. An `agent` step advertises its complete compiled read-only tool
+list from its first model request; it does not use `load_tools`. A `tool` step
+dispatches its declared call without a model discovery round trip. Starting a
+workflow from chat does not require loading the workflow's internal tools.
+
 Tool steps consume `ToolResult.data` through the tool's declared result model;
 display text is not a data interface. Set `expose_output = false` when later
 steps do not need the returned data. Deterministic transformations belong in
